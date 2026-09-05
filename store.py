@@ -1,7 +1,7 @@
 import random
 import sqlite3
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 
 DB_PATH = 'bot.db'
 
@@ -36,6 +36,12 @@ def clamp_text(value, limit):
 
 def conn():
     return sqlite3.connect(DB_PATH)
+
+
+@contextmanager
+def get_conn():
+    with closing(conn()) as c:
+        yield c
 
 
 def init_db():

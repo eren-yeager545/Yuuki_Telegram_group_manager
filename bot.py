@@ -363,6 +363,10 @@ def ensure_event_loop():
     return loop
 
 
+async def global_error_handler(update, context):
+    logger.error('Exception while handling an update:', exc_info=context.error)
+
+
 def main():
     ensure_event_loop()
     init_db()
@@ -442,6 +446,7 @@ def main():
         add_registered_command(app, *spec)
     app.add_handler(MessageHandler(filters.StatusUpdate.ALL, service_router))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL | filters.ANIMATION | filters.VOICE | filters.AUDIO | filters.CONTACT, message_router))
+    app.add_error_handler(global_error_handler)
     if WEBHOOK_URL:
         url_path = WEBHOOK_PATH.lstrip('/')
         full_url = f"{WEBHOOK_URL.rstrip('/')}/{url_path}"
