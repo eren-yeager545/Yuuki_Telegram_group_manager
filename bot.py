@@ -7,14 +7,14 @@ from collections import defaultdict, deque
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, filters
 from config import BOT_TOKEN, LOG_CHANNEL_ID, QUIZ_INTERVAL_SECONDS, SEEN_UPDATE_COOLDOWN_SECONDS
-from data.store import (
+from store import (
     init_db, get_active_groups, upsert_group, upsert_user, get_filters, get_setting,
     touch_member, get_note, get_random_quiz, get_buttons, list_blacklists,
     get_chat_federation, get_fed_ban, get_expired_temp_actions, clear_temp_action,
     log_admin_action, delete_user_data, get_global_link,
 )
-from handlers.common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, broadcast_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd
-from handlers.admin import *
+from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, broadcast_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd
+from admin import *
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -313,12 +313,12 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif action == 'tmute' and duration:
                     until = int(time.time()) + duration
                     await context.bot.restrict_chat_member(chat.id, user.id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
-                    from data.store import add_temp_action
+                    from store import add_temp_action
                     add_temp_action(chat.id, user.id, 'tmute', until)
                 elif action == 'tban' and duration:
                     until = int(time.time()) + duration
                     await context.bot.ban_chat_member(chat.id, user.id, until_date=until)
-                    from data.store import add_temp_action
+                    from store import add_temp_action
                     add_temp_action(chat.id, user.id, 'tban', until)
             except Exception:
                 pass
