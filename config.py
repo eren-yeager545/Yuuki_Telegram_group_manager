@@ -13,8 +13,3 @@ SEEN_UPDATE_COOLDOWN_SECONDS = int(os.getenv('SEEN_UPDATE_COOLDOWN_SECONDS', '21
 
 SUPPORT_GROUP_URL = os.getenv('SUPPORT_GROUP_URL', 'https://t.me/your_support_group')
 UPDATE_CHANNEL_URL = os.getenv('UPDATE_CHANNEL_URL', 'https://t.me/your_update_channel')
-
-PERSONA = {
-    'name': os.getenv('PERSONA_NAME', 'Yuuki'),
-    'city': os.getenv('PERSONA_CITY', 'Tokyo'),
-}

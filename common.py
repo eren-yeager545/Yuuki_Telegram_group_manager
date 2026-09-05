@@ -1,6 +1,6 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from config import OWNER_IDS, SUDO_USERS, PERSONA, SUPPORT_GROUP_URL, UPDATE_CHANNEL_URL
+from config import OWNER_IDS, SUDO_USERS, SUPPORT_GROUP_URL, UPDATE_CHANNEL_URL
 from store import get_global_link, set_global_link
 from helpers import is_owner_or_sudo
 
@@ -57,7 +57,7 @@ def build_category_help_text(registry: dict, category: str) -> str:
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     registry = context.application.bot_data.get('help_registry', {})
     text = (
-        f"Hi, I am {PERSONA['name']} 🌸 A sweet college girl from {PERSONA['city']} who keeps groups tidy.\n\n"
+        "Hi, I am a Telegram group manager bot that keeps groups tidy.\n\n"
         "Use the buttons below to read the privacy policy, browse command help by category, or join official support and updates.\n\n"
         "Data notice: the bot stores only operational moderation and settings data needed for features like warns, reports, notes, welcomes, logs, federation tools, and quiz/game state."
     )
