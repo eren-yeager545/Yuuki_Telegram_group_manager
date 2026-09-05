@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import random
 import re
@@ -349,7 +350,21 @@ async def post_init(app: Application):
     app.job_queue.run_repeating(expire_temp_actions, interval=60, first=60)
 
 
+
+def ensure_event_loop():
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop
+
+
 def main():
+    ensure_event_loop()
     init_db()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     user_cmds = [
