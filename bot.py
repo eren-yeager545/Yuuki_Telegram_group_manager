@@ -142,18 +142,6 @@ async def hourly_quiz(context: ContextTypes.DEFAULT_TYPE):
             logger.warning('Quiz failed [REDACTED_TARGET]: %s', type(e).__name__)
 
 
-async def expire_temp_actions(context: ContextTypes.DEFAULT_TYPE):
-    for chat_id, user_id, action, _until_ts in get_expired_temp_actions():
-        try:
-            if action == 'tmute':
-                perms = ChatPermissions(can_send_messages=True, can_send_audios=True, can_send_documents=True, can_send_photos=True, can_send_videos=True, can_send_video_notes=True, can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True, can_add_web_page_previews=True, can_change_info=False, can_invite_users=True, can_pin_messages=False, can_manage_topics=False)
-                await context.bot.restrict_chat_member(chat_id, user_id, permissions=perms)
-            elif action == 'tban':
-                await context.bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
-        except Exception:
-            pass
-        clear_temp_action(chat_id, user_id, action)
-
 
 async def run_broadcast(message: str, context: ContextTypes.DEFAULT_TYPE):
     groups = get_active_groups()
@@ -347,7 +335,6 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(app: Application):
     app.bot_data['broadcast_runner'] = run_broadcast
     app.job_queue.run_repeating(hourly_quiz, interval=QUIZ_INTERVAL_SECONDS, first=30)
-    app.job_queue.run_repeating(expire_temp_actions, interval=60, first=60)
 
 
 
