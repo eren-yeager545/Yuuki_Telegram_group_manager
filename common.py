@@ -1,8 +1,8 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from config import OWNER_IDS, SUDO_USERS, PERSONA, SUPPORT_GROUP_URL, UPDATE_CHANNEL_URL
-from data.store import get_global_link, set_global_link
-from utils.helpers import is_owner_or_sudo
+from store import get_global_link, set_global_link
+from helpers import is_owner_or_sudo
 
 
 def build_help_text(registry: dict) -> str:
