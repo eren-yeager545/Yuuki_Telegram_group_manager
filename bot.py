@@ -6,7 +6,7 @@ import uuid
 from collections import defaultdict, deque
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, filters
-from config import BOT_TOKEN, LOG_CHANNEL_ID, QUIZ_INTERVAL_SECONDS, SEEN_UPDATE_COOLDOWN_SECONDS
+from config import BOT_TOKEN, LOG_CHANNEL_ID, QUIZ_INTERVAL_SECONDS, SEEN_UPDATE_COOLDOWN_SECONDS, PORT, WEBHOOK_URL, WEBHOOK_PATH, WEBHOOK_SECRET
 from store import (
     init_db, get_active_groups, upsert_group, upsert_user, get_filters, get_setting,
     touch_member, get_note, get_random_quiz, get_buttons, list_blacklists,
@@ -427,7 +427,23 @@ def main():
         add_registered_command(app, *spec)
     app.add_handler(MessageHandler(filters.StatusUpdate.ALL, service_router))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL | filters.ANIMATION | filters.VOICE | filters.AUDIO | filters.CONTACT, message_router))
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    if WEBHOOK_URL:
+        url_path = WEBHOOK_PATH.lstrip('/')
+        full_url = f"{WEBHOOK_URL.rstrip('/')}/{url_path}"
+        kwargs = {
+            'listen': '0.0.0.0',
+            'port': PORT,
+            'url_path': url_path,
+            'webhook_url': full_url,
+            'allowed_updates': Update.ALL_TYPES,
+        }
+        if WEBHOOK_SECRET:
+            kwargs['secret_token'] = WEBHOOK_SECRET
+        logger.info(f'Starting webhook server on 0.0.0.0:{PORT} pointing to {full_url}')
+        app.run_webhook(**kwargs)
+    else:
+        logger.info('Starting bot in polling mode')
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == '__main__':

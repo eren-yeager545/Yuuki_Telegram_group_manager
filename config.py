@@ -13,3 +13,8 @@ SEEN_UPDATE_COOLDOWN_SECONDS = int(os.getenv('SEEN_UPDATE_COOLDOWN_SECONDS', '21
 
 SUPPORT_GROUP_URL = os.getenv('SUPPORT_GROUP_URL', 'https://t.me/your_support_group')
 UPDATE_CHANNEL_URL = os.getenv('UPDATE_CHANNEL_URL', 'https://t.me/your_update_channel')
+
+PORT = int(os.getenv('PORT', '8080') or 8080)
+WEBHOOK_URL = os.getenv('WEBHOOK_URL', os.getenv('RENDER_EXTERNAL_URL', ''))
+WEBHOOK_PATH = os.getenv('WEBHOOK_PATH', BOT_TOKEN)
+WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', '')
