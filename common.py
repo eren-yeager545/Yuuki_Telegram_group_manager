@@ -150,3 +150,8 @@ async def addlogger_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     set_global_link('logger_link', link)
     await update.message.reply_text('Logger link updated.')
+
+
+if __name__ == '__main__':
+    from bot import main
+    main()
