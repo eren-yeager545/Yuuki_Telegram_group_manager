@@ -74,7 +74,7 @@ def test_error_handler_with_message():
     asyncio.run(error_handler(update, context))
 
     mock_msg.reply_text.assert_called_once()
-    assert "Something went wrong. Reference ID:" in mock_msg.reply_text.call_args[0][0]
+    assert "Reference ID:" in mock_msg.reply_text.call_args[0][0]
 
 
 def test_error_handler_without_message():

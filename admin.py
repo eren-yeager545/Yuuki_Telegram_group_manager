@@ -13,9 +13,9 @@ from store import (
     list_notes, list_quizzes, list_warned_users, log_admin_action, remove_blacklist,
     reset_warns, save_buttons, save_filter, save_note, set_chat_federation, set_setting,
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
-    get_user_by_username, get_user_by_id, list_zombies, clean_zombies
+    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message
 )
-from helpers import is_admin, is_owner_or_sudo
+from helpers import is_admin, is_owner_or_sudo, safe_reply_error
 
 
 def parse_duration_to_seconds(token: str):
@@ -49,7 +49,7 @@ def build_keyboard(rows):
 async def admin_only(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat and update.effective_chat.type in ('group', 'supergroup'):
         if not await is_admin(update, context):
-            await update.message.reply_text('Admin only command.')
+            await update.message.reply_text('Gomen ne~ 🌸 Only group admins can use this command desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
             return False
     return True
 
@@ -200,21 +200,103 @@ async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def purge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
-    if not update.message.reply_to_message:
-        await update.message.reply_text('Reply to a message and use /purge to delete from that message to here.')
-        return
-    start_id = update.message.reply_to_message.message_id
-    end_id = update.message.message_id
-    removed = 0
-    for mid in range(start_id, end_id + 1):
+    chat_id = update.effective_chat.id
+    target_user = await resolve_target_user(update, context)
+
+    if target_user:
+        user_tag = format_user_tag(target_user.id, getattr(target_user, 'first_name', 'User'), getattr(target_user, 'username', None))
+        mids = clear_user_messages(chat_id, target_user.id)
+
+        if update.message.reply_to_message:
+            reply_mid = update.message.reply_to_message.message_id
+            cmd_mid = update.message.message_id
+            mids_set = set(mids)
+            for mid in range(reply_mid, cmd_mid + 1):
+                mids_set.add(mid)
+            mids = sorted(list(mids_set), reverse=True)
+
+        removed = 0
+        for mid in mids:
+            try:
+                await context.bot.delete_message(chat_id, mid)
+                removed += 1
+            except Exception:
+                pass
+
         try:
-            await context.bot.delete_message(update.effective_chat.id, mid)
-            removed += 1
+            await context.bot.delete_message(chat_id, update.message.message_id)
         except Exception:
             pass
-    if removed > 0:
-        log_admin_action(update.effective_chat.id, update.effective_user.id, 'purge', details=f'removed={removed}')
-        await update.effective_chat.send_message("✨ Purge completed successfully! 🧹\nThe chat is all clean now. 🌸")
+
+        log_admin_action(chat_id, update.effective_user.id, 'purge', target_id=target_user.id, details=f'removed={removed}')
+        await update.effective_chat.send_message(
+            f"Swept away! 🧹✨ All messages from {user_tag} have been purged from the group! Everything is clean and sweet now~ 🌸 (⁠人⁠*⁠´⁠∀⁠｀⁠)"
+        )
+        return
+
+    if update.message.reply_to_message:
+        reply_msg = update.message.reply_to_message
+        target_user = reply_msg.from_user
+        user_tag = format_user_tag(target_user.id, target_user.first_name, target_user.username)
+        start_id = reply_msg.message_id
+        end_id = update.message.message_id
+        removed = 0
+        for mid in range(start_id, end_id + 1):
+            try:
+                await context.bot.delete_message(chat_id, mid)
+                removed += 1
+            except Exception:
+                pass
+        clear_user_messages(chat_id, target_user.id)
+        log_admin_action(chat_id, update.effective_user.id, 'purge', target_id=target_user.id, details=f'removed={removed}')
+        await update.effective_chat.send_message(
+            f"Swept away! 🧹✨ All messages from {user_tag} have been purged from the group! Everything is clean and sweet now~ 🌸 (⁠人⁠*⁠´⁠∀⁠｀⁠)"
+        )
+        return
+
+    await update.message.reply_text(
+        "Reply to a message or specify a user (`/purge @username`) to delete all messages from that selected user desu~ 🌸 (⁠⁠◕⁠‿⁠◕⁠✿⁠)"
+    )
+
+
+async def dban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await admin_only(update, context):
+        return
+    chat_id = update.effective_chat.id
+    target = await resolve_target_user(update, context)
+    if not target:
+        await update.message.reply_text("Reply to a user or specify a username/ID to ban and purge their messages~ 🌸 (⁠⁠◕⁠‿⁠◕⁠✿⁠)")
+        return
+
+    user_tag = format_user_tag(target.id, getattr(target, 'first_name', 'User'), getattr(target, 'username', None))
+
+    try:
+        await context.bot.ban_chat_member(chat_id, target.id, revoke_messages=True)
+    except Exception as e:
+        cid = await safe_reply_error(update.effective_message, "Gomen ne~ 🥺 I couldn't ban that user!\nReference ID: {cid}")
+        return
+
+    mids = clear_user_messages(chat_id, target.id)
+    for mid in mids:
+        try:
+            await context.bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+
+    if update.message.reply_to_message:
+        try:
+            await context.bot.delete_message(chat_id, update.message.reply_to_message.message_id)
+        except Exception:
+            pass
+    try:
+        await context.bot.delete_message(chat_id, update.message.message_id)
+    except Exception:
+        pass
+
+    log_admin_action(chat_id, update.effective_user.id, 'dban', target.id)
+    await update.effective_chat.send_message(
+        f"Banned and swept clean! 🔨🧹 {user_tag} has been banned and all their messages were purged from the group! Stay safe everyone~ 🌸 (⁠≧⁠∇⁠≦⁠)/"
+    )
 
 
 async def pin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
