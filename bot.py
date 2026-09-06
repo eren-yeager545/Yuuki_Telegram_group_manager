@@ -34,6 +34,12 @@ async def safe_reply_error(message_obj, public_text='Something went wrong. Refer
     return cid
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error('Exception while handling an update:', exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        await safe_reply_error(update.effective_message)
+
+
 
 def register_help(app: Application, category: str, command: str, usage: str, example: str):
     registry = app.bot_data.setdefault('help_registry', {})
@@ -354,6 +360,7 @@ def main():
     ensure_event_loop()
     init_db()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app.add_error_handler(error_handler)
     user_cmds = [
         ('start', wrapped_start, 'Users Commands', 'Start the bot', '/start'),
         ('help', help_cmd, 'Users Commands', 'Show all commands by category', '/help'),

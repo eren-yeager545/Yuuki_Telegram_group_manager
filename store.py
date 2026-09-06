@@ -1,7 +1,7 @@
 import random
 import sqlite3
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 
 DB_PATH = 'bot.db'
 
@@ -36,6 +36,15 @@ def clamp_text(value, limit):
 
 def conn():
     return sqlite3.connect(DB_PATH)
+
+
+@contextmanager
+def get_conn():
+    connection = conn()
+    try:
+        yield connection
+    finally:
+        connection.close()
 
 
 def init_db():
@@ -376,6 +385,7 @@ def trim_reports(chat_id):
     with get_conn() as c:
         keep = CONTENT_QUOTAS['reports_retained']
         c.execute('DELETE FROM reports WHERE chat_id=? AND id NOT IN (SELECT id FROM reports WHERE chat_id=? ORDER BY created_at DESC, id DESC LIMIT ?)', (chat_id, chat_id, keep))
+        c.commit()
 
 
 def allow_report_event(chat_id, reporter_id, target_id, window_seconds=60, max_events=2):
@@ -387,6 +397,7 @@ def allow_report_event(chat_id, reporter_id, target_id, window_seconds=60, max_e
         if count >= max_events:
             return False
         c.execute('INSERT INTO action_events(scope, actor_id, chat_id, target_id, event, created_at) VALUES(?,?,?,?,?,?)', (f'report:{chat_id}:{target_id}', reporter_id, chat_id, target_id, 'report', now))
+        c.commit()
         return True
 
 
@@ -411,7 +422,7 @@ def get_group_quota_lines():
 def delete_user_data(user_id):
     with get_conn() as c:
         c.execute('DELETE FROM users WHERE user_id=?', (user_id,))
-        c.execute('DELETE FROM members WHERE user_id=?', (user_id,))
+        c.execute('DELETE FROM group_members WHERE user_id=?', (user_id,))
         c.execute('DELETE FROM warns WHERE user_id=?', (user_id,))
         c.execute('DELETE FROM reports WHERE reporter_id=? OR target_id=?', (user_id, user_id))
         c.execute('DELETE FROM audit_logs WHERE actor_id=? OR target_id=?', (user_id, user_id))
@@ -419,12 +430,14 @@ def delete_user_data(user_id):
         c.execute('DELETE FROM fed_bans WHERE user_id=?', (user_id,))
         c.execute('DELETE FROM fed_admins WHERE user_id=?', (user_id,))
         c.execute('DELETE FROM action_events WHERE actor_id=? OR target_id=?', (user_id, user_id))
+        c.commit()
 
 
 def set_global_link(key, value):
     value = clamp_text(value, MAX_LENGTHS['button_url'])
     with get_conn() as c:
         c.execute('INSERT INTO settings(chat_id,key,value) VALUES(?,?,?) ON CONFLICT(chat_id,key) DO UPDATE SET value=excluded.value', (0, key, value))
+        c.commit()
 
 
 def get_global_link(key, default=''):
