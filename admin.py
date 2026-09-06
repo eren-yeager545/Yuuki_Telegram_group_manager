@@ -13,6 +13,7 @@ from store import (
     list_notes, list_quizzes, list_warned_users, log_admin_action, remove_blacklist,
     reset_warns, save_buttons, save_filter, save_note, set_chat_federation, set_setting,
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
+    get_user_by_username, get_user_by_id, list_zombies, clean_zombies
 )
 from helpers import is_admin, is_owner_or_sudo
 
@@ -69,7 +70,60 @@ def extract_reason(update: Update):
     return parts[1].strip() if len(parts) > 1 else ''
 
 
+def format_user_link(user_id: int, name: str) -> str:
+    return f'<a href="tg://user?id={user_id}">{html.escape(name)}</a>'
+
+
+def format_user_tag(user_id: int, name: str, username: str = None) -> str:
+    if username:
+        clean_user = username.lstrip('@').strip()
+        return f"@{clean_user}"
+    return format_user_link(user_id, name)
+
+
+async def resolve_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message and update.message.reply_to_message and update.message.reply_to_message.from_user:
+        return update.message.reply_to_message.from_user
+    if context.args:
+        first_arg = context.args[0].strip()
+        if first_arg.startswith('@'):
+            u_info = get_user_by_username(first_arg)
+            if u_info:
+                class ResolvedUser:
+                    def __init__(self, uid, name, uname):
+                        self.id = uid
+                        self.first_name = name or 'User'
+                        self.full_name = name or 'User'
+                        self.username = uname
+                        self.is_bot = False
+                return ResolvedUser(*u_info)
+        elif first_arg.isdigit():
+            uid = int(first_arg)
+            u_info = get_user_by_id(uid)
+            if u_info:
+                class ResolvedUser:
+                    def __init__(self, uid, name, uname):
+                        self.id = uid
+                        self.first_name = name or 'User'
+                        self.full_name = name or 'User'
+                        self.username = uname
+                        self.is_bot = False
+                return ResolvedUser(*u_info)
+            else:
+                class SimpleUser:
+                    def __init__(self, uid):
+                        self.id = uid
+                        self.first_name = f'User {uid}'
+                        self.full_name = f'User {uid}'
+                        self.username = None
+                        self.is_bot = False
+                return SimpleUser(uid)
+    return update.effective_user
+
+
 async def apply_action(chat_id, target_id, action, context, duration_seconds=None):
+    if action in ('none', 'off'):
+        return 'none'
     if action == 'warn':
         return 'warn'
     if action == 'mute':
@@ -98,11 +152,11 @@ async def apply_action(chat_id, target_id, action, context, duration_seconds=Non
 async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
-    target = reply_target(update)
+    target = await resolve_target_user(update, context)
     if target:
         await context.bot.ban_chat_member(update.effective_chat.id, target.id)
         log_admin_action(update.effective_chat.id, update.effective_user.id, 'ban', target.id)
-        await update.message.reply_text(f'Banned {target.full_name}.')
+        await update.message.reply_html(f'Banned {format_user_tag(target.id, target.first_name, target.username)}.')
 
 
 async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -123,12 +177,12 @@ async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
-    target = reply_target(update)
+    target = await resolve_target_user(update, context)
     if target:
         await context.bot.ban_chat_member(update.effective_chat.id, target.id)
         await context.bot.unban_chat_member(update.effective_chat.id, target.id)
         log_admin_action(update.effective_chat.id, update.effective_user.id, 'kick', target.id)
-        await update.message.reply_text(f'Kicked {target.full_name}.')
+        await update.message.reply_html(f'Kicked {format_user_tag(target.id, target.first_name, target.username)}.')
 
 
 async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -158,7 +212,9 @@ async def purge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             removed += 1
         except Exception:
             pass
-    log_admin_action(update.effective_chat.id, update.effective_user.id, 'purge', details=f'removed={removed}')
+    if removed > 0:
+        log_admin_action(update.effective_chat.id, update.effective_user.id, 'purge', details=f'removed={removed}')
+        await update.effective_chat.send_message("✨ Purge completed successfully! 🧹\nThe chat is all clean now. 🌸")
 
 
 async def pin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -184,7 +240,7 @@ async def unpin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
-    target = reply_target(update)
+    target = await resolve_target_user(update, context)
     if target:
         seconds = parse_duration_to_seconds(context.args[0]) if context.args else None
         if seconds:
@@ -196,72 +252,150 @@ async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.restrict_chat_member(update.effective_chat.id, target.id, permissions=ChatPermissions(can_send_messages=False))
             action_name = 'mute'
         log_admin_action(update.effective_chat.id, update.effective_user.id, action_name, target.id)
-        await update.message.reply_text(f'Muted {target.full_name}.')
+        await update.message.reply_html(f'Muted {format_user_tag(target.id, target.first_name, target.username)}.')
+
+
+async def tmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await admin_only(update, context):
+        return
+    duration_str = None
+    target = None
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target = update.message.reply_to_message.from_user
+        if context.args:
+            duration_str = context.args[0]
+    elif context.args and len(context.args) >= 2:
+        target = await resolve_target_user(update, context)
+        duration_str = context.args[1]
+
+    duration_sec = parse_duration_to_seconds(duration_str)
+    if not target or not duration_sec:
+        help_msg = (
+            "❌ Please provide a valid duration.\n\n"
+            "Examples:\n"
+            "10m = 10 minutes\n"
+            "2h = 2 hours\n"
+            "1d = 1 day\n\n"
+            "Usage:\n"
+            "/tmute @username 10m\n"
+            "or reply to a message: /tmute 30m"
+        )
+        await update.message.reply_text(help_msg)
+        return
+
+    try:
+        until = int(time.time()) + duration_sec
+        await context.bot.restrict_chat_member(update.effective_chat.id, target.id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
+        add_temp_action(update.effective_chat.id, target.id, 'tmute', until)
+        log_admin_action(update.effective_chat.id, update.effective_user.id, f'tmute {duration_str}', target.id)
+        tag = format_user_tag(target.id, getattr(target, 'first_name', 'User'), getattr(target, 'username', None))
+        await update.message.reply_html(f'🔇 Muted {tag} for {duration_str}.')
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to mute user: {str(e)}")
 
 
 async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
-    target = reply_target(update)
+    target = await resolve_target_user(update, context)
     if target:
         perms = ChatPermissions(can_send_messages=True, can_send_audios=True, can_send_documents=True, can_send_photos=True, can_send_videos=True, can_send_video_notes=True, can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True, can_add_web_page_previews=True, can_change_info=False, can_invite_users=True, can_pin_messages=False, can_manage_topics=False)
         await context.bot.restrict_chat_member(update.effective_chat.id, target.id, permissions=perms)
         clear_temp_action(update.effective_chat.id, target.id, 'tmute')
         log_admin_action(update.effective_chat.id, update.effective_user.id, 'unmute', target.id)
-        await update.message.reply_text(f'Unmuted {target.full_name}.')
+        await update.message.reply_html(f'Unmuted {format_user_tag(target.id, target.first_name, target.username)}.')
 
 
 async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
-    target = reply_target(update)
-    if target:
-        reason = extract_reason(update)
-        count = add_warn(update.effective_chat.id, target.id, reason)
-        limit = int(get_setting(update.effective_chat.id, 'warn_limit', '3'))
-        action = get_setting(update.effective_chat.id, 'warn_mode', 'ban')
-        log_admin_action(update.effective_chat.id, update.effective_user.id, 'warn', target.id, f'count={count};reason={reason}')
-        await update.message.reply_text(f'{target.full_name} now has {count} warn(s). Limit: {limit}. Action: {action}.')
-        if count >= limit:
-            try:
-                await apply_action(update.effective_chat.id, target.id, action, context, parse_duration_to_seconds(get_setting(update.effective_chat.id, 'warn_time', '1h')))
-                await update.message.reply_text(f'{target.full_name} reached warn limit. Action applied: {action}.')
-                log_admin_action(update.effective_chat.id, update.effective_user.id, f'auto_{action}_warn_limit', target.id, f'count={count}')
-            except Exception:
-                pass
+
+    target = None
+    reason = ""
+
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target = update.message.reply_to_message.from_user
+        reason = (update.message.text or '').partition(' ')[2].strip()
+    elif context.args:
+        first_arg = context.args[0]
+        if first_arg.startswith('@') or first_arg.isdigit():
+            target = await resolve_target_user(update, context)
+            reason = ' '.join(context.args[1:]).strip() if len(context.args) > 1 else ""
+
+    if not target:
+        await update.message.reply_text("Reply to a user's message or specify @username / user ID to warn them.")
+        return
+
+    if getattr(target, 'is_bot', False):
+        await update.message.reply_text("Bots cannot be warned!")
+        return
+
+    # Check if target is admin/owner
+    try:
+        member = await context.bot.get_chat_member(update.effective_chat.id, target.id)
+        if member.status in ('administrator', 'creator'):
+            await update.message.reply_text("Administrators cannot be warned!")
+            return
+    except Exception:
+        pass
+
+    if not reason:
+        reason = "🌸 A little warning for you! Please follow the group rules. 💕"
+
+    count = add_warn(update.effective_chat.id, target.id, reason)
+    limit = int(get_setting(update.effective_chat.id, 'warn_limit', '3'))
+    action = get_setting(update.effective_chat.id, 'warn_mode', 'ban').lower()
+
+    tag = format_user_tag(target.id, getattr(target, 'first_name', 'User'), getattr(target, 'username', None))
+    log_admin_action(update.effective_chat.id, update.effective_user.id, 'warn', target.id, f'count={count};reason={reason}')
+
+    msg_text = f"⚠️ Warning for {tag}!\nReason: {html.escape(reason)}\nWarn count: {count}/{limit}"
+    await update.message.reply_html(msg_text)
+
+    if count >= limit:
+        try:
+            duration_sec = parse_duration_to_seconds(get_setting(update.effective_chat.id, 'warn_time', '1h'))
+            act_applied = await apply_action(update.effective_chat.id, target.id, action, context, duration_sec)
+            action_disp = action.capitalize() if action not in ('none', 'off') else 'None'
+            await update.message.reply_html(
+                f"⚠️ Warning limit reached.\n\n"
+                f"👤 User: {tag}\n"
+                f"📌 Action: {html.escape(action_disp)}"
+            )
+            reset_warns(update.effective_chat.id, target.id)
+            log_admin_action(update.effective_chat.id, update.effective_user.id, f'auto_{action}_warn_limit', target.id, f'count={count}')
+        except Exception as e:
+            await update.message.reply_text(f"Failed to execute warn action: {str(e)}")
 
 
 async def warns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await admin_only(update, context):
-        return
-    target = reply_target(update)
-    if target:
-        reasons = get_warn_reasons(update.effective_chat.id, target.id)
-        text = f'{target.full_name} has {get_warns(update.effective_chat.id, target.id)} warn(s).'
-        if reasons:
-            text += '\nReasons:\n' + reasons[:2500]
-        await update.message.reply_text(text)
-
-
-async def warned_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await admin_only(update, context):
-        return
     rows = list_warned_users(update.effective_chat.id)
     if not rows:
-        await update.message.reply_text('No warned users in this chat.')
+        await update.message.reply_text("⚠️ No warned users in this group.")
         return
-    lines = [f'{name or uid} - {count} warn(s)' for uid, count, name in rows]
-    await update.message.reply_text('Warned users:\n' + '\n'.join(lines[:80]))
+
+    lines = ["⚠️ Warned Users", ""]
+    for idx, row in enumerate(rows, start=1):
+        uid = row[0]
+        cnt = row[1]
+        name = row[2] or f"User {uid}"
+        username = row[3]
+        tag = format_user_tag(uid, name, username)
+        warn_word = "warn" if cnt == 1 else "warns"
+        lines.append(f"{idx}. {tag} — {cnt} {warn_word}")
+
+    await update.message.reply_html("\n".join(lines))
 
 
 async def clearwarns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
-    target = reply_target(update)
+    target = await resolve_target_user(update, context)
     if target:
         reset_warns(update.effective_chat.id, target.id)
         log_admin_action(update.effective_chat.id, update.effective_user.id, 'clearwarns', target.id)
-        await update.message.reply_text(f'Cleared warns for {target.full_name}.')
+        tag = format_user_tag(target.id, getattr(target, 'first_name', 'User'), getattr(target, 'username', None))
+        await update.message.reply_html(f'Cleared warns for {tag}.')
 
 
 async def warnlimit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -277,13 +411,14 @@ async def warnlimit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def warnaction_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
-    if not context.args or context.args[0] not in ('warn', 'mute', 'kick', 'ban', 'tmute', 'tban'):
-        await update.message.reply_text('Usage: /warnaction warn|mute|kick|ban|tmute|tban [1h]')
+    if not context.args or context.args[0].lower() not in ('none', 'mute', 'kick', 'ban', 'tmute', 'tban'):
+        await update.message.reply_text('Usage: /warnaction none|mute|kick|ban|tmute [1h]')
         return
-    set_setting(update.effective_chat.id, 'warn_mode', context.args[0])
+    action = context.args[0].lower()
+    set_setting(update.effective_chat.id, 'warn_mode', action)
     if len(context.args) > 1:
         set_setting(update.effective_chat.id, 'warn_time', context.args[1])
-    await update.message.reply_text(f'Warn action set to {context.args[0]}.')
+    await update.message.reply_text(f'Warn action set to {action}.')
 
 
 async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -329,19 +464,54 @@ async def clearnote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def filter_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
-    text = update.message.text.partition(' ')[2]
-    if '|' not in text:
-        await update.message.reply_text('Usage: /filter keyword | reply')
+    text = update.message.text.partition(' ')[2].strip()
+    if not text or '|' not in text:
+        await update.message.reply_text('Usage: /filter [text|sticker|voice|link] keyword | reply')
         return
-    keyword, reply = [x.strip() for x in text.split('|', 1)]
-    save_filter(update.effective_chat.id, keyword, reply)
-    await update.message.reply_text(f'Filter saved for {keyword}.')
+
+    parts = [x.strip() for x in text.split('|', 1)]
+    left_part, reply = parts[0], parts[1]
+
+    left_words = left_part.split(maxsplit=1)
+    filter_type = 'text'
+    keyword = left_part
+
+    if len(left_words) == 2 and left_words[0].lower() in ('text', 'sticker', 'voice', 'link'):
+        filter_type = left_words[0].lower()
+        keyword = left_words[1]
+
+    save_filter(update.effective_chat.id, keyword, reply, filter_type)
+    await update.message.reply_text(f'Filter ({filter_type}) saved for "{keyword}".')
 
 
 async def filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from store import get_filters
-    items = [k for k, _ in get_filters(update.effective_chat.id)]
-    await update.message.reply_text('Filters: ' + (', '.join(items) if items else 'None'))
+    all_filters = get_filters(update.effective_chat.id)
+    if not all_filters:
+        await update.message.reply_text('No active filters in this chat.')
+        return
+
+    categorized = {'text': [], 'sticker': [], 'voice': [], 'link': []}
+    for kw, reply, f_type in all_filters:
+        if f_type in categorized:
+            categorized[f_type].append(kw)
+        else:
+            categorized['text'].append(kw)
+
+    lines = ["📋 Active Filters", ""]
+    type_labels = {
+        'text': '📝 Text',
+        'sticker': '🖼️ Sticker',
+        'voice': '🎤 Voice',
+        'link': '🔗 Link'
+    }
+
+    for f_type, label in type_labels.items():
+        if categorized[f_type]:
+            items_str = ", ".join(categorized[f_type])
+            lines.append(f"{label}: {items_str}")
+
+    await update.message.reply_text("\n".join(lines))
 
 
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -350,8 +520,12 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text('Usage: /stop keyword')
         return
-    delete_filter(update.effective_chat.id, context.args[0])
-    await update.message.reply_text('Filter deleted.')
+    keyword = ' '.join(context.args).strip()
+    deleted = delete_filter(update.effective_chat.id, keyword)
+    if deleted:
+        await update.message.reply_text(f'Filter "{keyword}" deleted.')
+    else:
+        await update.message.reply_text('Filter not found.')
 
 
 async def lock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -460,17 +634,72 @@ async def rulesbtn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Rules buttons updated.')
 
 
+def format_relative_time(created_at: int) -> str:
+    diff = int(time.time()) - created_at
+    if diff < 60:
+        return "just now"
+    if diff < 3600:
+        return f"{diff // 60}m ago"
+    if diff < 86400:
+        return f"{diff // 3600}h ago"
+    return f"{diff // 86400}d ago"
+
+
 async def modlog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await admin_only(update, context):
+    chat = update.effective_chat
+    if not chat or chat.type not in ('group', 'supergroup'):
+        await update.message.reply_text("❌ This command can only be used inside a group.")
         return
-    rows = get_recent_audit_logs(update.effective_chat.id, 20)
+    if not await is_admin(update, context):
+        await update.message.reply_text("🚫 You don't have permission to view the moderation log.")
+        return
+
+    rows = get_recent_audit_logs(chat.id, 20)
     if not rows:
-        await update.message.reply_text('No moderation logs yet.')
+        await update.message.reply_text("📋 Moderation Log\n\nNo recent logs.")
         return
-    lines = [f'{created_at} | actor {actor_id} | {action} | target {target_id or "-"} | {details or ""}' for actor_id, action, target_id, details, created_at in rows]
-    await update.message.reply_text('\n'.join(lines[:40]))
 
+    lines = ["📋 Moderation Log", ""]
+    action_emojis = {
+        'ban': '🚫 BAN',
+        'unban': '✅ UNBAN',
+        'kick': '👞 KICK',
+        'mute': '🔇 MUTE',
+        'unmute': '🔊 UNMUTE',
+        'warn': '⚠️ WARN',
+        'clearwarns': '🧹 CLEAR WARNS',
+        'purge': '🗑 PURGE',
+        'report': '🚨 REPORT',
+        'pin': '📌 PIN'
+    }
 
+    for actor_id, action, target_id, details, created_at in rows:
+        action_upper = action.split()[0].lower() if action else ''
+        header = action_emojis.get(action_upper, f"⚡ {action.upper()}")
+
+        # User display
+        if target_id:
+            u_info = get_user_by_id(target_id)
+            if u_info:
+                user_str = format_user_tag(u_info[0], u_info[1] or 'User', u_info[2])
+            else:
+                user_str = format_user_link(target_id, f"User {target_id}")
+        else:
+            actor_info = get_user_by_id(actor_id)
+            if actor_info:
+                user_str = format_user_tag(actor_info[0], actor_info[1] or 'Admin', actor_info[2])
+            else:
+                user_str = format_user_link(actor_id, f"Admin {actor_id}")
+
+        rel_time = format_relative_time(created_at)
+        lines.append(f"{header}")
+        lines.append(f"👤 {user_str}")
+        if details:
+            lines.append(f"📝 {html.escape(details)}")
+        lines.append(f"🕐 {rel_time}")
+        lines.append("")
+
+    await update.message.reply_html("\n".join(lines), disable_web_page_preview=True)
 
 
 async def groupquota_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -479,26 +708,48 @@ async def groupquota_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = get_group_quota_lines()
     await update.message.reply_text('GROUP QUOTA\n' + '\n'.join(lines))
 
+
 async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat or not reply_target_message(update):
+        await update.message.reply_text("Reply to a user message to report it to admins.")
         return
     target_msg = reply_target_message(update)
     if not target_msg or not target_msg.from_user:
         await update.message.reply_text('Reply to a valid user message to report it.')
         return
-    target_id = target_msg.from_user.id
+    target_user = target_msg.from_user
     reason = extract_reason(update)[:MAX_LENGTHS['report_reason']]
+    if not reason:
+        reason = "No reason provided"
+
     if report_exists_recent(update.effective_chat.id, update.effective_user.id, target_msg.message_id, 60):
         await update.message.reply_text('You already reported this message recently.')
         return
-    if not allow_report_event(update.effective_chat.id, update.effective_user.id, target_id, 60, 2):
+    if not allow_report_event(update.effective_chat.id, update.effective_user.id, target_user.id, 60, 2):
         await update.message.reply_text('Rate limit reached: you can report this user only 2 times per minute.')
         return
-    add_report(update.effective_chat.id, update.effective_user.id, target_id, target_msg.message_id, reason)
-    admins = await context.bot.get_chat_administrators(update.effective_chat.id)
-    mentions = ' '.join([f'<a href="tg://user?id={a.user.id}">{html.escape(a.user.first_name)}</a>' for a in admins if not a.user.is_bot][:5])
-    await update.message.reply_html(f'Reported. {mentions}\nReason: {html.escape(reason or "No reason")}', disable_web_page_preview=True)
-    log_admin_action(update.effective_chat.id, update.effective_user.id, 'report', target_msg.from_user.id if target_msg.from_user else None, reason)
+
+    add_report(update.effective_chat.id, update.effective_user.id, target_user.id, target_msg.message_id, reason)
+
+    # Send notification text
+    reported_user_str = format_user_tag(target_user.id, target_user.first_name, target_user.username)
+    admin_user_str = format_user_tag(update.effective_user.id, update.effective_user.first_name, update.effective_user.username)
+
+    report_notice = (
+        "🚨 New Report\n\n"
+        f"👤 Reported User:\n{reported_user_str}\n\n"
+        f"👮 Reporter:\n{admin_user_str}\n\n"
+        f"📝 Reason:\n{html.escape(reason)}"
+    )
+
+    try:
+        admins = await context.bot.get_chat_administrators(update.effective_chat.id)
+        admin_mentions = ' '.join([format_user_link(a.user.id, a.user.first_name) for a in admins if not a.user.is_bot][:5])
+        await update.message.reply_html(f"{report_notice}\n\n📢 Admins notified: {admin_mentions}", disable_web_page_preview=True)
+    except Exception as e:
+        await update.message.reply_html(report_notice, disable_web_page_preview=True)
+
+    log_admin_action(update.effective_chat.id, update.effective_user.id, 'report', target_user.id, reason)
 
 
 async def reports_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -625,7 +876,7 @@ async def fedban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_fed_admin(fed_id, update.effective_user.id):
         await update.message.reply_text('Only fed admins can fedban.')
         return
-    target = reply_target(update)
+    target = await resolve_target_user(update, context)
     if not target:
         await update.message.reply_text('Reply to a user to fedban them.')
         return
@@ -635,7 +886,7 @@ async def fedban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.ban_chat_member(update.effective_chat.id, target.id)
     except Exception:
         pass
-    await update.message.reply_text(f'Fedbanned {target.full_name}.')
+    await update.message.reply_text(f'Fedbanned {getattr(target, "full_name", target.id)}.')
 
 
 async def unfedban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -723,19 +974,75 @@ async def delquiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    target = reply_target(update) or update.effective_user
+    target = await resolve_target_user(update, context)
     await update.message.reply_text(f'User ID: {target.id}\nChat ID: {update.effective_chat.id}')
 
 
 async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    admins = await context.bot.get_chat_administrators(update.effective_chat.id)
-    lines = [a.user.full_name for a in admins]
-    await update.message.reply_text('Admins:\n' + '\n'.join(lines))
+    try:
+        admins = await context.bot.get_chat_administrators(update.effective_chat.id)
+    except Exception as e:
+        await update.message.reply_text("Could not fetch administrator list.")
+        return
+
+    admin_tags = []
+    for a in admins:
+        u = a.user
+        tag = format_user_tag(u.id, u.first_name, u.username)
+        admin_tags.append(tag)
+
+    lines = ["🌸 Here are the amazing admins keeping this group safe! 💕", ""]
+    for tag in admin_tags:
+        lines.append(f"• {tag}")
+
+    # If used in context of a complaint/report (message reply)
+    reason = extract_reason(update)
+    if update.message and update.message.reply_to_message:
+        lines.append("")
+        lines.append(f"📝 Reason: {html.escape(reason or 'User requested admin attention')}")
+
+    await update.message.reply_html("\n".join(lines), disable_web_page_preview=True)
 
 
 async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    target = reply_target(update) or update.effective_user
-    await update.message.reply_text(f'Name: {target.full_name}\nUsername: @{target.username or "none"}\nID: {target.id}')
+    target = await resolve_target_user(update, context)
+    user_id = target.id
+    first_name = getattr(target, 'first_name', 'User')
+    username = getattr(target, 'username', None)
+    username_str = f"@{username}" if username else "Not set"
+    user_link = f'<a href="tg://user?id={user_id}">Profile</a>'
+
+    status_str = "Member"
+    banned_str = "No"
+
+    if update.effective_chat and update.effective_chat.type in ('group', 'supergroup'):
+        try:
+            member = await context.bot.get_chat_member(update.effective_chat.id, user_id)
+            st = member.status
+            status_map = {
+                'creator': 'Owner',
+                'administrator': 'Administrator',
+                'member': 'Member',
+                'restricted': 'Restricted',
+                'left': 'Left',
+                'kicked': 'Kicked'
+            }
+            status_str = status_map.get(st, st.capitalize())
+            if st == 'kicked':
+                banned_str = "Yes"
+        except Exception:
+            pass
+
+    info_text = (
+        "👤 User Information\n\n"
+        f"🆔 ID: {user_id}\n"
+        f"👤 First Name: {html.escape(first_name)}\n"
+        f"🔹 Username: {username_str}\n"
+        f"🔗 User Link: {user_link}\n"
+        f"🛡 Status: {status_str}\n"
+        f"🚫 Banned: {banned_str}"
+    )
+    await update.message.reply_html(info_text, disable_web_page_preview=True)
 
 
 async def settitle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -774,4 +1081,24 @@ async def cleanservice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def zombies_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Zombie cleanup placeholder: Telegram bot API cannot reliably enumerate departed members without extra tracking, but member tracking is active for future cleanup support.')
+    if not await admin_only(update, context):
+        return
+
+    if context.args and context.args[0].lower() in ('clean', 'cleanup'):
+        cleaned_count = clean_zombies(update.effective_chat.id)
+        await update.message.reply_text(f"🧹 Zombie records cleaned! Removed {cleaned_count} departed user record(s).")
+        return
+
+    zombies = list_zombies(update.effective_chat.id)
+    if not zombies:
+        await update.message.reply_text("🧟 Zombie Members\n\nNo departed or inactive zombie records found in this group.")
+        return
+
+    lines = ["🧟 Zombie Members", ""]
+    for idx, (uid, full_name, username, st) in enumerate(zombies, start=1):
+        tag = format_user_tag(uid, full_name, username)
+        lines.append(f"{idx}. {tag}")
+
+    lines.append("")
+    lines.append("Use `/zombies clean` to remove these records from group database tracking.")
+    await update.message.reply_html("\n".join(lines), disable_web_page_preview=True)

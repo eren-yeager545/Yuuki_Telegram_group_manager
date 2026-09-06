@@ -1,6 +1,7 @@
 import datetime
 import os
 import random
+import re
 import sqlite3
 import time
 from contextlib import closing, contextmanager
@@ -29,6 +30,8 @@ MAX_LENGTHS = {
     'button_url': 500,
     'setting_value': 4000,
 }
+
+VALID_FILTER_TYPES = {'text', 'sticker', 'voice', 'link'}
 
 _mongo_client = None
 _mongo_db = None
@@ -95,7 +98,7 @@ def init_db():
         db['settings'].create_index([('chat_id', 1), ('key', 1)], unique=True)
         db['warns'].create_index([('chat_id', 1), ('user_id', 1)], unique=True)
         db['notes'].create_index([('chat_id', 1), ('name', 1)], unique=True)
-        db['filters'].create_index([('chat_id', 1), ('keyword', 1)], unique=True)
+        db['filters'].create_index([('chat_id', 1), ('filter_type', 1), ('keyword', 1)], unique=True)
         db['quizzes'].create_index('quiz_id', unique=True)
         db['audit_logs'].create_index('id', unique=True)
         db['action_events'].create_index('id', unique=True)
@@ -114,11 +117,11 @@ def init_db():
         cur = c.cursor()
         cur.execute('CREATE TABLE IF NOT EXISTS groups (chat_id INTEGER PRIMARY KEY, title TEXT, username TEXT, added_at INTEGER, last_seen_at INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, full_name TEXT, username TEXT, added_at INTEGER, last_seen_at INTEGER)')
-        cur.execute('CREATE TABLE IF NOT EXISTS group_members (chat_id INTEGER, user_id INTEGER, last_seen_at INTEGER, PRIMARY KEY(chat_id, user_id))')
+        cur.execute('CREATE TABLE IF NOT EXISTS group_members (chat_id INTEGER, user_id INTEGER, last_seen_at INTEGER, status TEXT DEFAULT "member", PRIMARY KEY(chat_id, user_id))')
         cur.execute('CREATE TABLE IF NOT EXISTS settings (chat_id INTEGER, key TEXT, value TEXT, PRIMARY KEY(chat_id, key))')
         cur.execute('CREATE TABLE IF NOT EXISTS warns (chat_id INTEGER, user_id INTEGER, count INTEGER DEFAULT 0, reasons TEXT DEFAULT "", PRIMARY KEY(chat_id, user_id))')
         cur.execute('CREATE TABLE IF NOT EXISTS notes (chat_id INTEGER, name TEXT, content TEXT, buttons TEXT DEFAULT "", PRIMARY KEY(chat_id, name))')
-        cur.execute('CREATE TABLE IF NOT EXISTS filters (chat_id INTEGER, keyword TEXT, reply TEXT, PRIMARY KEY(chat_id, keyword))')
+        cur.execute('CREATE TABLE IF NOT EXISTS filters (chat_id INTEGER, keyword TEXT, reply TEXT, filter_type TEXT DEFAULT "text", PRIMARY KEY(chat_id, filter_type, keyword))')
         cur.execute('CREATE TABLE IF NOT EXISTS quizzes (quiz_id INTEGER PRIMARY KEY AUTOINCREMENT, question TEXT, answer TEXT, added_by INTEGER, created_at INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, actor_id INTEGER, action TEXT, target_id INTEGER, details TEXT, created_at INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS action_events (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, actor_id INTEGER NOT NULL, chat_id INTEGER, target_id INTEGER, event TEXT NOT NULL, created_at INTEGER NOT NULL)')
@@ -131,6 +134,18 @@ def init_db():
         cur.execute('CREATE TABLE IF NOT EXISTS temp_actions (chat_id INTEGER, user_id INTEGER, action TEXT, until_ts INTEGER, PRIMARY KEY(chat_id, user_id, action))')
         cur.execute('CREATE TABLE IF NOT EXISTS welcome_buttons (chat_id INTEGER, label TEXT, url TEXT, sort_order INTEGER DEFAULT 0, PRIMARY KEY(chat_id, label, url))')
         cur.execute('CREATE TABLE IF NOT EXISTS rules_buttons (chat_id INTEGER, label TEXT, url TEXT, sort_order INTEGER DEFAULT 0, PRIMARY KEY(chat_id, label, url))')
+
+        # Schema migrations for existing SQLite databases
+        cur.execute("PRAGMA table_info(filters)")
+        cols = [row[1] for row in cur.fetchall()]
+        if 'filter_type' not in cols:
+            cur.execute("ALTER TABLE filters ADD COLUMN filter_type TEXT DEFAULT 'text'")
+
+        cur.execute("PRAGMA table_info(group_members)")
+        cols = [row[1] for row in cur.fetchall()]
+        if 'status' not in cols:
+            cur.execute("ALTER TABLE group_members ADD COLUMN status TEXT DEFAULT 'member'")
+
         c.commit()
 
 
@@ -194,21 +209,81 @@ def upsert_user(user_id, full_name, username, touch_seen=True):
         c.commit()
 
 
-def touch_member(chat_id, user_id, now_ts=None):
+def get_user_by_username(username):
+    if not username:
+        return None
+    username = username.lstrip('@').strip().lower()
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['users'].find_one({'username': {'$regex': f'^{re.escape(username)}$', '$options': 'i'}})
+        return (doc['user_id'], doc.get('full_name'), doc.get('username')) if doc else None
+
+    with closing(conn()) as c:
+        row = c.execute('SELECT user_id, full_name, username FROM users WHERE LOWER(username)=? LIMIT 1', (username,)).fetchone()
+        return row if row else None
+
+
+def get_user_by_id(user_id):
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['users'].find_one({'user_id': user_id})
+        return (doc['user_id'], doc.get('full_name'), doc.get('username')) if doc else None
+
+    with closing(conn()) as c:
+        row = c.execute('SELECT user_id, full_name, username FROM users WHERE user_id=? LIMIT 1', (user_id,)).fetchone()
+        return row if row else None
+
+
+def touch_member(chat_id, user_id, now_ts=None, status='member'):
     now_ts = now_ts or _now()
     if is_mongo():
         db = get_mongo_db()
         db['group_members'].update_one(
             {'chat_id': chat_id, 'user_id': user_id},
-            {'$set': {'last_seen_at': now_ts}},
+            {'$set': {'last_seen_at': now_ts, 'status': status}},
             upsert=True
         )
         return
 
     with closing(conn()) as c:
         cur = c.cursor()
-        cur.execute('INSERT INTO group_members(chat_id,user_id,last_seen_at) VALUES(?,?,?) ON CONFLICT(chat_id,user_id) DO UPDATE SET last_seen_at=excluded.last_seen_at', (chat_id, user_id, now_ts))
+        cur.execute('INSERT INTO group_members(chat_id,user_id,last_seen_at,status) VALUES(?,?,?,?) ON CONFLICT(chat_id,user_id) DO UPDATE SET last_seen_at=excluded.last_seen_at, status=excluded.status', (chat_id, user_id, now_ts, status))
         c.commit()
+
+
+def update_member_status(chat_id, user_id, status):
+    touch_member(chat_id, user_id, status=status)
+
+
+def list_zombies(chat_id):
+    if is_mongo():
+        db = get_mongo_db()
+        docs = list(db['group_members'].find({'chat_id': chat_id, 'status': {'$in': ['left', 'kicked', 'banned']}}))
+        res = []
+        for d in docs:
+            uid = d['user_id']
+            u_doc = db['users'].find_one({'user_id': uid})
+            full_name = u_doc.get('full_name') if u_doc else f"User {uid}"
+            username = u_doc.get('username') if u_doc else None
+            res.append((uid, full_name, username, d.get('status', 'left')))
+        return res
+
+    with closing(conn()) as c:
+        rows = c.execute('SELECT m.user_id, u.full_name, u.username, m.status FROM group_members m LEFT JOIN users u ON m.user_id=u.user_id WHERE m.chat_id=? AND m.status IN ("left", "kicked", "banned")', (chat_id,)).fetchall()
+        return [(r[0], r[1] or f"User {r[0]}", r[2], r[3]) for r in rows]
+
+
+def clean_zombies(chat_id):
+    if is_mongo():
+        db = get_mongo_db()
+        res = db['group_members'].delete_many({'chat_id': chat_id, 'status': {'$in': ['left', 'kicked', 'banned']}})
+        return res.deleted_count
+
+    with closing(conn()) as c:
+        cur = c.cursor()
+        cur.execute('DELETE FROM group_members WHERE chat_id=? AND status IN ("left", "kicked", "banned")', (chat_id,))
+        c.commit()
+        return cur.rowcount
 
 
 def get_active_groups():
@@ -322,13 +397,16 @@ def list_warned_users(chat_id, limit=50):
         for d in docs:
             uid = d['user_id']
             cnt = d['count']
+            reasons = d.get('reasons', '')
             user_doc = db['users'].find_one({'user_id': uid})
             name = user_doc.get('full_name') if user_doc else None
-            res.append((uid, cnt, name))
+            username = user_doc.get('username') if user_doc else None
+            res.append((uid, cnt, name, username, reasons))
         return res
 
     with closing(conn()) as c:
-        return c.execute('SELECT w.user_id, w.count, u.full_name FROM warns w LEFT JOIN users u ON u.user_id=w.user_id WHERE w.chat_id=? AND w.count>0 ORDER BY w.count DESC, w.user_id ASC LIMIT ?', (chat_id, limit)).fetchall()
+        rows = c.execute('SELECT w.user_id, w.count, u.full_name, u.username, w.reasons FROM warns w LEFT JOIN users u ON u.user_id=w.user_id WHERE w.chat_id=? AND w.count>0 ORDER BY w.count DESC, w.user_id ASC LIMIT ?', (chat_id, limit)).fetchall()
+        return rows
 
 
 def reset_warns(chat_id, user_id):
@@ -388,39 +466,77 @@ def delete_note(chat_id, name):
         c.commit()
 
 
-def save_filter(chat_id, keyword, reply):
+def save_filter(chat_id, keyword, reply, filter_type='text'):
+    filter_type = (filter_type or 'text').lower().strip()
+    if filter_type not in VALID_FILTER_TYPES:
+        filter_type = 'text'
+    keyword_clean = keyword.lower().strip()
     if is_mongo():
         db = get_mongo_db()
         db['filters'].update_one(
-            {'chat_id': chat_id, 'keyword': keyword.lower()},
+            {'chat_id': chat_id, 'filter_type': filter_type, 'keyword': keyword_clean},
             {'$set': {'reply': reply}},
             upsert=True
         )
         return
 
     with closing(conn()) as c:
-        c.execute('INSERT INTO filters(chat_id,keyword,reply) VALUES(?,?,?) ON CONFLICT(chat_id,keyword) DO UPDATE SET reply=excluded.reply', (chat_id, keyword.lower(), reply))
+        c.execute('INSERT INTO filters(chat_id,keyword,reply,filter_type) VALUES(?,?,?,?) ON CONFLICT(chat_id,filter_type,keyword) DO UPDATE SET reply=excluded.reply', (chat_id, keyword_clean, reply, filter_type))
         c.commit()
 
 
-def get_filters(chat_id):
+def get_filters(chat_id, filter_type=None):
     if is_mongo():
         db = get_mongo_db()
-        docs = db['filters'].find({'chat_id': chat_id}).sort('keyword', 1)
-        return [(d['keyword'], d['reply']) for d in docs]
+        query = {'chat_id': chat_id}
+        if filter_type:
+            query['filter_type'] = filter_type.lower()
+        docs = db['filters'].find(query).sort([('filter_type', 1), ('keyword', 1)])
+        return [(d['keyword'], d['reply'], d.get('filter_type', 'text')) for d in docs]
 
     with closing(conn()) as c:
-        return c.execute('SELECT keyword, reply FROM filters WHERE chat_id=? ORDER BY keyword', (chat_id,)).fetchall()
+        if filter_type:
+            rows = c.execute('SELECT keyword, reply, COALESCE(filter_type, "text") FROM filters WHERE chat_id=? AND LOWER(filter_type)=? ORDER BY keyword', (chat_id, filter_type.lower())).fetchall()
+        else:
+            rows = c.execute('SELECT keyword, reply, COALESCE(filter_type, "text") FROM filters WHERE chat_id=? ORDER BY filter_type, keyword', (chat_id,)).fetchall()
+        return rows
 
 
-def delete_filter(chat_id, keyword):
+def delete_filter(chat_id, keyword, filter_type=None):
+    keyword_clean = keyword.lower().strip()
     if is_mongo():
         db = get_mongo_db()
-        db['filters'].delete_one({'chat_id': chat_id, 'keyword': keyword.lower()})
+        query = {'chat_id': chat_id, 'keyword': keyword_clean}
+        if filter_type:
+            query['filter_type'] = filter_type.lower()
+        res = db['filters'].delete_many(query)
+        return res.deleted_count > 0
+
+    with closing(conn()) as c:
+        cur = c.cursor()
+        if filter_type:
+            cur.execute('DELETE FROM filters WHERE chat_id=? AND keyword=? AND LOWER(filter_type)=?', (chat_id, keyword_clean, filter_type.lower()))
+        else:
+            cur.execute('DELETE FROM filters WHERE chat_id=? AND keyword=?', (chat_id, keyword_clean))
+        c.commit()
+        return cur.rowcount > 0
+
+
+def delete_expired_audit_logs(chat_id=None):
+    cutoff = _now() - 86400  # 24 hours ago
+    if is_mongo():
+        db = get_mongo_db()
+        query = {'created_at': {'$lt': cutoff}}
+        if chat_id is not None:
+            query['chat_id'] = chat_id
+        db['audit_logs'].delete_many(query)
         return
 
     with closing(conn()) as c:
-        c.execute('DELETE FROM filters WHERE chat_id=? AND keyword=?', (chat_id, keyword.lower()))
+        if chat_id is not None:
+            c.execute('DELETE FROM audit_logs WHERE chat_id=? AND created_at<?', (chat_id, cutoff))
+        else:
+            c.execute('DELETE FROM audit_logs WHERE created_at<?', (cutoff,))
         c.commit()
 
 
@@ -445,14 +561,15 @@ def log_admin_action(chat_id, actor_id, action, target_id=None, details=None):
         c.commit()
 
 
-def get_recent_audit_logs(chat_id, limit=10):
+def get_recent_audit_logs(chat_id, limit=20):
+    delete_expired_audit_logs(chat_id)
     if is_mongo():
         db = get_mongo_db()
         docs = list(db['audit_logs'].find({'chat_id': chat_id}).sort('id', -1).limit(limit))
-        return [(d['actor_id'], d['action'], d.get('target_id'), d.get('details'), _format_time(d['created_at'])) for d in docs]
+        return [(d['actor_id'], d['action'], d.get('target_id'), d.get('details'), d['created_at']) for d in docs]
 
     with closing(conn()) as c:
-        return c.execute('SELECT actor_id, action, target_id, details, datetime(created_at, "unixepoch") FROM audit_logs WHERE chat_id=? ORDER BY id DESC LIMIT ?', (chat_id, limit)).fetchall()
+        return c.execute('SELECT actor_id, action, target_id, details, created_at FROM audit_logs WHERE chat_id=? ORDER BY id DESC LIMIT ?', (chat_id, limit)).fetchall()
 
 
 def add_quiz(question, answer, added_by):

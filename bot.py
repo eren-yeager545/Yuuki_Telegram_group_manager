@@ -10,7 +10,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 from config import BOT_TOKEN, LOG_CHANNEL_ID, QUIZ_INTERVAL_SECONDS, SEEN_UPDATE_COOLDOWN_SECONDS, PORT, WEBHOOK_URL, WEBHOOK_PATH, WEBHOOK_SECRET
 from store import (
     init_db, get_active_groups, upsert_group, upsert_user, get_filters, get_setting,
-    touch_member, get_note, get_random_quiz, get_buttons, list_blacklists,
+    touch_member, update_member_status, get_note, get_random_quiz, get_buttons, list_blacklists,
     get_chat_federation, get_fed_ban, get_expired_temp_actions, clear_temp_action,
     log_admin_action, delete_user_data, get_global_link,
 )
@@ -40,7 +40,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         await safe_reply_error(update.effective_message)
 
 
-
 def register_help(app: Application, category: str, command: str, usage: str, example: str):
     registry = app.bot_data.setdefault('help_registry', {})
     registry.setdefault(category, []).append({'command': command, 'usage': usage, 'example': example})
@@ -51,7 +50,6 @@ def add_registered_command(app: Application, name: str, callback, category: str,
     register_help(app, category, f'/{name}', usage, example)
 
 
-
 async def homepage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -60,11 +58,7 @@ async def homepage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     registry = context.application.bot_data.get('help_registry', {})
     data = query.data or ''
     if data == 'home:privacy':
-        text = (
-            '🔐 Privacy Policy for Yuuki\n\n'
-            'Stored data includes user/chat IDs, warns, reports, moderation logs, settings, notes, filters, welcomes, federation records, and limited anti-abuse metadata required for bot features.'
-        )
-        await query.message.reply_text(text)
+        await privacy_cmd(update, context)
         return
     if data == 'home:help':
         await query.message.reply_text('Choose a help category:', reply_markup=build_help_category_keyboard(registry))
@@ -148,7 +142,6 @@ async def hourly_quiz(context: ContextTypes.DEFAULT_TYPE):
             logger.warning('Quiz failed [REDACTED_TARGET]: %s', type(e).__name__)
 
 
-
 async def run_broadcast(message: str, context: ContextTypes.DEFAULT_TYPE):
     groups = get_active_groups()
     sent = 0
@@ -180,12 +173,25 @@ async def service_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not msg or not chat:
         return
+
+    now = int(time.time())
+    if msg.new_chat_members:
+        for member in msg.new_chat_members:
+            upsert_user(member.id, member.full_name, member.username)
+            touch_member(chat.id, member.id, now, status='member')
+
+    if msg.left_chat_member:
+        left_m = msg.left_chat_member
+        upsert_user(left_m.id, left_m.full_name, left_m.username)
+        update_member_status(chat.id, left_m.id, 'left')
+
     if get_setting(chat.id, 'clean_service', 'off') == 'on':
         try:
             await msg.delete()
             return
         except Exception:
             pass
+
     if msg.new_chat_members and get_setting(chat.id, 'welcome', 'off') == 'on':
         for member in msg.new_chat_members:
             mute_for = get_setting(chat.id, 'welcome_mute', 'off')
@@ -198,6 +204,7 @@ async def service_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         pass
             text = render_template(get_setting(chat.id, 'welcome_text', 'Welcome {first}!'), member, chat)
             await msg.reply_text(text, reply_markup=note_keyboard(chat.id, 'welcome'))
+
     if msg.left_chat_member and get_setting(chat.id, 'goodbye', 'off') == 'on':
         template = get_setting(chat.id, 'goodbye_text', 'Goodbye {fullname} 🌙')
         await msg.reply_text(render_template(template, msg.left_chat_member, chat))
@@ -227,7 +234,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         upsert_user(user.id, user.full_name, user.username, touch_seen=(now - last_u >= SEEN_UPDATE_COOLDOWN_SECONDS))
         if now - last_u >= SEEN_UPDATE_COOLDOWN_SECONDS:
             user_seen_cache[user.id] = now
-        touch_member(chat.id, user.id, now)
+        touch_member(chat.id, user.id, now, status='member')
         fed = get_chat_federation(chat.id)
         if fed and get_fed_ban(fed[0], user.id):
             try:
@@ -243,16 +250,21 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 content, buttons_blob = row
                 await msg.reply_text(content, reply_markup=build_keyboard(parse_buttons_blob(buttons_blob)))
                 return
+
+        has_link = bool('http://' in lower or 'https://' in lower or 't.me/' in lower)
+        has_sticker = bool(msg.sticker)
+        has_voice = bool(msg.voice)
+
         lock_checks = {
             'all': True,
-            'links': ('http://' in lower or 'https://' in lower or 't.me/' in lower),
+            'links': has_link,
             'media': bool(msg.photo or msg.video or msg.document or msg.audio or msg.sticker or msg.voice),
-            'stickers': bool(msg.sticker),
+            'stickers': has_sticker,
             'gifs': bool(msg.animation),
             'polls': bool(msg.poll),
             'forwards': bool(msg.forward_origin),
             'bots': bool(user.is_bot),
-            'voice': bool(msg.voice),
+            'voice': has_voice,
             'video_notes': bool(msg.video_note),
             'documents': bool(msg.document),
             'photos': bool(msg.photo),
@@ -332,8 +344,21 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
                 active_quizzes.pop(chat.id, None)
                 return
-        for keyword, reply in get_filters(chat.id):
-            if keyword in lower:
+
+        # Filters matching logic
+        filters_list = get_filters(chat.id)
+        for keyword, reply, f_type in filters_list:
+            matched = False
+            if f_type == 'text' and keyword in lower:
+                matched = True
+            elif f_type == 'sticker' and has_sticker and (keyword in (msg.sticker.emoji or '').lower() or keyword in (msg.sticker.set_name or '').lower() or keyword in lower):
+                matched = True
+            elif f_type == 'voice' and has_voice and keyword in lower:
+                matched = True
+            elif f_type == 'link' and has_link and keyword in lower:
+                matched = True
+
+            if matched:
                 await msg.reply_text(reply)
                 break
 
@@ -341,7 +366,6 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(app: Application):
     app.bot_data['broadcast_runner'] = run_broadcast
     app.job_queue.run_repeating(hourly_quiz, interval=QUIZ_INTERVAL_SECONDS, first=30)
-
 
 
 def ensure_event_loop():
@@ -382,7 +406,7 @@ def main():
         ('fedinfo', fedinfo_cmd, 'Users Commands', 'Show this chat federation', '/fedinfo'),
         ('fedstat', fedstat_cmd, 'Users Commands', 'Show fed info', '/fedstat'),
         ('blacklists', blacklists_cmd, 'Users Commands', 'List blacklists', '/blacklists'),
-        ('warned', warned_cmd, 'Moderation Commands', 'List warned users (admins only)', '/warned'),
+        ('warns', warns_cmd, 'Moderation Commands', 'List warned users in group', '/warns'),
         ('locks', locks_cmd, 'Users Commands', 'Show lock status', '/locks'),
         ('myfeds', myfeds_cmd, 'Users Commands', 'List your federations', '/myfeds'),
     ]
@@ -395,15 +419,15 @@ def main():
         ('pin', pin_cmd, 'Group Management Commands', 'Pin replied message', '/pin'),
         ('unpin', unpin_cmd, 'Group Management Commands', 'Clear all pins', '/unpin'),
         ('mute', mute_cmd, 'Group Management Commands', 'Mute replied user, optional duration', '/mute 1h'),
+        ('tmute', tmute_cmd, 'Group Management Commands', 'Temporarily mute a user', '/tmute @username 10m'),
         ('unmute', unmute_cmd, 'Group Management Commands', 'Unmute replied user', '/unmute'),
-        ('warn', warn_cmd, 'Group Management Commands', 'Warn replied user', '/warn spam'),
-        ('warns', warns_cmd, 'Moderation Commands', 'Show warns for replied user (admins only)', '/warns'),
+        ('warn', warn_cmd, 'Group Management Commands', 'Warn replied or specified user', '/warn @user spam'),
         ('clearwarns', clearwarns_cmd, 'Group Management Commands', 'Clear warns for replied user', '/clearwarns'),
         ('warnlimit', warnlimit_cmd, 'Group Management Commands', 'Set warn limit', '/warnlimit 3'),
         ('warnaction', warnaction_cmd, 'Group Management Commands', 'Set warn action', '/warnaction tmute 1h'),
         ('save', note_cmd, 'Group Notes Commands', 'Save note, supports buttons', '/save rules | Be nice || Rules - https://example.com'),
         ('clear', clearnote_cmd, 'Group Notes Commands', 'Delete note', '/clear rules'),
-        ('filter', filter_cmd, 'Group Notes Commands', 'Add filter', '/filter hi | hello'),
+        ('filter', filter_cmd, 'Group Notes Commands', 'Add filter', '/filter text hi | hello'),
         ('stop', stop_cmd, 'Group Notes Commands', 'Delete filter', '/stop hi'),
         ('blacklist', blacklist_cmd, 'Moderation Commands', 'Add blacklist trigger', '/blacklist badword | warn'),
         ('rmblacklist', rmblacklist_cmd, 'Moderation Commands', 'Remove blacklist trigger', '/rmblacklist badword'),
@@ -434,6 +458,7 @@ def main():
     ]
     for spec in user_cmds + admin_cmds:
         add_registered_command(app, *spec)
+    app.add_handler(CallbackQueryHandler(homepage_callback))
     app.add_handler(MessageHandler(filters.StatusUpdate.ALL, service_router))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL | filters.ANIMATION | filters.VOICE | filters.AUDIO | filters.CONTACT, message_router))
     if WEBHOOK_URL:
