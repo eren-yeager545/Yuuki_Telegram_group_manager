@@ -257,3 +257,162 @@ def test_command_logic(monkeypatch, tmp_path):
     cleaned = store.clean_zombies(-1001)
     assert cleaned == 1
     assert len(store.list_zombies(-1001)) == 0
+
+
+def test_logger_formatting_and_events(monkeypatch, tmp_path):
+    import store
+    import logger_helper
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import User, Chat, ChatMember, ChatMemberUpdated
+
+    db_file = str(tmp_path / "test_logger.db")
+    monkeypatch.setattr(store, "DB_PATH", db_file)
+    store.init_db()
+
+    bot = AsyncMock()
+    bot.first_name = "Yuuki Bot"
+    bot.username = "yuukibot"
+    bot.id = 999
+    bot.get_chat_member_count.return_value = 150
+    bot.export_chat_invite_link.return_value = "https://t.me/+invite123"
+
+    context = MagicMock()
+    context.bot = bot
+
+    sent_messages = []
+    async def mock_send_message(chat_id, text, **kwargs):
+        sent_messages.append((chat_id, text))
+
+    bot.send_message.side_effect = mock_send_message
+
+    # Configure LOG_CHANNEL_ID
+    monkeypatch.setattr(logger_helper.config, "LOG_CHANNEL_ID", -100999)
+
+    # 1. Test User Started Event
+    user = User(id=1001, first_name="Alice", is_bot=False, username="alice_user")
+    asyncio.run(logger_helper.log_user_started_event(user, context))
+
+    assert len(sent_messages) == 1
+    target, msg_text = sent_messages[0]
+    assert target == -100999
+    assert "📢 NEW USER STARTED" in msg_text
+    assert '👤 User: "Alice"' in msg_text
+    assert '🆔 User ID: "1001"' in msg_text
+    assert '🔗 Username: @alice_user' in msg_text
+    assert '📊 Total Users: "1"' in msg_text
+    assert "🤖 Bot: Yuuki Bot" in msg_text
+    assert "━━━━━━━━━━━━━━━━━━" in msg_text
+
+    # Test user with no username
+    user_no_un = User(id=1002, first_name="Bob", is_bot=False, username=None)
+    asyncio.run(logger_helper.log_user_started_event(user_no_un, context))
+    assert len(sent_messages) == 2
+    _, msg_text2 = sent_messages[1]
+    assert '🔗 Username: "Not Set"' in msg_text2
+    assert '📊 Total Users: "2"' in msg_text2
+
+    # 2. Test New Group Added Event
+    group = Chat(id=-100123, title="Awesome Group", type="supergroup", username="awesomegroup")
+    adder = User(id=1001, first_name="Alice", is_bot=False, username="alice_user")
+
+    asyncio.run(logger_helper.log_group_added_event(group, adder, context))
+
+    assert len(sent_messages) == 3
+    _, group_msg = sent_messages[2]
+    assert "📢 NEW GROUP ADDED" in group_msg
+    assert '👥 Group: "Awesome Group"' in group_msg
+    assert '🔗 Group Link: "https://t.me/awesomegroup"' in group_msg
+    assert '🆔 Chat ID: "-100123"' in group_msg
+    assert '👤 Added By: "Alice"' in group_msg
+    assert '🆔 User ID: "1001"' in group_msg
+    assert '👥 Total Members: "150"' in group_msg
+    assert '📊 Total Groups: "1"' in group_msg
+
+    # Verify group in DB
+    group_db = store.get_group_by_id(-100123)
+    assert group_db is not None
+    assert group_db['title'] == "Awesome Group"
+    assert group_db['is_active'] == 1
+    assert group_db['added_by_user_id'] == 1001
+
+    # 3. Test Private Group Added Event (No username)
+    private_group = Chat(id=-100456, title="Secret Club", type="supergroup", username=None)
+    asyncio.run(logger_helper.log_group_added_event(private_group, None, context))
+    assert len(sent_messages) == 4
+    _, priv_msg = sent_messages[3]
+    assert '👥 Group: "Secret Club"' in priv_msg
+    assert '🔗 Group Link: "https://t.me/+invite123"' in priv_msg
+    assert "👤 Added By: Unknown" in priv_msg
+    assert '📊 Total Groups: "2"' in priv_msg
+
+    # 4. Test Bot Banned / Removed Event
+    asyncio.run(logger_helper.log_group_removed_event(private_group, adder, context, removal_status="kicked"))
+    assert len(sent_messages) == 5
+    _, rem_msg = sent_messages[4]
+    assert "📢 BOT BANNED / REMOVED" in rem_msg
+    assert '👥 Group: "Secret Club"' in rem_msg
+    assert '👤 Action By: "Alice"' in rem_msg
+    assert '👥 Members Before Removal: "150"' in rem_msg
+    assert '📊 Remaining Groups: "1"' in rem_msg
+
+    # Verify DB marked group inactive
+    updated_group_db = store.get_group_by_id(-100456)
+    assert updated_group_db['is_active'] == 0
+    assert updated_group_db['current_bot_status'] == "kicked"
+    assert store.get_active_group_count() == 1
+
+
+def test_logger_error_reliability(monkeypatch):
+    import logger_helper
+    from unittest.mock import AsyncMock, MagicMock
+
+    bot = AsyncMock()
+    bot.send_message.side_effect = Exception("Telegram API network timeout")
+    context = MagicMock()
+    context.bot = bot
+
+    monkeypatch.setattr(logger_helper.config, "LOG_CHANNEL_ID", -100999)
+
+    # Should log warning internally without crashing caller
+    asyncio.run(logger_helper.send_logger_notification(context, "Test message"))
+
+
+def test_mongo_extended_group_store(monkeypatch):
+    import mongomock
+    import config
+    import store
+
+    mock_client = mongomock.MongoClient()
+    mock_db = mock_client['yuuki_bot_group_test']
+
+    monkeypatch.setattr(config, 'MONGO_URI', 'mongodb://localhost:27017')
+    monkeypatch.setattr(store, '_mongo_client', mock_client)
+    monkeypatch.setattr(store, '_mongo_db', mock_db)
+
+    store.init_db()
+
+    # Add active group
+    store.upsert_group(
+        chat_id=-100777,
+        title="Mongo Group",
+        username="mongogroup",
+        group_link="https://t.me/mongogroup",
+        member_count=50,
+        added_by_user_id=888,
+        current_bot_status="member",
+        is_active=1
+    )
+
+    assert store.get_active_group_count() == 1
+    g = store.get_group_by_id(-100777)
+    assert g['title'] == "Mongo Group"
+    assert g['member_count'] == 50
+    assert g['is_active'] == 1
+
+    # Mark group inactive
+    store.set_group_inactive(-100777, current_bot_status="left", member_count=48)
+    assert store.get_active_group_count() == 0
+    g_updated = store.get_group_by_id(-100777)
+    assert g_updated['is_active'] == 0
+    assert g_updated['current_bot_status'] == "left"
+    assert g_updated['member_count'] == 48

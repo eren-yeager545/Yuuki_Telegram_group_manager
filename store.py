@@ -115,7 +115,19 @@ def init_db():
 
     with closing(conn()) as c:
         cur = c.cursor()
-        cur.execute('CREATE TABLE IF NOT EXISTS groups (chat_id INTEGER PRIMARY KEY, title TEXT, username TEXT, added_at INTEGER, last_seen_at INTEGER)')
+        cur.execute('''CREATE TABLE IF NOT EXISTS groups (
+            chat_id INTEGER PRIMARY KEY,
+            title TEXT,
+            username TEXT,
+            group_link TEXT,
+            member_count INTEGER,
+            added_by_user_id INTEGER,
+            added_at INTEGER,
+            current_bot_status TEXT DEFAULT "member",
+            last_seen_at INTEGER,
+            last_updated INTEGER,
+            is_active INTEGER DEFAULT 1
+        )''')
         cur.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, full_name TEXT, username TEXT, added_at INTEGER, last_seen_at INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS group_members (chat_id INTEGER, user_id INTEGER, last_seen_at INTEGER, status TEXT DEFAULT "member", PRIMARY KEY(chat_id, user_id))')
         cur.execute('CREATE TABLE IF NOT EXISTS settings (chat_id INTEGER, key TEXT, value TEXT, PRIMARY KEY(chat_id, key))')
@@ -146,6 +158,21 @@ def init_db():
         if 'status' not in cols:
             cur.execute("ALTER TABLE group_members ADD COLUMN status TEXT DEFAULT 'member'")
 
+        cur.execute("PRAGMA table_info(groups)")
+        cols = [row[1] for row in cur.fetchall()]
+        if 'group_link' not in cols:
+            cur.execute("ALTER TABLE groups ADD COLUMN group_link TEXT")
+        if 'member_count' not in cols:
+            cur.execute("ALTER TABLE groups ADD COLUMN member_count INTEGER")
+        if 'added_by_user_id' not in cols:
+            cur.execute("ALTER TABLE groups ADD COLUMN added_by_user_id INTEGER")
+        if 'current_bot_status' not in cols:
+            cur.execute("ALTER TABLE groups ADD COLUMN current_bot_status TEXT DEFAULT 'member'")
+        if 'last_updated' not in cols:
+            cur.execute("ALTER TABLE groups ADD COLUMN last_updated INTEGER")
+        if 'is_active' not in cols:
+            cur.execute("ALTER TABLE groups ADD COLUMN is_active INTEGER DEFAULT 1")
+
         c.commit()
 
 
@@ -157,30 +184,131 @@ def _format_time(ts):
     return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
 
-def upsert_group(chat_id, title, username, touch_seen=True):
+def upsert_group(chat_id, title=None, username=None, group_link=None, member_count=None, added_by_user_id=None, current_bot_status='member', touch_seen=True, is_active=1):
     now = _now()
     if is_mongo():
         db = get_mongo_db()
         existing = db['groups'].find_one({'chat_id': chat_id})
+        update_data = {
+            'is_active': is_active,
+            'current_bot_status': current_bot_status,
+            'last_updated': now
+        }
+        if title is not None:
+            update_data['title'] = title
+        if username is not None:
+            update_data['username'] = username
+        if group_link is not None:
+            update_data['group_link'] = group_link
+        if member_count is not None:
+            update_data['member_count'] = member_count
+        if added_by_user_id is not None:
+            update_data['added_by_user_id'] = added_by_user_id
+        if touch_seen:
+            update_data['last_seen_at'] = now
+
         if existing:
-            update_data = {'title': title, 'username': username}
-            if touch_seen:
-                update_data['last_seen_at'] = now
             db['groups'].update_one({'chat_id': chat_id}, {'$set': update_data})
         else:
-            db['groups'].insert_one({
+            doc = {
                 'chat_id': chat_id,
-                'title': title,
+                'title': title if title is not None else str(chat_id),
                 'username': username,
+                'group_link': group_link,
+                'member_count': member_count,
+                'added_by_user_id': added_by_user_id,
                 'added_at': now,
-                'last_seen_at': now
-            })
+                'last_seen_at': now,
+                'last_updated': now,
+                'current_bot_status': current_bot_status,
+                'is_active': is_active
+            }
+            db['groups'].insert_one(doc)
         return
 
     with closing(conn()) as c:
         cur = c.cursor()
-        cur.execute('INSERT INTO groups(chat_id,title,username,added_at,last_seen_at) VALUES(?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title, username=excluded.username, last_seen_at=CASE WHEN ? THEN excluded.last_seen_at ELSE groups.last_seen_at END', (chat_id, title, username, now, now, 1 if touch_seen else 0))
+        existing = cur.execute('SELECT title, username, group_link, member_count, added_by_user_id FROM groups WHERE chat_id=?', (chat_id,)).fetchone()
+        if existing:
+            new_title = title if title is not None else existing[0]
+            new_username = username if username is not None else existing[1]
+            new_link = group_link if group_link is not None else existing[2]
+            new_member_cnt = member_count if member_count is not None else existing[3]
+            new_added_by = added_by_user_id if added_by_user_id is not None else existing[4]
+            cur.execute('''UPDATE groups SET
+                title=?, username=?, group_link=?, member_count=?, added_by_user_id=?,
+                current_bot_status=?, last_updated=?, is_active=?,
+                last_seen_at=CASE WHEN ? THEN ? ELSE last_seen_at END
+                WHERE chat_id=?''',
+                (new_title, new_username, new_link, new_member_cnt, new_added_by,
+                 current_bot_status, now, is_active, 1 if touch_seen else 0, now, chat_id))
+        else:
+            cur.execute('''INSERT INTO groups(
+                chat_id, title, username, group_link, member_count, added_by_user_id,
+                added_at, last_seen_at, last_updated, current_bot_status, is_active
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
+            (chat_id, title if title is not None else str(chat_id), username, group_link, member_count, added_by_user_id,
+             now, now, now, current_bot_status, is_active))
         c.commit()
+
+
+def set_group_inactive(chat_id, current_bot_status='kicked', member_count=None):
+    now = _now()
+    if is_mongo():
+        db = get_mongo_db()
+        update_data = {'is_active': 0, 'current_bot_status': current_bot_status, 'last_updated': now}
+        if member_count is not None:
+            update_data['member_count'] = member_count
+        db['groups'].update_one({'chat_id': chat_id}, {'$set': update_data})
+        return
+
+    with closing(conn()) as c:
+        cur = c.cursor()
+        if member_count is not None:
+            cur.execute('UPDATE groups SET is_active=0, current_bot_status=?, last_updated=?, member_count=? WHERE chat_id=?', (current_bot_status, now, member_count, chat_id))
+        else:
+            cur.execute('UPDATE groups SET is_active=0, current_bot_status=?, last_updated=? WHERE chat_id=?', (current_bot_status, now, chat_id))
+        c.commit()
+
+
+def get_group_by_id(chat_id):
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['groups'].find_one({'chat_id': chat_id})
+        if not doc:
+            return None
+        return {
+            'chat_id': doc.get('chat_id'),
+            'title': doc.get('title'),
+            'username': doc.get('username'),
+            'group_link': doc.get('group_link'),
+            'member_count': doc.get('member_count'),
+            'added_by_user_id': doc.get('added_by_user_id'),
+            'added_at': doc.get('added_at'),
+            'current_bot_status': doc.get('current_bot_status', 'member'),
+            'last_seen_at': doc.get('last_seen_at'),
+            'last_updated': doc.get('last_updated'),
+            'is_active': doc.get('is_active', 1)
+        }
+
+    with closing(conn()) as c:
+        cur = c.cursor()
+        row = cur.execute('SELECT chat_id, title, username, group_link, member_count, added_by_user_id, added_at, current_bot_status, last_seen_at, last_updated, is_active FROM groups WHERE chat_id=?', (chat_id,)).fetchone()
+        if not row:
+            return None
+        return {
+            'chat_id': row[0],
+            'title': row[1],
+            'username': row[2],
+            'group_link': row[3],
+            'member_count': row[4],
+            'added_by_user_id': row[5],
+            'added_at': row[6],
+            'current_bot_status': row[7],
+            'last_seen_at': row[8],
+            'last_updated': row[9],
+            'is_active': row[10]
+        }
 
 
 def upsert_user(user_id, full_name, username, touch_seen=True):
@@ -289,20 +417,20 @@ def clean_zombies(chat_id):
 def get_active_groups():
     if is_mongo():
         db = get_mongo_db()
-        docs = db['groups'].find({}, {'chat_id': 1, 'title': 1})
+        docs = db['groups'].find({'is_active': {'$ne': 0}}, {'chat_id': 1, 'title': 1})
         return [(doc['chat_id'], doc.get('title') or doc['chat_id']) for doc in docs]
 
     with closing(conn()) as c:
-        return c.execute('SELECT chat_id, COALESCE(title, chat_id) FROM groups').fetchall()
+        return c.execute('SELECT chat_id, COALESCE(title, chat_id) FROM groups WHERE is_active IS NULL OR is_active = 1').fetchall()
 
 
 def get_active_group_count():
     if is_mongo():
         db = get_mongo_db()
-        return db['groups'].count_documents({})
+        return db['groups'].count_documents({'is_active': {'$ne': 0}})
 
     with closing(conn()) as c:
-        return c.execute('SELECT COUNT(*) FROM groups').fetchone()[0]
+        return c.execute('SELECT COUNT(*) FROM groups WHERE is_active IS NULL OR is_active = 1').fetchone()[0]
 
 
 def get_user_count():

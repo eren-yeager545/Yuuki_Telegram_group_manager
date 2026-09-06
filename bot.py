@@ -6,7 +6,8 @@ import time
 import uuid
 from collections import defaultdict, deque
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, ChatMemberHandler, filters
+from logger_helper import log_user_started_event, log_group_added_event, log_group_removed_event
 from config import BOT_TOKEN, LOG_CHANNEL_ID, QUIZ_INTERVAL_SECONDS, SEEN_UPDATE_COOLDOWN_SECONDS, PORT, WEBHOOK_URL, WEBHOOK_PATH, WEBHOOK_SECRET
 from store import (
     init_db, get_active_groups, upsert_group, upsert_user, get_filters, get_setting,
@@ -156,7 +157,11 @@ async def run_broadcast(message: str, context: ContextTypes.DEFAULT_TYPE):
 
 async def wrapped_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await log_event(context, 'Bot started by an authorized user [REDACTED]')
+    if user:
+        try:
+            await log_user_started_event(user, context)
+        except Exception as e:
+            logger.warning('Failed sending user start logger event: %s', type(e).__name__)
     await start_cmd(update, context)
 
 
@@ -168,6 +173,31 @@ async def rules_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await rules_cmd(update, context)
 
 
+async def chat_member_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    my_chat_member = update.my_chat_member
+    if not my_chat_member:
+        return
+
+    chat = my_chat_member.chat
+    from_user = my_chat_member.from_user
+    old_status = my_chat_member.old_chat_member.status if my_chat_member.old_chat_member else None
+    new_status = my_chat_member.new_chat_member.status if my_chat_member.new_chat_member else None
+
+    if not chat or chat.type not in ('group', 'supergroup'):
+        return
+
+    bot_id = context.bot.id if context and context.bot else None
+
+    if new_status in ('member', 'administrator') and old_status in ('left', 'kicked', 'restricted', None):
+        await log_group_added_event(chat, from_user, context)
+    elif new_status in ('left', 'kicked') and old_status in ('member', 'administrator'):
+        await log_group_removed_event(chat, from_user, context, removal_status=new_status)
+    elif old_status == 'member' and new_status == 'administrator':
+        upsert_group(chat.id, title=chat.title, username=chat.username, current_bot_status='administrator', is_active=1)
+    elif old_status == 'administrator' and new_status == 'member':
+        upsert_group(chat.id, title=chat.title, username=chat.username, current_bot_status='member', is_active=1)
+
+
 async def service_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     chat = update.effective_chat
@@ -175,15 +205,22 @@ async def service_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     now = int(time.time())
+    bot_id = context.bot.id if context and context.bot else None
+
     if msg.new_chat_members:
+        if bot_id and any(m.id == bot_id for m in msg.new_chat_members):
+            await log_group_added_event(chat, msg.from_user, context)
         for member in msg.new_chat_members:
             upsert_user(member.id, member.full_name, member.username)
             touch_member(chat.id, member.id, now, status='member')
 
     if msg.left_chat_member:
         left_m = msg.left_chat_member
-        upsert_user(left_m.id, left_m.full_name, left_m.username)
-        update_member_status(chat.id, left_m.id, 'left')
+        if bot_id and left_m.id == bot_id:
+            await log_group_removed_event(chat, msg.from_user, context, removal_status='left')
+        else:
+            upsert_user(left_m.id, left_m.full_name, left_m.username)
+            update_member_status(chat.id, left_m.id, 'left')
 
     if get_setting(chat.id, 'clean_service', 'off') == 'on':
         try:
@@ -459,6 +496,7 @@ def main():
     for spec in user_cmds + admin_cmds:
         add_registered_command(app, *spec)
     app.add_handler(CallbackQueryHandler(homepage_callback))
+    app.add_handler(ChatMemberHandler(chat_member_router, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.StatusUpdate.ALL, service_router))
     app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL | filters.ANIMATION | filters.VOICE | filters.AUDIO | filters.CONTACT, message_router))
     if WEBHOOK_URL:
