@@ -4,16 +4,17 @@ import random
 import re
 import time
 import uuid
+from typing import Optional
 from collections import defaultdict, deque
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, ChatMemberHandler, filters
-from logger_helper import log_user_started_event, log_group_added_event, log_group_removed_event
+from logger_helper import log_user_started_event, log_group_added_event, log_group_removed_event, send_logger_notification
 from config import BOT_TOKEN, LOG_CHANNEL_ID, QUIZ_INTERVAL_SECONDS, SEEN_UPDATE_COOLDOWN_SECONDS, PORT, WEBHOOK_URL, WEBHOOK_PATH, WEBHOOK_SECRET
 from store import (
     init_db, get_active_groups, upsert_group, upsert_user, get_filters, get_setting,
     touch_member, update_member_status, get_note, get_random_quiz, get_buttons, list_blacklists,
     get_chat_federation, get_fed_ban, get_expired_temp_actions, clear_temp_action,
-    log_admin_action, delete_user_data, get_global_link,
+    log_admin_action, delete_user_data, get_global_link, record_user_message,
 )
 from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, broadcast_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd
 from admin import *
@@ -26,19 +27,21 @@ group_seen_cache = {}
 active_quizzes = {}
 
 
-async def safe_reply_error(message_obj, public_text='Something went wrong. Reference ID: {cid}'):
-    cid = uuid.uuid4().hex[:12]
-    try:
-        await message_obj.reply_text(public_text.format(cid=cid))
-    except Exception:
-        pass
-    return cid
-
-
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error('Exception while handling an update:', exc_info=context.error)
-    if isinstance(update, Update) and update.effective_message:
-        await safe_reply_error(update.effective_message)
+    msg_obj = None
+    if isinstance(update, Update):
+        if update.effective_message:
+            msg_obj = update.effective_message
+        elif update.callback_query and update.callback_query.message:
+            msg_obj = update.callback_query.message
+
+    if msg_obj:
+        cid = await safe_reply_error(
+            msg_obj,
+            "Gomen ne~ 🥺 Something went wrong! (⁠✿⁠☉⁠｡⁠☉⁠)\nReference ID: {cid}\nPlease provide this reference ID if you need support desu~ 🌸"
+        )
+        logger.error('Error handling update with Reference ID: %s', cid)
 
 
 def register_help(app: Application, category: str, command: str, usage: str, example: str):
@@ -86,17 +89,9 @@ async def datadel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f'Deleted stored data for user ID {user_id}.')
 
 
-async def log_event(context: ContextTypes.DEFAULT_TYPE, text: str):
+async def log_event(context: ContextTypes.DEFAULT_TYPE, text: str, group_chat_id: Optional[int] = None):
     logger.info(text)
-    logger_target = LOG_CHANNEL_ID
-    logger_link = get_global_link('logger_link', '')
-    if logger_target:
-        try:
-            await context.bot.send_message(logger_target, text)
-        except Exception as e:
-            logger.warning('Failed sending log [REDACTED_ERROR]: %s', type(e).__name__)
-    elif logger_link:
-        logger.info('Logger link configured but Bot API logging still requires LOG_CHANNEL_ID/chat id: %s', logger_link)
+    await send_logger_notification(context, text, group_chat_id=group_chat_id)
 
 
 def note_keyboard(chat_id, scope):
@@ -272,6 +267,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if now - last_u >= SEEN_UPDATE_COOLDOWN_SECONDS:
             user_seen_cache[user.id] = now
         touch_member(chat.id, user.id, now, status='member')
+        record_user_message(chat.id, user.id, msg.message_id)
         fed = get_chat_federation(chat.id)
         if fed and get_fed_ban(fed[0], user.id):
             try:
@@ -453,6 +449,7 @@ def main():
         ('kick', kick_cmd, 'Group Management Commands', 'Reply-kick a user', '/kick'),
         ('del', del_cmd, 'Group Management Commands', 'Delete replied message', '/del'),
         ('purge', purge_cmd, 'Group Management Commands', 'Purge from replied message to current', '/purge'),
+        ('dban', dban_cmd, 'Group Management Commands', 'Ban user and purge all their messages', '/dban'),
         ('pin', pin_cmd, 'Group Management Commands', 'Pin replied message', '/pin'),
         ('unpin', unpin_cmd, 'Group Management Commands', 'Clear all pins', '/unpin'),
         ('mute', mute_cmd, 'Group Management Commands', 'Mute replied user, optional duration', '/mute 1h'),

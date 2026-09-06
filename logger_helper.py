@@ -1,12 +1,12 @@
 import datetime
 import logging
-from typing import Optional
+from typing import Optional, List, Union
 from telegram import User, Chat
 from telegram.ext import ContextTypes
 import config
 from store import (
     upsert_user, get_user_count, upsert_group, set_group_inactive,
-    get_active_group_count, get_group_by_id, get_global_link
+    get_active_group_count, get_group_by_id, get_global_link, get_setting
 )
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ def get_bot_name(context: ContextTypes.DEFAULT_TYPE) -> str:
             return context.bot.first_name
         if getattr(context.bot, 'username', None):
             return f"@{context.bot.username}"
-    return "Yuuki Bot"
+    return "Yuuki Bot 🌸"
 
 
 def format_logger_message(event_title: str, body: str, bot_name: str, date_time: str) -> str:
@@ -40,24 +40,63 @@ def format_logger_message(event_title: str, body: str, bot_name: str, date_time:
     )
 
 
-async def send_logger_notification(context: ContextTypes.DEFAULT_TYPE, message_text: str):
-    logger_target = config.LOG_CHANNEL_ID or get_global_link('logger_channel_id', '') or get_global_link('logger_link', '')
-    if not logger_target:
+def parse_logger_target(raw_target: Union[int, str]) -> Optional[Union[int, str]]:
+    if not raw_target:
+        return None
+    if isinstance(raw_target, int):
+        return raw_target if raw_target != 0 else None
+
+    target_str = str(raw_target).strip()
+    if not target_str or target_str == '0':
+        return None
+
+    if (target_str.startswith('-') and target_str[1:].isdigit()) or target_str.isdigit():
+        return int(target_str)
+    if target_str.startswith('@'):
+        return target_str
+
+    if '/c/' in target_str:
+        try:
+            parts = target_str.split('/c/')[1].split('/')
+            if parts and parts[0].isdigit():
+                return int(f"-100{parts[0]}")
+        except Exception:
+            pass
+
+    if 't.me/' in target_str:
+        try:
+            clean = target_str.split('t.me/')[1].split('/')[0].strip()
+            if clean and not clean.startswith('+'):
+                return f"@{clean}"
+        except Exception:
+            pass
+
+    return target_str
+
+
+async def send_logger_notification(context: ContextTypes.DEFAULT_TYPE, message_text: str, group_chat_id: Optional[int] = None):
+    targets = []
+
+    if group_chat_id:
+        group_log_chan = get_setting(group_chat_id, 'log_channel', '') or get_setting(group_chat_id, 'logger_channel_id', '')
+        parsed_g = parse_logger_target(group_log_chan)
+        if parsed_g and parsed_g not in targets:
+            targets.append(parsed_g)
+
+    global_target = config.LOG_CHANNEL_ID or get_global_link('logger_channel_id', '') or get_global_link('logger_link', '')
+    parsed_global = parse_logger_target(global_target)
+    if parsed_global and parsed_global not in targets:
+        targets.append(parsed_global)
+
+    if not targets:
         logger.info("Logger notification skipped: no LOG_CHANNEL_ID or logger link configured.")
         return
 
-    try:
-        target_id = logger_target
-        if isinstance(target_id, str):
-            target_id = target_id.strip()
-            if target_id.startswith('-') and target_id[1:].isdigit():
-                target_id = int(target_id)
-            elif target_id.isdigit():
-                target_id = int(target_id)
-
-        await context.bot.send_message(chat_id=target_id, text=message_text, disable_web_page_preview=True)
-    except Exception as e:
-        logger.warning("Failed sending logger notification: %s", type(e).__name__)
+    for target_id in targets:
+        try:
+            await context.bot.send_message(chat_id=target_id, text=message_text, disable_web_page_preview=True)
+        except Exception as e:
+            logger.warning("Failed sending logger notification to %s: %s", target_id, type(e).__name__)
 
 
 async def get_group_link(chat: Chat, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -109,24 +148,12 @@ async def log_user_started_event(user: User, context: ContextTypes.DEFAULT_TYPE)
         f'📊 Total Users: "{total_users}"'
     )
 
-    msg = format_logger_message("NEW USER STARTED", body, bot_name, now_str)
+    msg = format_logger_message("NEW USER STARTED 🌸", body, bot_name, now_str)
     await send_logger_notification(context, msg)
 
 
 async def log_group_added_event(chat: Chat, from_user: Optional[User], context: ContextTypes.DEFAULT_TYPE):
     if not chat:
-        return
-
-    existing = get_group_by_id(chat.id)
-    if existing and existing.get('is_active') == 1 and existing.get('current_bot_status') in ('member', 'administrator'):
-        # Already active, touch_seen without re-logging
-        upsert_group(
-            chat_id=chat.id,
-            title=chat.title,
-            username=chat.username,
-            current_bot_status=existing.get('current_bot_status', 'member'),
-            is_active=1
-        )
         return
 
     group_name = chat.title or str(chat.id)
@@ -173,8 +200,8 @@ async def log_group_added_event(chat: Chat, from_user: Optional[User], context: 
         f'📊 Total Groups: "{total_groups}"'
     )
 
-    msg = format_logger_message("NEW GROUP ADDED", body, bot_name, now_str)
-    await send_logger_notification(context, msg)
+    msg = format_logger_message("NEW GROUP ADDED ✨", body, bot_name, now_str)
+    await send_logger_notification(context, msg, group_chat_id=chat.id)
 
 
 async def log_group_removed_event(chat: Chat, from_user: Optional[User], context: ContextTypes.DEFAULT_TYPE, removal_status='kicked'):
@@ -182,9 +209,6 @@ async def log_group_removed_event(chat: Chat, from_user: Optional[User], context
         return
 
     existing_group = get_group_by_id(chat.id)
-    if existing_group and existing_group.get('is_active') == 0:
-        # Already inactive
-        return
 
     group_name = chat.title or (existing_group.get('title') if existing_group else None) or str(chat.id)
 
@@ -236,5 +260,5 @@ async def log_group_removed_event(chat: Chat, from_user: Optional[User], context
         f'📊 Remaining Groups: "{total_groups}"'
     )
 
-    msg = format_logger_message("BOT BANNED / REMOVED", body, bot_name, now_str)
-    await send_logger_notification(context, msg)
+    msg = format_logger_message("BOT BANNED / REMOVED 💔", body, bot_name, now_str)
+    await send_logger_notification(context, msg, group_chat_id=chat.id)

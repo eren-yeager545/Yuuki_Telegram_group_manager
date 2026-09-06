@@ -111,6 +111,7 @@ def init_db():
         db['temp_actions'].create_index([('chat_id', 1), ('user_id', 1), ('action', 1)], unique=True)
         db['welcome_buttons'].create_index([('chat_id', 1), ('label', 1), ('url', 1)], unique=True)
         db['rules_buttons'].create_index([('chat_id', 1), ('label', 1), ('url', 1)], unique=True)
+        db['user_messages'].create_index([('chat_id', 1), ('user_id', 1), ('message_id', 1)], unique=True)
         return
 
     with closing(conn()) as c:
@@ -146,6 +147,7 @@ def init_db():
         cur.execute('CREATE TABLE IF NOT EXISTS temp_actions (chat_id INTEGER, user_id INTEGER, action TEXT, until_ts INTEGER, PRIMARY KEY(chat_id, user_id, action))')
         cur.execute('CREATE TABLE IF NOT EXISTS welcome_buttons (chat_id INTEGER, label TEXT, url TEXT, sort_order INTEGER DEFAULT 0, PRIMARY KEY(chat_id, label, url))')
         cur.execute('CREATE TABLE IF NOT EXISTS rules_buttons (chat_id INTEGER, label TEXT, url TEXT, sort_order INTEGER DEFAULT 0, PRIMARY KEY(chat_id, label, url))')
+        cur.execute('CREATE TABLE IF NOT EXISTS user_messages (chat_id INTEGER, user_id INTEGER, message_id INTEGER, created_at INTEGER, PRIMARY KEY(chat_id, user_id, message_id))')
 
         # Schema migrations for existing SQLite databases
         cur.execute("PRAGMA table_info(filters)")
@@ -1187,3 +1189,43 @@ def set_global_link(key, value):
 def get_global_link(key, default=''):
     val = get_setting(0, key, default)
     return val if val else default
+
+
+def record_user_message(chat_id, user_id, message_id):
+    now = int(time.time())
+    if is_mongo():
+        db = get_mongo_db()
+        db['user_messages'].replace_one(
+            {'chat_id': chat_id, 'user_id': user_id, 'message_id': message_id},
+            {'chat_id': chat_id, 'user_id': user_id, 'message_id': message_id, 'created_at': now},
+            upsert=True
+        )
+    else:
+        with closing(conn()) as c:
+            c.execute('INSERT OR REPLACE INTO user_messages(chat_id, user_id, message_id, created_at) VALUES(?,?,?,?)',
+                      (chat_id, user_id, message_id, now))
+            c.commit()
+
+
+def get_user_messages(chat_id, user_id):
+    if is_mongo():
+        db = get_mongo_db()
+        docs = list(db['user_messages'].find({'chat_id': chat_id, 'user_id': user_id}).sort('message_id', -1))
+        return [d['message_id'] for d in docs]
+    else:
+        with closing(conn()) as c:
+            rows = c.execute('SELECT message_id FROM user_messages WHERE chat_id=? AND user_id=? ORDER BY message_id DESC',
+                             (chat_id, user_id)).fetchall()
+            return [r[0] for r in rows]
+
+
+def clear_user_messages(chat_id, user_id):
+    msg_ids = get_user_messages(chat_id, user_id)
+    if is_mongo():
+        db = get_mongo_db()
+        db['user_messages'].delete_many({'chat_id': chat_id, 'user_id': user_id})
+    else:
+        with closing(conn()) as c:
+            c.execute('DELETE FROM user_messages WHERE chat_id=? AND user_id=?', (chat_id, user_id))
+            c.commit()
+    return msg_ids

@@ -80,9 +80,9 @@ def build_category_help_text(registry: dict, category: str) -> str:
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     registry = context.application.bot_data.get('help_registry', {})
     text = (
-        "Hi, I am a Telegram group manager bot that keeps groups tidy.\n\n"
-        "Use the buttons below to read the privacy policy, browse command help by category, or join official support and updates.\n\n"
-        "Data notice: the bot stores only operational moderation and settings data needed for features like warns, reports, notes, welcomes, logs, federation tools, and quiz/game state."
+        "Konnichiwa! 🌸 I'm Yuki, a 17-year-old college student from Tokyo! ✨ I'm super excited to help keep your group active, clean, and happy! 🎀\n\n"
+        "Use the buttons below to browse my command menu, read our privacy policy, or join our official support family! 💕\n\n"
+        "Data notice: I only store essential operational moderation and setting details (like warns, notes, rules, welcomes, and logs) to keep your group safe desu~ (⁠人⁠*⁠´⁠∀⁠｀⁠)"
     )
     await update.message.reply_text(text, reply_markup=build_start_keyboard(registry))
 
@@ -94,14 +94,15 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start = time.time()
-    msg = await update.message.reply_text("🏓 Measuring ping...")
+    msg = await update.message.reply_text("🏓 Measuring ping desu~ ✨")
     elapsed = (time.time() - start) * 1000
     uptime_str = format_uptime(time.time() - BOT_START_TIME)
 
     text = (
-        f"🏓 Ping: {int(elapsed)} ms\n"
+        f"Pong! 🏓✨\n\n"
         f"⚡ Latency: {int(elapsed)} ms\n"
-        f"⏱ Uptime: {uptime_str}"
+        f"⏱ Uptime: {uptime_str}\n\n"
+        f"Yuki is super energetic and ready to help! (⁠≧⁠▽⁠≦⁠)🌸"
     )
     await msg.edit_text(text)
 
@@ -112,12 +113,11 @@ async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if custom_rules:
         await update.message.reply_text(custom_rules)
     else:
-        await update.message.reply_text("🌸 No rules configured for this group yet! Be kind and enjoy your stay. 💕")
+        await update.message.reply_text("🌸 Group Rules 🌸\n\nNo rules configured for this group yet! Be super sweet to everyone and enjoy your time here desu~ 💕 (⁠人⁠*⁠´⁠∀⁠｀⁠)")
 
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start = time.time()
-    # Test DB connection
     db_connected = False
     try:
         if is_mongo():
@@ -136,15 +136,16 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     groups_count = get_active_group_count()
     users_count = get_user_count()
     uptime_str = format_uptime(time.time() - BOT_START_TIME)
-    db_status = "Connected" if db_connected else "Disconnected"
+    db_status = "Connected ✨" if db_connected else "Disconnected 🥺"
 
     text = (
-        "📊 Bot Statistics\n\n"
-        f"👥 Total Groups: {groups_count}\n"
-        f"👤 Total Users Served: {users_count}\n\n"
-        f"⏱ Bot Uptime: {uptime_str}\n\n"
+        "📊 Yuki's Status Report ~ 🌸\n\n"
+        f"👥 Groups Served: {groups_count}\n"
+        f"👤 Cute Members: {users_count}\n\n"
+        f"⏱ Bot Uptime: {uptime_str}\n"
         f"🗄 Database: {db_status}\n"
-        f"🏓 Latency: {latency} ms"
+        f"🏓 Latency: {latency} ms\n\n"
+        "Everything is running smoothly desu! ✨ (⁠≧⁠∇⁠≦⁠)/"
     )
     await update.message.reply_text(text)
 
