@@ -8,7 +8,7 @@ from typing import Optional
 from collections import defaultdict, deque
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, ChatMemberHandler, filters
-from logger_helper import log_user_started_event, log_group_added_event, log_group_removed_event, send_logger_notification
+from logger_helper import log_user_started_event, log_group_added_event, log_group_removed_event, log_user_joined_group_event, send_logger_notification
 from config import BOT_TOKEN, LOG_CHANNEL_ID, QUIZ_INTERVAL_SECONDS, SEEN_UPDATE_COOLDOWN_SECONDS, PORT, WEBHOOK_URL, WEBHOOK_PATH, WEBHOOK_SECRET
 from store import (
     init_db, get_active_groups, upsert_group, upsert_user, get_filters, get_setting,
@@ -138,12 +138,15 @@ async def hourly_quiz(context: ContextTypes.DEFAULT_TYPE):
             logger.warning('Quiz failed [REDACTED_TARGET]: %s', type(e).__name__)
 
 
-async def run_broadcast(message: str, context: ContextTypes.DEFAULT_TYPE):
+async def run_broadcast(message: str, context: ContextTypes.DEFAULT_TYPE, from_chat_id: Optional[int] = None, from_message_id: Optional[int] = None):
     groups = get_active_groups()
     sent = 0
     for chat_id, _ in groups:
         try:
-            await context.bot.send_message(chat_id, message)
+            if from_chat_id and from_message_id:
+                await context.bot.copy_message(chat_id=chat_id, from_chat_id=from_chat_id, message_id=from_message_id)
+            else:
+                await context.bot.send_message(chat_id, message)
             sent += 1
         except Exception:
             pass
@@ -208,6 +211,11 @@ async def service_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for member in msg.new_chat_members:
             upsert_user(member.id, member.full_name, member.username)
             touch_member(chat.id, member.id, now, status='member')
+            if not bot_id or member.id != bot_id:
+                try:
+                    await log_user_joined_group_event(member, chat, context)
+                except Exception as e:
+                    logger.warning('Failed sending user joined logger event: %s', type(e).__name__)
 
     if msg.left_chat_member:
         left_m = msg.left_chat_member
@@ -384,15 +392,27 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             matched = False
             if f_type == 'text' and keyword in lower:
                 matched = True
-            elif f_type == 'sticker' and has_sticker and (keyword in (msg.sticker.emoji or '').lower() or keyword in (msg.sticker.set_name or '').lower() or keyword in lower):
+            elif f_type == 'sticker' and (has_sticker and (keyword in (msg.sticker.emoji or '').lower() or keyword in (msg.sticker.set_name or '').lower()) or keyword in lower):
                 matched = True
-            elif f_type == 'voice' and has_voice and keyword in lower:
+            elif f_type == 'voice' and keyword in lower:
                 matched = True
-            elif f_type == 'link' and has_link and keyword in lower:
+            elif f_type == 'link' and keyword in lower:
                 matched = True
 
             if matched:
-                await msg.reply_text(reply)
+                if f_type == 'sticker':
+                    try:
+                        await msg.reply_sticker(reply)
+                    except Exception:
+                        await msg.reply_text(f"[{keyword}] {reply}")
+                elif f_type == 'voice':
+                    try:
+                        await msg.reply_voice(reply)
+                    except Exception:
+                        await msg.reply_text(f"[{keyword}] {reply}")
+                else:
+                    reply_text = reply if keyword in reply.lower() else f"[{keyword}] {reply}"
+                    await msg.reply_text(reply_text)
                 break
 
 

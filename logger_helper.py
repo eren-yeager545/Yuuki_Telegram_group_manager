@@ -262,3 +262,26 @@ async def log_group_removed_event(chat: Chat, from_user: Optional[User], context
 
     msg = format_logger_message("BOT BANNED / REMOVED 💔", body, bot_name, now_str)
     await send_logger_notification(context, msg, group_chat_id=chat.id)
+
+
+async def log_user_joined_group_event(user: User, chat: Chat, context: ContextTypes.DEFAULT_TYPE):
+    if not user or not chat:
+        return
+    upsert_user(user.id, user.full_name, user.username)
+    total_users = get_user_count()
+    now_str = format_utc_now()
+    bot_name = get_bot_name(context)
+    first_name = user.first_name or user.full_name or 'User'
+    username_str = f'@{user.username}' if user.username else '"Not Set"'
+    group_name = chat.title or str(chat.id)
+    body = (
+        f'👤 User: "{first_name}"\n'
+        f'🆔 User ID: "{user.id}"\n'
+        f'🔗 Username: {username_str}\n'
+        f'👥 Group: "{group_name}"\n'
+        f'🆔 Group ID: "{chat.id}"\n'
+        f'🕐 Joined At: "{now_str}"\n\n'
+        f'📊 Total Users: "{total_users}"'
+    )
+    msg = format_logger_message('USER JOINED GROUP 🌸', body, bot_name, now_str)
+    await send_logger_notification(context, msg, group_chat_id=chat.id)

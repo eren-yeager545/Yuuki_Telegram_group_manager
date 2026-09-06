@@ -247,7 +247,7 @@ def test_command_logic(monkeypatch, tmp_path):
 
     # Test format_user_tag and format_user_link
     assert admin.format_user_tag(100, "Alice", "alice") == "@alice"
-    assert admin.format_user_tag(200, "Bob", None) == '<a href="tg://user?id=200">Bob</a>'
+    assert admin.format_user_tag(200, "Bob", None) == 'Bob (<a href="tg://user?id=200">tap to open profile</a>)'
 
     # Test zombies functions
     store.touch_member(-1001, 301, status='left')
