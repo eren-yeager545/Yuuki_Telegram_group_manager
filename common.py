@@ -228,12 +228,13 @@ async def addlogger_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS):
         await update.message.reply_text('Owner only command.')
         return
-    link = update.message.text.partition(' ')[2].strip()
-    if not _valid_public_link(link):
-        await update.message.reply_text('Usage: /addlogger <https://t.me/your_logger_channel>')
+    arg = update.message.text.partition(' ')[2].strip()
+    if not arg:
+        await update.message.reply_text('Usage: /addlogger <channel_id | @channel_username | link>')
         return
-    set_global_link('logger_link', link)
-    await update.message.reply_text('Logger link updated.')
+    set_global_link('logger_channel_id', arg)
+    set_global_link('logger_link', arg)
+    await update.message.reply_text('Logger channel reference updated.')
 
 
 if __name__ == '__main__':
