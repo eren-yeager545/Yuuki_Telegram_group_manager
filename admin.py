@@ -102,7 +102,7 @@ async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if target:
         await context.bot.ban_chat_member(update.effective_chat.id, target.id)
         log_admin_action(update.effective_chat.id, update.effective_user.id, 'ban', target.id)
-        await update.message.reply_text(f'Banned {target.full_name}.')
+        await update.message.reply_text(f'🌸 Banned {target.full_name} successfully! ✨')
 
 
 async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -115,9 +115,9 @@ async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = int(context.args[0])
         await context.bot.unban_chat_member(update.effective_chat.id, uid, only_if_banned=True)
         log_admin_action(update.effective_chat.id, update.effective_user.id, 'unban', uid)
-        await update.message.reply_text(f'Unbanned {uid}.')
+        await update.message.reply_text(f'🌸 Unbanned {uid} successfully! ✨')
     except Exception:
-        await update.message.reply_text('Failed to unban that user id.')
+        await update.message.reply_text('🌸 Failed to unban that user ID ✨')
 
 
 async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -128,7 +128,7 @@ async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.ban_chat_member(update.effective_chat.id, target.id)
         await context.bot.unban_chat_member(update.effective_chat.id, target.id)
         log_admin_action(update.effective_chat.id, update.effective_user.id, 'kick', target.id)
-        await update.message.reply_text(f'Kicked {target.full_name}.')
+        await update.message.reply_text(f'🌸 Kicked {target.full_name} successfully! ✨')
 
 
 async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -196,7 +196,7 @@ async def mute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.restrict_chat_member(update.effective_chat.id, target.id, permissions=ChatPermissions(can_send_messages=False))
             action_name = 'mute'
         log_admin_action(update.effective_chat.id, update.effective_user.id, action_name, target.id)
-        await update.message.reply_text(f'Muted {target.full_name}.')
+        await update.message.reply_text(f'🌸 Muted {target.full_name} successfully! ✨')
 
 
 async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -208,7 +208,7 @@ async def unmute_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.restrict_chat_member(update.effective_chat.id, target.id, permissions=perms)
         clear_temp_action(update.effective_chat.id, target.id, 'tmute')
         log_admin_action(update.effective_chat.id, update.effective_user.id, 'unmute', target.id)
-        await update.message.reply_text(f'Unmuted {target.full_name}.')
+        await update.message.reply_text(f'🌸 Unmuted {target.full_name} successfully! ✨')
 
 
 async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -221,7 +221,7 @@ async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         limit = int(get_setting(update.effective_chat.id, 'warn_limit', '3'))
         action = get_setting(update.effective_chat.id, 'warn_mode', 'ban')
         log_admin_action(update.effective_chat.id, update.effective_user.id, 'warn', target.id, f'count={count};reason={reason}')
-        await update.message.reply_text(f'{target.full_name} now has {count} warn(s). Limit: {limit}. Action: {action}.')
+        await update.message.reply_text(f'🌸 {target.full_name} now has {count} warn(s) ✨ (Limit: {limit}, Action: {action})')
         if count >= limit:
             try:
                 await apply_action(update.effective_chat.id, target.id, action, context, parse_duration_to_seconds(get_setting(update.effective_chat.id, 'warn_time', '1h')))
@@ -261,7 +261,7 @@ async def clearwarns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if target:
         reset_warns(update.effective_chat.id, target.id)
         log_admin_action(update.effective_chat.id, update.effective_user.id, 'clearwarns', target.id)
-        await update.message.reply_text(f'Cleared warns for {target.full_name}.')
+        await update.message.reply_text(f'🌸 Cleared warns for {target.full_name} successfully! ✨')
 
 
 async def warnlimit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -362,7 +362,7 @@ async def lock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('Usage: /lock ' + ', '.join(sorted(valid)))
         return
     set_setting(update.effective_chat.id, 'lock_' + context.args[0], 'on')
-    await update.message.reply_text(f'Locked {context.args[0]}.')
+    await update.message.reply_text(f'🌸 Locked {context.args[0]} successfully! ✨')
 
 
 async def unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -372,7 +372,7 @@ async def unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('Usage: /unlock item')
         return
     set_setting(update.effective_chat.id, 'lock_' + context.args[0], 'off')
-    await update.message.reply_text(f'Unlocked {context.args[0]}.')
+    await update.message.reply_text(f'🌸 Unlocked {context.args[0]} successfully! ✨')
 
 
 async def locks_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

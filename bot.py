@@ -25,13 +25,12 @@ group_seen_cache = {}
 active_quizzes = {}
 
 
-async def safe_reply_error(message_obj, public_text='Something went wrong. Reference ID: {cid}'):
-    cid = uuid.uuid4().hex[:12]
+async def safe_reply_error(message_obj, public_text="Sorry, I couldn't complete that request because an unexpected error occurred 🌸✨ Please try again later!"):
     try:
-        await message_obj.reply_text(public_text.format(cid=cid))
+        await message_obj.reply_text(public_text)
     except Exception:
         pass
-    return cid
+    return None
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

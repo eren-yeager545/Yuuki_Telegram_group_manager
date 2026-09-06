@@ -16,7 +16,7 @@ def build_help_text(registry: dict) -> str:
         'Owner Commands',
         'Owner/Sudo Commands',
     ]
-    lines = ['🌸 Yuuki Full Help Menu', '']
+    lines = ['🌸 ✨ **Yuuki\'s Command Menu** ✨ 🌸', '']
     for category in order:
         cmds = registry.get(category, [])
         if not cmds:
@@ -57,9 +57,9 @@ def build_category_help_text(registry: dict, category: str) -> str:
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     registry = context.application.bot_data.get('help_registry', {})
     text = (
-        "Hi, I am a Telegram group manager bot that keeps groups tidy.\n\n"
-        "Use the buttons below to read the privacy policy, browse command help by category, or join official support and updates.\n\n"
-        "Data notice: the bot stores only operational moderation and settings data needed for features like warns, reports, notes, welcomes, logs, federation tools, and quiz/game state."
+        "🌸 Hello! I am Yuuki, your community and group management assistant ✨\n\n"
+        "Use the buttons below to read the privacy policy, browse command help by category, or join official support and updates 🌷\n\n"
+        "Data notice: the bot stores only operational moderation and settings data needed for features like warns, reports, notes, welcomes, logs, federation tools, and quiz/game state 💖"
     )
     await update.message.reply_text(text, reply_markup=build_start_keyboard(registry))
 
@@ -70,24 +70,24 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Pong 🌙')
+    await update.message.reply_text("🌸 Pong! Yuuki is online and operational! ✨⚡️")
 
 
 async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Be kind, avoid spam, and do not ask silly questions too often.')
+    await update.message.reply_text("🌸 **Group Rules** ✨\n\n1. Be kind and respectful 🌷\n2. Avoid spam and excessive self-promotion 🚫\n3. Follow admin instructions 🌸")
 
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('I am watching the group quietly and doing my work just fine.')
+    await update.message.reply_text("🌸 **Yuuki Status** ✨\n\n• Status: Active & Operational ⚡️\n• Monitoring: Smooth & Tidy 💖")
 
 
 async def privacy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "🔐 Privacy Policy for Yuuki\n\n"
-        "What is stored: basic user and chat identifiers, moderation history such as warns and reports, configured notes/filters/welcome settings, button metadata, federation data, and limited audit logs needed to run the bot safely.\n\n"
-        "Why it is stored: to provide moderation, anti-spam, automation, command help, federation controls, support troubleshooting, and abuse prevention.\n\n"
-        "Who can act on deletion: the bot owners can process explicit deletion requests with /datadel for a specific user ID.\n\n"
-        "Retention limits: some stored content is capped by per-group quotas and reports are trimmed by retention policy."
+        "🔐 **Privacy Policy for Yuuki** 🌸\n\n"
+        "What is stored: basic user and chat identifiers, moderation history such as warns and reports, configured notes/filters/welcome settings, button metadata, federation data, and limited audit logs needed to run the bot safely ✨\n\n"
+        "Why it is stored: to provide moderation, anti-spam, automation, command help, federation controls, support troubleshooting, and abuse prevention 🌷\n\n"
+        "Who can act on deletion: the bot owners can process explicit deletion requests with /datadel for a specific user ID 💖\n\n"
+        "Retention limits: some stored content is capped by per-group quotas and reports are trimmed by retention policy ✨"
     )
     await update.message.reply_text(text)
 
@@ -95,18 +95,18 @@ async def privacy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or not is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS):
-        await update.message.reply_text('Only owner or sudo can use broadcast.')
+        await update.message.reply_text("🌸 Only owner or sudo can use broadcast ✨")
         return
     message = update.message.text.partition(' ')[2].strip()
     if not message:
-        await update.message.reply_text('Usage: /broadcast your message')
+        await update.message.reply_text("🌸 Usage: /broadcast your message ✨")
         return
     runner = context.application.bot_data.get('broadcast_runner')
     if not runner:
-        await update.message.reply_text('Broadcast system is unavailable right now.')
+        await update.message.reply_text("🌸 Broadcast system is unavailable right now ✨")
         return
     await runner(message, context)
-    await update.message.reply_text('Broadcast finished.')
+    await update.message.reply_text("🌸 Broadcast completed successfully! ✨💖")
 
 
 def _valid_public_link(value: str) -> bool:
@@ -116,40 +116,40 @@ def _valid_public_link(value: str) -> bool:
 async def addsupport_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or not is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS):
-        await update.message.reply_text('Owner only command.')
+        await update.message.reply_text("🌸 Owner only command ✨")
         return
     link = update.message.text.partition(' ')[2].strip()
     if not _valid_public_link(link):
-        await update.message.reply_text('Usage: /addsupport <https://t.me/your_support_group>')
+        await update.message.reply_text("🌸 Usage: /addsupport <https://t.me/your_support_group> ✨")
         return
     set_global_link('support_group_url', link)
-    await update.message.reply_text('Support group link updated.')
+    await update.message.reply_text("🌸 Support group link updated successfully! ✨💖")
 
 
 async def addchannel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or not is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS):
-        await update.message.reply_text('Owner only command.')
+        await update.message.reply_text("🌸 Owner only command ✨")
         return
     link = update.message.text.partition(' ')[2].strip()
     if not _valid_public_link(link):
-        await update.message.reply_text('Usage: /addchannel <https://t.me/your_update_channel>')
+        await update.message.reply_text("🌸 Usage: /addchannel <https://t.me/your_update_channel> ✨")
         return
     set_global_link('update_channel_url', link)
-    await update.message.reply_text('Update channel link updated.')
+    await update.message.reply_text("🌸 Update channel link updated successfully! ✨💖")
 
 
 async def addlogger_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or not is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS):
-        await update.message.reply_text('Owner only command.')
+        await update.message.reply_text("🌸 Owner only command ✨")
         return
     link = update.message.text.partition(' ')[2].strip()
     if not _valid_public_link(link):
-        await update.message.reply_text('Usage: /addlogger <https://t.me/your_logger_channel>')
+        await update.message.reply_text("🌸 Usage: /addlogger <https://t.me/your_logger_channel> ✨")
         return
     set_global_link('logger_link', link)
-    await update.message.reply_text('Logger link updated.')
+    await update.message.reply_text("🌸 Logger link updated successfully! ✨💖")
 
 
 if __name__ == '__main__':

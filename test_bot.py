@@ -45,7 +45,6 @@ def test_post_init_does_not_schedule_expire_temp_actions():
         assert callback.__name__ != 'expire_temp_actions'
 
 
-
 def test_get_conn_and_store_functions(tmp_path, monkeypatch):
     import store
     db_file = str(tmp_path / "test_bot.db")
@@ -74,7 +73,9 @@ def test_error_handler_with_message():
     asyncio.run(error_handler(update, context))
 
     mock_msg.reply_text.assert_called_once()
-    assert "Something went wrong. Reference ID:" in mock_msg.reply_text.call_args[0][0]
+    reply_text = mock_msg.reply_text.call_args[0][0]
+    assert "Sorry, I couldn't complete that request because an unexpected error occurred 🌸✨ Please try again later!" in reply_text
+    assert "Reference ID" not in reply_text
 
 
 def test_error_handler_without_message():
@@ -89,3 +90,48 @@ def test_error_handler_without_message():
 
     # Should log without raising any exception
     asyncio.run(error_handler(update, context))
+
+
+def test_user_command_ping():
+    from unittest.mock import AsyncMock, MagicMock
+    from common import ping_cmd
+
+    update = MagicMock()
+    update.message = AsyncMock()
+    context = MagicMock()
+
+    asyncio.run(ping_cmd(update, context))
+    update.message.reply_text.assert_called_once()
+    assert "🌸 Pong!" in update.message.reply_text.call_args[0][0]
+
+
+def test_admin_command_ban(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+    import store
+    db_file = str(tmp_path / "test_bot.db")
+    monkeypatch.setattr(store, "DB_PATH", db_file)
+    store.init_db()
+
+    import admin
+
+    update = MagicMock()
+    update.effective_chat.id = 123
+    update.effective_user.id = 456
+    update.message = AsyncMock()
+
+    target_user = MagicMock()
+    target_user.id = 789
+    target_user.full_name = "Test User"
+    update.message.reply_to_message.from_user = target_user
+
+    context = MagicMock()
+    context.bot.ban_chat_member = AsyncMock()
+
+    async def mock_admin_only(upd, ctx):
+        return True
+
+    monkeypatch.setattr(admin, "admin_only", mock_admin_only)
+
+    asyncio.run(admin.ban_cmd(update, context))
+    update.message.reply_text.assert_called_once()
+    assert "🌸 Banned Test User successfully! ✨" in update.message.reply_text.call_args[0][0]
