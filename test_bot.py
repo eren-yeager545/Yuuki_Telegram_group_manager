@@ -143,9 +143,9 @@ def test_mongo_store_operations(monkeypatch):
 
     # Test filters
     assert store.check_chat_quota(1001, 'filters') is True
-    store.save_filter(1001, 'hello', 'world')
-    assert store.get_filters(1001) == [('hello', 'world')]
-    store.delete_filter(1001, 'hello')
+    store.save_filter(1001, 'hello', 'world', 'text')
+    assert store.get_filters(1001) == [('hello', 'world', 'text')]
+    store.delete_filter(1001, 'hello', 'text')
     assert store.get_filters(1001) == []
 
     # Test quizzes
@@ -220,3 +220,40 @@ def test_mongo_store_operations(monkeypatch):
     # Test global links
     store.set_global_link('support_group_url', 'https://t.me/testsupport')
     assert store.get_global_link('support_group_url') == 'https://t.me/testsupport'
+
+
+def test_command_logic(monkeypatch, tmp_path):
+    import store
+    import common
+    import admin
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import Update, User, Chat, Message, ChatMember
+
+    db_file = str(tmp_path / "test_cmd_bot.db")
+    monkeypatch.setattr(store, "DB_PATH", db_file)
+    store.init_db()
+
+    # Test format_uptime
+    assert common.format_uptime(10) == "10s"
+    assert common.format_uptime(332) == "5m 32s"
+    assert common.format_uptime(8040) == "2h 14m"
+    assert common.format_uptime(98420) == "1d 3h 20m 20s"
+
+    # Test parse_duration_to_seconds
+    assert admin.parse_duration_to_seconds("10m") == 600
+    assert admin.parse_duration_to_seconds("2h") == 7200
+    assert admin.parse_duration_to_seconds("1d") == 86400
+    assert admin.parse_duration_to_seconds("invalid") is None
+
+    # Test format_user_tag and format_user_link
+    assert admin.format_user_tag(100, "Alice", "alice") == "@alice"
+    assert admin.format_user_tag(200, "Bob", None) == '<a href="tg://user?id=200">Bob</a>'
+
+    # Test zombies functions
+    store.touch_member(-1001, 301, status='left')
+    zombies = store.list_zombies(-1001)
+    assert len(zombies) == 1
+    assert zombies[0][0] == 301
+    cleaned = store.clean_zombies(-1001)
+    assert cleaned == 1
+    assert len(store.list_zombies(-1001)) == 0

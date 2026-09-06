@@ -1,8 +1,31 @@
+import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from config import OWNER_IDS, SUDO_USERS, SUPPORT_GROUP_URL, UPDATE_CHANNEL_URL
-from store import get_global_link, set_global_link
+from store import (
+    get_global_link, set_global_link, get_active_group_count, get_user_count,
+    is_mongo, conn, get_setting
+)
 from helpers import is_owner_or_sudo
+
+BOT_START_TIME = time.time()
+
+
+def format_uptime(seconds: float) -> str:
+    secs = int(seconds)
+    days, secs = divmod(secs, 86400)
+    hours, secs = divmod(secs, 3600)
+    minutes, secs = divmod(secs, 60)
+    parts = []
+    if days > 0:
+        parts.append(f"{days}d")
+    if hours > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0:
+        parts.append(f"{minutes}m")
+    if secs > 0 or not parts:
+        parts.append(f"{secs}s")
+    return " ".join(parts)
 
 
 def build_help_text(registry: dict) -> str:
@@ -70,24 +93,85 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Pong 🌙')
+    start = time.time()
+    msg = await update.message.reply_text("🏓 Measuring ping...")
+    elapsed = (time.time() - start) * 1000
+    uptime_str = format_uptime(time.time() - BOT_START_TIME)
+
+    text = (
+        f"🏓 Ping: {int(elapsed)} ms\n"
+        f"⚡ Latency: {int(elapsed)} ms\n"
+        f"⏱ Uptime: {uptime_str}"
+    )
+    await msg.edit_text(text)
 
 
 async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Be kind, avoid spam, and do not ask silly questions too often.')
+    chat = update.effective_chat
+    custom_rules = get_setting(chat.id, 'rules_text', '') if chat else ''
+    if custom_rules:
+        await update.message.reply_text(custom_rules)
+    else:
+        await update.message.reply_text("🌸 No rules configured for this group yet! Be kind and enjoy your stay. 💕")
 
 
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('I am watching the group quietly and doing my work just fine.')
+    start = time.time()
+    # Test DB connection
+    db_connected = False
+    try:
+        if is_mongo():
+            from store import get_mongo_db
+            db = get_mongo_db()
+            db.command('ping')
+            db_connected = True
+        else:
+            with conn() as c:
+                c.execute("SELECT 1")
+            db_connected = True
+    except Exception:
+        db_connected = False
+
+    latency = int((time.time() - start) * 1000)
+    groups_count = get_active_group_count()
+    users_count = get_user_count()
+    uptime_str = format_uptime(time.time() - BOT_START_TIME)
+    db_status = "Connected" if db_connected else "Disconnected"
+
+    text = (
+        "📊 Bot Statistics\n\n"
+        f"👥 Total Groups: {groups_count}\n"
+        f"👤 Total Users Served: {users_count}\n\n"
+        f"⏱ Bot Uptime: {uptime_str}\n\n"
+        f"🗄 Database: {db_status}\n"
+        f"🏓 Latency: {latency} ms"
+    )
+    await update.message.reply_text(text)
 
 
 async def privacy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    support_url = get_global_link('support_group_url', SUPPORT_GROUP_URL)
     text = (
-        "🔐 Privacy Policy for Yuuki\n\n"
-        "What is stored: basic user and chat identifiers, moderation history such as warns and reports, configured notes/filters/welcome settings, button metadata, federation data, and limited audit logs needed to run the bot safely.\n\n"
-        "Why it is stored: to provide moderation, anti-spam, automation, command help, federation controls, support troubleshooting, and abuse prevention.\n\n"
-        "Who can act on deletion: the bot owners can process explicit deletion requests with /datadel for a specific user ID.\n\n"
-        "Retention limits: some stored content is capped by per-group quotas and reports are trimmed by retention policy."
+        "📦 Data Storage\n"
+        "We store minimal operational data required for moderation and group management, including Telegram user IDs, chat IDs, custom notes, filters, group rules, moderation logs, warning counters, and federation memberships.\n\n"
+        "🍪 Cookies\n"
+        "The bot and its inline web features do not use cookies.\n\n"
+        "📥 Collection\n"
+        "Information is collected automatically when users interact with the bot in groups or private messages (such as issuing commands or triggering moderation events).\n\n"
+        "⚙️ Usage\n"
+        "Collected information is strictly used to process group management settings, execute moderation actions (warns, mutes, bans), enforce blacklists, display logs, and deliver automated responses.\n\n"
+        "🤝 Sharing\n"
+        "We do not sell, rent, or share user or chat data with any third parties.\n\n"
+        "🔐 Security\n"
+        "All data is stored securely using parameterized database queries and protected access configurations.\n\n"
+        "🔗 Third Parties\n"
+        "The bot operates directly on Telegram APIs and does not export data to external marketing or analytics services.\n\n"
+        "🗑 Data Deletion\n"
+        "Group administrators can clear notes/filters at any time. Users or administrators can request full removal of stored data for a user ID using the /datadel command.\n\n"
+        "🔄 Updates\n"
+        "This privacy policy may be updated periodically to reflect new features or regulatory requirements.\n\n"
+        "📩 Contact\n"
+        f"For questions or data deletion inquiries, contact support at: {support_url}"
     )
     await update.message.reply_text(text)
 
