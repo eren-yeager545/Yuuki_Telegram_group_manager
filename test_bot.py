@@ -43,3 +43,49 @@ def test_post_init_does_not_schedule_expire_temp_actions():
     for call in app.job_queue.run_repeating.call_args_list:
         callback = call.args[0]
         assert callback.__name__ != 'expire_temp_actions'
+
+
+
+def test_get_conn_and_store_functions(tmp_path, monkeypatch):
+    import store
+    db_file = str(tmp_path / "test_bot.db")
+    monkeypatch.setattr(store, "DB_PATH", db_file)
+    store.init_db()
+
+    assert store.check_chat_quota(100, "notes") is True
+    store.set_global_link("support", "https://example.com/support")
+    assert store.get_global_link("support") == "https://example.com/support"
+
+    store.delete_user_data(999)
+
+
+def test_error_handler_with_message():
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import Update, Message
+    from bot import error_handler
+
+    mock_msg = AsyncMock(spec=Message)
+    update = MagicMock(spec=Update)
+    update.effective_message = mock_msg
+
+    context = MagicMock()
+    context.error = ValueError("Test exception")
+
+    asyncio.run(error_handler(update, context))
+
+    mock_msg.reply_text.assert_called_once()
+    assert "Something went wrong. Reference ID:" in mock_msg.reply_text.call_args[0][0]
+
+
+def test_error_handler_without_message():
+    from unittest.mock import MagicMock
+    from bot import error_handler
+
+    update = MagicMock()
+    update.effective_message = None
+
+    context = MagicMock()
+    context.error = ValueError("Test exception")
+
+    # Should log without raising any exception
+    asyncio.run(error_handler(update, context))
