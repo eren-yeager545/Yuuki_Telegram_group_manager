@@ -18,3 +18,6 @@ PORT = int(os.getenv('PORT', '8080') or 8080)
 WEBHOOK_URL = os.getenv('WEBHOOK_URL', os.getenv('RENDER_EXTERNAL_URL', ''))
 WEBHOOK_PATH = os.getenv('WEBHOOK_PATH', BOT_TOKEN)
 WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', '')
+
+MONGO_URI = os.getenv('MONGO_URI') or os.getenv('MONGO_URL') or os.getenv('MONGODB_URI') or ''
+MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'yuuki_bot')

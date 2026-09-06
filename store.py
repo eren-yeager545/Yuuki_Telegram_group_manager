@@ -1,7 +1,10 @@
+import datetime
+import os
 import random
 import sqlite3
 import time
 from contextlib import closing, contextmanager
+import config
 
 DB_PATH = 'bot.db'
 
@@ -27,6 +30,28 @@ MAX_LENGTHS = {
     'setting_value': 4000,
 }
 
+_mongo_client = None
+_mongo_db = None
+
+
+def get_mongo_db():
+    global _mongo_client, _mongo_db
+    if _mongo_db is not None:
+        return _mongo_db
+    mongo_uri = getattr(config, 'MONGO_URI', None) or os.getenv('MONGO_URI') or os.getenv('MONGO_URL') or os.getenv('MONGODB_URI')
+    if mongo_uri:
+        from pymongo import MongoClient
+        _mongo_client = MongoClient(mongo_uri)
+        db_name = getattr(config, 'MONGO_DB_NAME', 'yuuki_bot')
+        _mongo_db = _mongo_client[db_name]
+        return _mongo_db
+    return None
+
+
+def is_mongo():
+    return get_mongo_db() is not None
+
+
 def clamp_text(value, limit):
     if value is None:
         return ''
@@ -47,7 +72,44 @@ def get_conn():
         connection.close()
 
 
+def _get_next_id(db, collection_name):
+    counter = db['counters'].find_one_and_update(
+        {'_id': collection_name},
+        {'$inc': {'seq': 1}},
+        upsert=True,
+        return_document=True
+    )
+    if counter is None: # fallback
+        doc = db[collection_name].find_one(sort=[('id', -1)]) or db[collection_name].find_one(sort=[('quiz_id', -1)])
+        last_id = doc.get('id', doc.get('quiz_id', 0)) if doc else 0
+        return last_id + 1
+    return counter['seq']
+
+
 def init_db():
+    if is_mongo():
+        db = get_mongo_db()
+        db['groups'].create_index('chat_id', unique=True)
+        db['users'].create_index('user_id', unique=True)
+        db['group_members'].create_index([('chat_id', 1), ('user_id', 1)], unique=True)
+        db['settings'].create_index([('chat_id', 1), ('key', 1)], unique=True)
+        db['warns'].create_index([('chat_id', 1), ('user_id', 1)], unique=True)
+        db['notes'].create_index([('chat_id', 1), ('name', 1)], unique=True)
+        db['filters'].create_index([('chat_id', 1), ('keyword', 1)], unique=True)
+        db['quizzes'].create_index('quiz_id', unique=True)
+        db['audit_logs'].create_index('id', unique=True)
+        db['action_events'].create_index('id', unique=True)
+        db['blacklists'].create_index([('chat_id', 1), ('trigger', 1)], unique=True)
+        db['reports'].create_index('id', unique=True)
+        db['federations'].create_index('fed_id', unique=True)
+        db['federation_chats'].create_index('chat_id', unique=True)
+        db['fed_admins'].create_index([('fed_id', 1), ('user_id', 1)], unique=True)
+        db['fed_bans'].create_index([('fed_id', 1), ('user_id', 1)], unique=True)
+        db['temp_actions'].create_index([('chat_id', 1), ('user_id', 1), ('action', 1)], unique=True)
+        db['welcome_buttons'].create_index([('chat_id', 1), ('label', 1), ('url', 1)], unique=True)
+        db['rules_buttons'].create_index([('chat_id', 1), ('label', 1), ('url', 1)], unique=True)
+        return
+
     with closing(conn()) as c:
         cur = c.cursor()
         cur.execute('CREATE TABLE IF NOT EXISTS groups (chat_id INTEGER PRIMARY KEY, title TEXT, username TEXT, added_at INTEGER, last_seen_at INTEGER)')
@@ -76,8 +138,30 @@ def _now():
     return int(time.time())
 
 
+def _format_time(ts):
+    return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+
+
 def upsert_group(chat_id, title, username, touch_seen=True):
     now = _now()
+    if is_mongo():
+        db = get_mongo_db()
+        existing = db['groups'].find_one({'chat_id': chat_id})
+        if existing:
+            update_data = {'title': title, 'username': username}
+            if touch_seen:
+                update_data['last_seen_at'] = now
+            db['groups'].update_one({'chat_id': chat_id}, {'$set': update_data})
+        else:
+            db['groups'].insert_one({
+                'chat_id': chat_id,
+                'title': title,
+                'username': username,
+                'added_at': now,
+                'last_seen_at': now
+            })
+        return
+
     with closing(conn()) as c:
         cur = c.cursor()
         cur.execute('INSERT INTO groups(chat_id,title,username,added_at,last_seen_at) VALUES(?,?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title, username=excluded.username, last_seen_at=CASE WHEN ? THEN excluded.last_seen_at ELSE groups.last_seen_at END', (chat_id, title, username, now, now, 1 if touch_seen else 0))
@@ -86,6 +170,24 @@ def upsert_group(chat_id, title, username, touch_seen=True):
 
 def upsert_user(user_id, full_name, username, touch_seen=True):
     now = _now()
+    if is_mongo():
+        db = get_mongo_db()
+        existing = db['users'].find_one({'user_id': user_id})
+        if existing:
+            update_data = {'full_name': full_name, 'username': username}
+            if touch_seen:
+                update_data['last_seen_at'] = now
+            db['users'].update_one({'user_id': user_id}, {'$set': update_data})
+        else:
+            db['users'].insert_one({
+                'user_id': user_id,
+                'full_name': full_name,
+                'username': username,
+                'added_at': now,
+                'last_seen_at': now
+            })
+        return
+
     with closing(conn()) as c:
         cur = c.cursor()
         cur.execute('INSERT INTO users(user_id,full_name,username,added_at,last_seen_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET full_name=excluded.full_name, username=excluded.username, last_seen_at=CASE WHEN ? THEN excluded.last_seen_at ELSE users.last_seen_at END', (user_id, full_name, username, now, now, 1 if touch_seen else 0))
@@ -94,6 +196,15 @@ def upsert_user(user_id, full_name, username, touch_seen=True):
 
 def touch_member(chat_id, user_id, now_ts=None):
     now_ts = now_ts or _now()
+    if is_mongo():
+        db = get_mongo_db()
+        db['group_members'].update_one(
+            {'chat_id': chat_id, 'user_id': user_id},
+            {'$set': {'last_seen_at': now_ts}},
+            upsert=True
+        )
+        return
+
     with closing(conn()) as c:
         cur = c.cursor()
         cur.execute('INSERT INTO group_members(chat_id,user_id,last_seen_at) VALUES(?,?,?) ON CONFLICT(chat_id,user_id) DO UPDATE SET last_seen_at=excluded.last_seen_at', (chat_id, user_id, now_ts))
@@ -101,33 +212,74 @@ def touch_member(chat_id, user_id, now_ts=None):
 
 
 def get_active_groups():
+    if is_mongo():
+        db = get_mongo_db()
+        docs = db['groups'].find({}, {'chat_id': 1, 'title': 1})
+        return [(doc['chat_id'], doc.get('title') or doc['chat_id']) for doc in docs]
+
     with closing(conn()) as c:
         return c.execute('SELECT chat_id, COALESCE(title, chat_id) FROM groups').fetchall()
 
 
 def get_active_group_count():
+    if is_mongo():
+        db = get_mongo_db()
+        return db['groups'].count_documents({})
+
     with closing(conn()) as c:
         return c.execute('SELECT COUNT(*) FROM groups').fetchone()[0]
 
 
 def get_user_count():
+    if is_mongo():
+        db = get_mongo_db()
+        return db['users'].count_documents({})
+
     with closing(conn()) as c:
         return c.execute('SELECT COUNT(*) FROM users').fetchone()[0]
 
 
 def set_setting(chat_id, key, value):
+    if is_mongo():
+        db = get_mongo_db()
+        db['settings'].update_one(
+            {'chat_id': chat_id, 'key': key},
+            {'$set': {'value': str(value)}},
+            upsert=True
+        )
+        return
+
     with closing(conn()) as c:
         c.execute('INSERT INTO settings(chat_id,key,value) VALUES(?,?,?) ON CONFLICT(chat_id,key) DO UPDATE SET value=excluded.value', (chat_id, key, str(value)))
         c.commit()
 
 
 def get_setting(chat_id, key, default=None):
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['settings'].find_one({'chat_id': chat_id, 'key': key})
+        return doc['value'] if doc else default
+
     with closing(conn()) as c:
         row = c.execute('SELECT value FROM settings WHERE chat_id=? AND key=?', (chat_id, key)).fetchone()
         return row[0] if row else default
 
 
 def add_warn(chat_id, user_id, reason=''):
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['warns'].find_one({'chat_id': chat_id, 'user_id': user_id})
+        count = (doc['count'] + 1) if doc else 1
+        reasons = doc.get('reasons', '') if doc else ''
+        if reason:
+            reasons = (reasons + '\n' if reasons else '') + reason[:300]
+        db['warns'].update_one(
+            {'chat_id': chat_id, 'user_id': user_id},
+            {'$set': {'count': count, 'reasons': reasons}},
+            upsert=True
+        )
+        return count
+
     with closing(conn()) as c:
         cur = c.cursor()
         row = cur.execute('SELECT count, reasons FROM warns WHERE chat_id=? AND user_id=?', (chat_id, user_id)).fetchone()
@@ -141,92 +293,205 @@ def add_warn(chat_id, user_id, reason=''):
 
 
 def get_warns(chat_id, user_id):
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['warns'].find_one({'chat_id': chat_id, 'user_id': user_id})
+        return doc['count'] if doc else 0
+
     with closing(conn()) as c:
         row = c.execute('SELECT count FROM warns WHERE chat_id=? AND user_id=?', (chat_id, user_id)).fetchone()
         return row[0] if row else 0
 
 
 def get_warn_reasons(chat_id, user_id):
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['warns'].find_one({'chat_id': chat_id, 'user_id': user_id})
+        return doc['reasons'] if doc and doc.get('reasons') else ''
+
     with closing(conn()) as c:
         row = c.execute('SELECT reasons FROM warns WHERE chat_id=? AND user_id=?', (chat_id, user_id)).fetchone()
         return row[0] if row and row[0] else ''
 
 
 def list_warned_users(chat_id, limit=50):
+    if is_mongo():
+        db = get_mongo_db()
+        docs = list(db['warns'].find({'chat_id': chat_id, 'count': {'$gt': 0}}).sort([('count', -1), ('user_id', 1)]).limit(limit))
+        res = []
+        for d in docs:
+            uid = d['user_id']
+            cnt = d['count']
+            user_doc = db['users'].find_one({'user_id': uid})
+            name = user_doc.get('full_name') if user_doc else None
+            res.append((uid, cnt, name))
+        return res
+
     with closing(conn()) as c:
         return c.execute('SELECT w.user_id, w.count, u.full_name FROM warns w LEFT JOIN users u ON u.user_id=w.user_id WHERE w.chat_id=? AND w.count>0 ORDER BY w.count DESC, w.user_id ASC LIMIT ?', (chat_id, limit)).fetchall()
 
 
 def reset_warns(chat_id, user_id):
+    if is_mongo():
+        db = get_mongo_db()
+        db['warns'].delete_one({'chat_id': chat_id, 'user_id': user_id})
+        return
+
     with closing(conn()) as c:
         c.execute('DELETE FROM warns WHERE chat_id=? AND user_id=?', (chat_id, user_id))
         c.commit()
 
 
 def save_note(chat_id, name, content, buttons=''):
+    if is_mongo():
+        db = get_mongo_db()
+        db['notes'].update_one(
+            {'chat_id': chat_id, 'name': name.lower()},
+            {'$set': {'content': content, 'buttons': buttons}},
+            upsert=True
+        )
+        return
+
     with closing(conn()) as c:
         c.execute('INSERT INTO notes(chat_id,name,content,buttons) VALUES(?,?,?,?) ON CONFLICT(chat_id,name) DO UPDATE SET content=excluded.content, buttons=excluded.buttons', (chat_id, name.lower(), content, buttons))
         c.commit()
 
 
 def get_note(chat_id, name):
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['notes'].find_one({'chat_id': chat_id, 'name': name.lower()})
+        return (doc['content'], doc.get('buttons', '')) if doc else None
+
     with closing(conn()) as c:
         return c.execute('SELECT content, buttons FROM notes WHERE chat_id=? AND name=?', (chat_id, name.lower())).fetchone()
 
 
 def list_notes(chat_id):
+    if is_mongo():
+        db = get_mongo_db()
+        docs = db['notes'].find({'chat_id': chat_id}).sort('name', 1)
+        return [(d['name'],) for d in docs]
+
     with closing(conn()) as c:
         return c.execute('SELECT name FROM notes WHERE chat_id=? ORDER BY name', (chat_id,)).fetchall()
 
 
 def delete_note(chat_id, name):
+    if is_mongo():
+        db = get_mongo_db()
+        db['notes'].delete_one({'chat_id': chat_id, 'name': name.lower()})
+        return
+
     with closing(conn()) as c:
         c.execute('DELETE FROM notes WHERE chat_id=? AND name=?', (chat_id, name.lower()))
         c.commit()
 
 
 def save_filter(chat_id, keyword, reply):
+    if is_mongo():
+        db = get_mongo_db()
+        db['filters'].update_one(
+            {'chat_id': chat_id, 'keyword': keyword.lower()},
+            {'$set': {'reply': reply}},
+            upsert=True
+        )
+        return
+
     with closing(conn()) as c:
         c.execute('INSERT INTO filters(chat_id,keyword,reply) VALUES(?,?,?) ON CONFLICT(chat_id,keyword) DO UPDATE SET reply=excluded.reply', (chat_id, keyword.lower(), reply))
         c.commit()
 
 
 def get_filters(chat_id):
+    if is_mongo():
+        db = get_mongo_db()
+        docs = db['filters'].find({'chat_id': chat_id}).sort('keyword', 1)
+        return [(d['keyword'], d['reply']) for d in docs]
+
     with closing(conn()) as c:
         return c.execute('SELECT keyword, reply FROM filters WHERE chat_id=? ORDER BY keyword', (chat_id,)).fetchall()
 
 
 def delete_filter(chat_id, keyword):
+    if is_mongo():
+        db = get_mongo_db()
+        db['filters'].delete_one({'chat_id': chat_id, 'keyword': keyword.lower()})
+        return
+
     with closing(conn()) as c:
         c.execute('DELETE FROM filters WHERE chat_id=? AND keyword=?', (chat_id, keyword.lower()))
         c.commit()
 
 
 def log_admin_action(chat_id, actor_id, action, target_id=None, details=None):
+    now = _now()
+    if is_mongo():
+        db = get_mongo_db()
+        next_id = _get_next_id(db, 'audit_logs')
+        db['audit_logs'].insert_one({
+            'id': next_id,
+            'chat_id': chat_id,
+            'actor_id': actor_id,
+            'action': action,
+            'target_id': target_id,
+            'details': details,
+            'created_at': now
+        })
+        return
+
     with closing(conn()) as c:
-        c.execute('INSERT INTO audit_logs(chat_id,actor_id,action,target_id,details,created_at) VALUES(?,?,?,?,?,?)', (chat_id, actor_id, action, target_id, details, _now()))
+        c.execute('INSERT INTO audit_logs(chat_id,actor_id,action,target_id,details,created_at) VALUES(?,?,?,?,?,?)', (chat_id, actor_id, action, target_id, details, now))
         c.commit()
 
 
 def get_recent_audit_logs(chat_id, limit=10):
+    if is_mongo():
+        db = get_mongo_db()
+        docs = list(db['audit_logs'].find({'chat_id': chat_id}).sort('id', -1).limit(limit))
+        return [(d['actor_id'], d['action'], d.get('target_id'), d.get('details'), _format_time(d['created_at'])) for d in docs]
+
     with closing(conn()) as c:
         return c.execute('SELECT actor_id, action, target_id, details, datetime(created_at, "unixepoch") FROM audit_logs WHERE chat_id=? ORDER BY id DESC LIMIT ?', (chat_id, limit)).fetchall()
 
 
 def add_quiz(question, answer, added_by):
+    now = _now()
+    if is_mongo():
+        db = get_mongo_db()
+        quiz_id = _get_next_id(db, 'quizzes')
+        db['quizzes'].insert_one({
+            'quiz_id': quiz_id,
+            'question': question,
+            'answer': answer,
+            'added_by': added_by,
+            'created_at': now
+        })
+        return quiz_id
+
     with closing(conn()) as c:
         cur = c.cursor()
-        cur.execute('INSERT INTO quizzes(question,answer,added_by,created_at) VALUES(?,?,?,?)', (question, answer, added_by, _now()))
+        cur.execute('INSERT INTO quizzes(question,answer,added_by,created_at) VALUES(?,?,?,?)', (question, answer, added_by, now))
         c.commit()
         return cur.lastrowid
 
 
 def list_quizzes():
+    if is_mongo():
+        db = get_mongo_db()
+        docs = db['quizzes'].find({}).sort('quiz_id', -1)
+        return [(d['quiz_id'], d['question'], d['answer'], _format_time(d['created_at'])) for d in docs]
+
     with closing(conn()) as c:
         return c.execute('SELECT quiz_id, question, answer, datetime(created_at, "unixepoch") FROM quizzes ORDER BY quiz_id DESC').fetchall()
 
 
 def delete_quiz(quiz_id):
+    if is_mongo():
+        db = get_mongo_db()
+        res = db['quizzes'].delete_one({'quiz_id': quiz_id})
+        return res.deleted_count > 0
+
     with closing(conn()) as c:
         cur = c.cursor()
         cur.execute('DELETE FROM quizzes WHERE quiz_id=?', (quiz_id,))
@@ -235,112 +500,262 @@ def delete_quiz(quiz_id):
 
 
 def get_quiz_count():
+    if is_mongo():
+        db = get_mongo_db()
+        return db['quizzes'].count_documents({})
+
     with closing(conn()) as c:
         return c.execute('SELECT COUNT(*) FROM quizzes').fetchone()[0]
 
 
 def get_random_quiz():
+    if is_mongo():
+        db = get_mongo_db()
+        docs = list(db['quizzes'].find({}))
+        if not docs:
+            return None
+        d = random.choice(docs)
+        return (d['quiz_id'], d['question'], d['answer'])
+
     with closing(conn()) as c:
         rows = c.execute('SELECT quiz_id, question, answer FROM quizzes').fetchall()
         return random.choice(rows) if rows else None
 
 
 def add_blacklist(chat_id, trigger, action='delete'):
+    if is_mongo():
+        db = get_mongo_db()
+        db['blacklists'].update_one(
+            {'chat_id': chat_id, 'trigger': trigger.lower()},
+            {'$set': {'action': action}},
+            upsert=True
+        )
+        return
+
     with closing(conn()) as c:
         c.execute('INSERT INTO blacklists(chat_id,trigger,action) VALUES(?,?,?) ON CONFLICT(chat_id,trigger) DO UPDATE SET action=excluded.action', (chat_id, trigger.lower(), action))
         c.commit()
 
 
 def remove_blacklist(chat_id, trigger):
+    if is_mongo():
+        db = get_mongo_db()
+        db['blacklists'].delete_one({'chat_id': chat_id, 'trigger': trigger.lower()})
+        return
+
     with closing(conn()) as c:
         c.execute('DELETE FROM blacklists WHERE chat_id=? AND trigger=?', (chat_id, trigger.lower()))
         c.commit()
 
 
 def list_blacklists(chat_id):
+    if is_mongo():
+        db = get_mongo_db()
+        docs = db['blacklists'].find({'chat_id': chat_id}).sort('trigger', 1)
+        return [(d['trigger'], d['action']) for d in docs]
+
     with closing(conn()) as c:
         return c.execute('SELECT trigger, action FROM blacklists WHERE chat_id=? ORDER BY trigger', (chat_id,)).fetchall()
 
 
 def add_report(chat_id, reporter_id, target_id, message_id, reason=''):
+    now = _now()
+    if is_mongo():
+        db = get_mongo_db()
+        report_id = _get_next_id(db, 'reports')
+        db['reports'].insert_one({
+            'id': report_id,
+            'chat_id': chat_id,
+            'reporter_id': reporter_id,
+            'target_id': target_id,
+            'message_id': message_id,
+            'reason': reason,
+            'created_at': now
+        })
+        return report_id
+
     with closing(conn()) as c:
         cur = c.cursor()
-        cur.execute('INSERT INTO reports(chat_id,reporter_id,target_id,message_id,reason,created_at) VALUES(?,?,?,?,?,?)', (chat_id, reporter_id, target_id, message_id, reason, _now()))
+        cur.execute('INSERT INTO reports(chat_id,reporter_id,target_id,message_id,reason,created_at) VALUES(?,?,?,?,?,?)', (chat_id, reporter_id, target_id, message_id, reason, now))
         c.commit()
         return cur.lastrowid
 
 
 def create_federation(fed_id, fed_name, owner_id):
+    now = _now()
+    fid = fed_id.lower()
+    if is_mongo():
+        db = get_mongo_db()
+        db['federations'].insert_one({
+            'fed_id': fid,
+            'fed_name': fed_name,
+            'owner_id': owner_id,
+            'created_at': now
+        })
+        db['fed_admins'].update_one(
+            {'fed_id': fid, 'user_id': owner_id},
+            {'$set': {'fed_id': fid, 'user_id': owner_id}},
+            upsert=True
+        )
+        return
+
     with closing(conn()) as c:
-        c.execute('INSERT INTO federations(fed_id,fed_name,owner_id,created_at) VALUES(?,?,?,?)', (fed_id.lower(), fed_name, owner_id, _now()))
-        c.execute('INSERT OR IGNORE INTO fed_admins(fed_id,user_id) VALUES(?,?)', (fed_id.lower(), owner_id))
+        c.execute('INSERT INTO federations(fed_id,fed_name,owner_id,created_at) VALUES(?,?,?,?)', (fid, fed_name, owner_id, now))
+        c.execute('INSERT OR IGNORE INTO fed_admins(fed_id,user_id) VALUES(?,?)', (fid, owner_id))
         c.commit()
 
 
 def get_federation(fed_id):
+    fid = fed_id.lower()
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['federations'].find_one({'fed_id': fid})
+        return (doc['fed_id'], doc['fed_name'], doc['owner_id']) if doc else None
+
     with closing(conn()) as c:
-        return c.execute('SELECT fed_id, fed_name, owner_id FROM federations WHERE fed_id=?', (fed_id.lower(),)).fetchone()
+        return c.execute('SELECT fed_id, fed_name, owner_id FROM federations WHERE fed_id=?', (fid,)).fetchone()
 
 
 def list_federations_by_owner(owner_id):
+    if is_mongo():
+        db = get_mongo_db()
+        docs = db['federations'].find({'owner_id': owner_id}).sort('fed_name', 1)
+        return [(d['fed_id'], d['fed_name']) for d in docs]
+
     with closing(conn()) as c:
         return c.execute('SELECT fed_id, fed_name FROM federations WHERE owner_id=? ORDER BY fed_name', (owner_id,)).fetchall()
 
 
 def set_chat_federation(chat_id, fed_id, added_by):
+    now = _now()
+    fid = fed_id.lower()
+    if is_mongo():
+        db = get_mongo_db()
+        db['federation_chats'].delete_one({'chat_id': chat_id})
+        db['federation_chats'].insert_one({
+            'fed_id': fid,
+            'chat_id': chat_id,
+            'added_by': added_by,
+            'created_at': now
+        })
+        return
+
     with closing(conn()) as c:
         c.execute('DELETE FROM federation_chats WHERE chat_id=?', (chat_id,))
-        c.execute('INSERT INTO federation_chats(fed_id,chat_id,added_by,created_at) VALUES(?,?,?,?)', (fed_id.lower(), chat_id, added_by, _now()))
+        c.execute('INSERT INTO federation_chats(fed_id,chat_id,added_by,created_at) VALUES(?,?,?,?)', (fid, chat_id, added_by, now))
         c.commit()
 
 
 def get_chat_federation(chat_id):
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['federation_chats'].find_one({'chat_id': chat_id})
+        return (doc['fed_id'],) if doc else None
+
     with closing(conn()) as c:
         return c.execute('SELECT fed_id FROM federation_chats WHERE chat_id=?', (chat_id,)).fetchone()
 
 
 def leave_chat_federation(chat_id):
+    if is_mongo():
+        db = get_mongo_db()
+        db['federation_chats'].delete_one({'chat_id': chat_id})
+        return
+
     with closing(conn()) as c:
         c.execute('DELETE FROM federation_chats WHERE chat_id=?', (chat_id,))
         c.commit()
 
 
 def add_fed_admin(fed_id, user_id):
+    fid = fed_id.lower()
+    if is_mongo():
+        db = get_mongo_db()
+        db['fed_admins'].update_one(
+            {'fed_id': fid, 'user_id': user_id},
+            {'$set': {'fed_id': fid, 'user_id': user_id}},
+            upsert=True
+        )
+        return
+
     with closing(conn()) as c:
-        c.execute('INSERT OR IGNORE INTO fed_admins(fed_id,user_id) VALUES(?,?)', (fed_id.lower(), user_id))
+        c.execute('INSERT OR IGNORE INTO fed_admins(fed_id,user_id) VALUES(?,?)', (fid, user_id))
         c.commit()
 
 
 def is_fed_admin(fed_id, user_id):
+    fid = fed_id.lower()
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['fed_admins'].find_one({'fed_id': fid, 'user_id': user_id})
+        return bool(doc)
+
     with closing(conn()) as c:
-        row = c.execute('SELECT 1 FROM fed_admins WHERE fed_id=? AND user_id=?', (fed_id.lower(), user_id)).fetchone()
+        row = c.execute('SELECT 1 FROM fed_admins WHERE fed_id=? AND user_id=?', (fid, user_id)).fetchone()
         return bool(row)
 
 
 def fed_ban_user(fed_id, user_id, reason, banned_by):
+    now = _now()
+    fid = fed_id.lower()
+    if is_mongo():
+        db = get_mongo_db()
+        db['fed_bans'].update_one(
+            {'fed_id': fid, 'user_id': user_id},
+            {'$set': {'reason': reason, 'banned_by': banned_by, 'created_at': now}},
+            upsert=True
+        )
+        return
+
     with closing(conn()) as c:
-        c.execute('INSERT INTO fed_bans(fed_id,user_id,reason,banned_by,created_at) VALUES(?,?,?,?,?) ON CONFLICT(fed_id,user_id) DO UPDATE SET reason=excluded.reason, banned_by=excluded.banned_by, created_at=excluded.created_at', (fed_id.lower(), user_id, reason, banned_by, _now()))
+        c.execute('INSERT INTO fed_bans(fed_id,user_id,reason,banned_by,created_at) VALUES(?,?,?,?,?) ON CONFLICT(fed_id,user_id) DO UPDATE SET reason=excluded.reason, banned_by=excluded.banned_by, created_at=excluded.created_at', (fid, user_id, reason, banned_by, now))
         c.commit()
 
 
 def unfed_ban_user(fed_id, user_id):
+    fid = fed_id.lower()
+    if is_mongo():
+        db = get_mongo_db()
+        db['fed_bans'].delete_one({'fed_id': fid, 'user_id': user_id})
+        return
+
     with closing(conn()) as c:
-        c.execute('DELETE FROM fed_bans WHERE fed_id=? AND user_id=?', (fed_id.lower(), user_id))
+        c.execute('DELETE FROM fed_bans WHERE fed_id=? AND user_id=?', (fid, user_id))
         c.commit()
 
 
 def get_fed_ban(fed_id, user_id):
+    fid = fed_id.lower()
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['fed_bans'].find_one({'fed_id': fid, 'user_id': user_id})
+        return (doc['reason'],) if doc else None
+
     with closing(conn()) as c:
-        return c.execute('SELECT reason FROM fed_bans WHERE fed_id=? AND user_id=?', (fed_id.lower(), user_id)).fetchone()
+        return c.execute('SELECT reason FROM fed_bans WHERE fed_id=? AND user_id=?', (fid, user_id)).fetchone()
 
 
 def add_temp_action(chat_id, user_id, action, until_ts):
+    if is_mongo():
+        db = get_mongo_db()
+        db['temp_actions'].update_one(
+            {'chat_id': chat_id, 'user_id': user_id, 'action': action},
+            {'$set': {'until_ts': until_ts}},
+            upsert=True
+        )
+        return
+
     with closing(conn()) as c:
         c.execute('INSERT INTO temp_actions(chat_id,user_id,action,until_ts) VALUES(?,?,?,?) ON CONFLICT(chat_id,user_id,action) DO UPDATE SET until_ts=excluded.until_ts', (chat_id, user_id, action, until_ts))
         c.commit()
 
 
 def clear_temp_action(chat_id, user_id, action):
+    if is_mongo():
+        db = get_mongo_db()
+        db['temp_actions'].delete_one({'chat_id': chat_id, 'user_id': user_id, 'action': action})
+        return
+
     with closing(conn()) as c:
         c.execute('DELETE FROM temp_actions WHERE chat_id=? AND user_id=? AND action=?', (chat_id, user_id, action))
         c.commit()
@@ -348,12 +763,25 @@ def clear_temp_action(chat_id, user_id, action):
 
 def get_expired_temp_actions(now_ts=None):
     now_ts = now_ts or _now()
+    if is_mongo():
+        db = get_mongo_db()
+        docs = db['temp_actions'].find({'until_ts': {'$lte': now_ts}})
+        return [(d['chat_id'], d['user_id'], d['action'], d['until_ts']) for d in docs]
+
     with closing(conn()) as c:
         return c.execute('SELECT chat_id, user_id, action, until_ts FROM temp_actions WHERE until_ts<=?', (now_ts,)).fetchall()
 
 
 def save_buttons(chat_id, scope, rows):
     table = 'welcome_buttons' if scope == 'welcome' else 'rules_buttons'
+    if is_mongo():
+        db = get_mongo_db()
+        db[table].delete_many({'chat_id': chat_id})
+        if rows:
+            docs = [{'chat_id': chat_id, 'label': label, 'url': url, 'sort_order': idx} for idx, (label, url) in enumerate(rows)]
+            db[table].insert_many(docs)
+        return
+
     with closing(conn()) as c:
         c.execute(f'DELETE FROM {table} WHERE chat_id=?', (chat_id,))
         for idx, (label, url) in enumerate(rows):
@@ -363,11 +791,29 @@ def save_buttons(chat_id, scope, rows):
 
 def get_buttons(chat_id, scope):
     table = 'welcome_buttons' if scope == 'welcome' else 'rules_buttons'
+    if is_mongo():
+        db = get_mongo_db()
+        docs = db[table].find({'chat_id': chat_id}).sort('sort_order', 1)
+        return [(d['label'], d['url']) for d in docs]
+
     with closing(conn()) as c:
         return c.execute(f'SELECT label, url FROM {table} WHERE chat_id=? ORDER BY sort_order', (chat_id,)).fetchall()
 
 
 def check_chat_quota(chat_id, kind):
+    if is_mongo():
+        db = get_mongo_db()
+        if kind == 'notes':
+            cnt = db['notes'].count_documents({'chat_id': chat_id})
+            return cnt < CONTENT_QUOTAS['notes']
+        if kind == 'filters':
+            cnt = db['filters'].count_documents({'chat_id': chat_id})
+            return cnt < CONTENT_QUOTAS['filters']
+        if kind == 'blacklists':
+            cnt = db['blacklists'].count_documents({'chat_id': chat_id})
+            return cnt < CONTENT_QUOTAS['blacklists']
+        return True
+
     with get_conn() as c:
         if kind == 'notes':
             row = c.execute('SELECT COUNT(*) FROM notes WHERE chat_id=?', (chat_id,)).fetchone()
@@ -382,6 +828,15 @@ def check_chat_quota(chat_id, kind):
 
 
 def trim_reports(chat_id):
+    if is_mongo():
+        db = get_mongo_db()
+        keep = CONTENT_QUOTAS['reports_retained']
+        docs = list(db['reports'].find({'chat_id': chat_id}).sort([('created_at', -1), ('id', -1)]).skip(keep))
+        if docs:
+            ids_to_del = [d['_id'] for d in docs]
+            db['reports'].delete_many({'_id': {'$in': ids_to_del}})
+        return
+
     with get_conn() as c:
         keep = CONTENT_QUOTAS['reports_retained']
         c.execute('DELETE FROM reports WHERE chat_id=? AND id NOT IN (SELECT id FROM reports WHERE chat_id=? ORDER BY created_at DESC, id DESC LIMIT ?)', (chat_id, chat_id, keep))
@@ -391,12 +846,35 @@ def trim_reports(chat_id):
 def allow_report_event(chat_id, reporter_id, target_id, window_seconds=60, max_events=2):
     now = int(time.time())
     cutoff = now - window_seconds
+    scope = f'report:{chat_id}:{target_id}'
+    if is_mongo():
+        db = get_mongo_db()
+        cnt = db['action_events'].count_documents({
+            'scope': scope,
+            'actor_id': reporter_id,
+            'event': 'report',
+            'created_at': {'$gte': cutoff}
+        })
+        if cnt >= max_events:
+            return False
+        next_id = _get_next_id(db, 'action_events')
+        db['action_events'].insert_one({
+            'id': next_id,
+            'scope': scope,
+            'actor_id': reporter_id,
+            'chat_id': chat_id,
+            'target_id': target_id,
+            'event': 'report',
+            'created_at': now
+        })
+        return True
+
     with get_conn() as c:
-        row = c.execute('SELECT COUNT(*) FROM action_events WHERE scope=? AND actor_id=? AND event=? AND created_at>=?', (f'report:{chat_id}:{target_id}', reporter_id, 'report', cutoff)).fetchone()
+        row = c.execute('SELECT COUNT(*) FROM action_events WHERE scope=? AND actor_id=? AND event=? AND created_at>=?', (scope, reporter_id, 'report', cutoff)).fetchone()
         count = row[0] if row else 0
         if count >= max_events:
             return False
-        c.execute('INSERT INTO action_events(scope, actor_id, chat_id, target_id, event, created_at) VALUES(?,?,?,?,?,?)', (f'report:{chat_id}:{target_id}', reporter_id, chat_id, target_id, 'report', now))
+        c.execute('INSERT INTO action_events(scope, actor_id, chat_id, target_id, event, created_at) VALUES(?,?,?,?,?,?)', (scope, reporter_id, chat_id, target_id, 'report', now))
         c.commit()
         return True
 
@@ -404,6 +882,16 @@ def allow_report_event(chat_id, reporter_id, target_id, window_seconds=60, max_e
 def report_exists_recent(chat_id, reporter_id, message_id, window_seconds=60):
     now = int(time.time())
     cutoff = now - window_seconds
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['reports'].find_one({
+            'chat_id': chat_id,
+            'reporter_id': reporter_id,
+            'message_id': message_id,
+            'created_at': {'$gte': cutoff}
+        })
+        return bool(doc)
+
     with get_conn() as c:
         row = c.execute('SELECT 1 FROM reports WHERE chat_id=? AND reporter_id=? AND message_id=? AND created_at>=? LIMIT 1', (chat_id, reporter_id, message_id, cutoff)).fetchone()
         return bool(row)
@@ -420,6 +908,19 @@ def get_group_quota_lines():
 
 
 def delete_user_data(user_id):
+    if is_mongo():
+        db = get_mongo_db()
+        db['users'].delete_many({'user_id': user_id})
+        db['group_members'].delete_many({'user_id': user_id})
+        db['warns'].delete_many({'user_id': user_id})
+        db['reports'].delete_many({'$or': [{'reporter_id': user_id}, {'target_id': user_id}]})
+        db['audit_logs'].delete_many({'$or': [{'actor_id': user_id}, {'target_id': user_id}]})
+        db['temp_actions'].delete_many({'user_id': user_id})
+        db['fed_bans'].delete_many({'user_id': user_id})
+        db['fed_admins'].delete_many({'user_id': user_id})
+        db['action_events'].delete_many({'$or': [{'actor_id': user_id}, {'target_id': user_id}]})
+        return
+
     with get_conn() as c:
         c.execute('DELETE FROM users WHERE user_id=?', (user_id,))
         c.execute('DELETE FROM group_members WHERE user_id=?', (user_id,))
@@ -435,12 +936,9 @@ def delete_user_data(user_id):
 
 def set_global_link(key, value):
     value = clamp_text(value, MAX_LENGTHS['button_url'])
-    with get_conn() as c:
-        c.execute('INSERT INTO settings(chat_id,key,value) VALUES(?,?,?) ON CONFLICT(chat_id,key) DO UPDATE SET value=excluded.value', (0, key, value))
-        c.commit()
+    set_setting(0, key, value)
 
 
 def get_global_link(key, default=''):
-    with get_conn() as c:
-        row = c.execute('SELECT value FROM settings WHERE chat_id=0 AND key=?', (key,)).fetchone()
-        return row[0] if row and row[0] else default
+    val = get_setting(0, key, default)
+    return val if val else default

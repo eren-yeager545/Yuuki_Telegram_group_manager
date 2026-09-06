@@ -89,3 +89,134 @@ def test_error_handler_without_message():
 
     # Should log without raising any exception
     asyncio.run(error_handler(update, context))
+
+
+def test_mongo_store_operations(monkeypatch):
+    import mongomock
+    import config
+    import store
+
+    mock_client = mongomock.MongoClient()
+    mock_db = mock_client['yuuki_bot_test']
+
+    monkeypatch.setattr(config, 'MONGO_URI', 'mongodb://localhost:27017')
+    monkeypatch.setattr(store, '_mongo_client', mock_client)
+    monkeypatch.setattr(store, '_mongo_db', mock_db)
+
+    store.init_db()
+
+    # Test group and user upsert
+    store.upsert_group(1001, 'Test Group', 'testgroup')
+    assert store.get_active_group_count() == 1
+    assert store.get_active_groups() == [(1001, 'Test Group')]
+
+    store.upsert_user(2001, 'Test User', 'testuser')
+    assert store.get_user_count() == 1
+
+    store.touch_member(1001, 2001)
+
+    # Test settings
+    store.set_setting(1001, 'welcome', 'on')
+    assert store.get_setting(1001, 'welcome') == 'on'
+    assert store.get_setting(1001, 'nonexistent', 'default') == 'default'
+
+    # Test warns
+    assert store.get_warns(1001, 2001) == 0
+    cnt = store.add_warn(1001, 2001, 'Spamming')
+    assert cnt == 1
+    assert store.get_warns(1001, 2001) == 1
+    assert store.get_warn_reasons(1001, 2001) == 'Spamming'
+    warned = store.list_warned_users(1001)
+    assert len(warned) == 1
+    assert warned[0][0] == 2001
+    assert warned[0][2] == 'Test User'
+    store.reset_warns(1001, 2001)
+    assert store.get_warns(1001, 2001) == 0
+
+    # Test notes
+    assert store.check_chat_quota(1001, 'notes') is True
+    store.save_note(1001, 'rules', 'Rule 1: Be nice', 'Click - https://example.com')
+    assert store.get_note(1001, 'rules') == ('Rule 1: Be nice', 'Click - https://example.com')
+    assert store.list_notes(1001) == [('rules',)]
+    store.delete_note(1001, 'rules')
+    assert store.get_note(1001, 'rules') is None
+
+    # Test filters
+    assert store.check_chat_quota(1001, 'filters') is True
+    store.save_filter(1001, 'hello', 'world')
+    assert store.get_filters(1001) == [('hello', 'world')]
+    store.delete_filter(1001, 'hello')
+    assert store.get_filters(1001) == []
+
+    # Test quizzes
+    quiz_id = store.add_quiz('What is 2+2?', '4', 2001)
+    assert quiz_id > 0
+    assert store.get_quiz_count() == 1
+    quizzes = store.list_quizzes()
+    assert len(quizzes) == 1
+    assert quizzes[0][0] == quiz_id
+    assert quizzes[0][1] == 'What is 2+2?'
+    random_q = store.get_random_quiz()
+    assert random_q is not None
+    assert random_q[0] == quiz_id
+    assert store.delete_quiz(quiz_id) is True
+    assert store.get_quiz_count() == 0
+
+    # Test audit logs
+    store.log_admin_action(1001, 2001, 'ban', 3001, 'violating rules')
+    logs = store.get_recent_audit_logs(1001)
+    assert len(logs) == 1
+    assert logs[0][0] == 2001
+    assert logs[0][1] == 'ban'
+
+    # Test blacklists
+    assert store.check_chat_quota(1001, 'blacklists') is True
+    store.add_blacklist(1001, 'badword', 'warn')
+    assert store.list_blacklists(1001) == [('badword', 'warn')]
+    store.remove_blacklist(1001, 'badword')
+    assert store.list_blacklists(1001) == []
+
+    # Test reports and rate limit
+    rep_id = store.add_report(1001, 2001, 3001, 555, 'spam')
+    assert rep_id > 0
+    assert store.report_exists_recent(1001, 2001, 555) is True
+    assert store.allow_report_event(1001, 2001, 3001) is True
+    assert store.allow_report_event(1001, 2001, 3001) is True
+    assert store.allow_report_event(1001, 2001, 3001) is False
+    store.trim_reports(1001)
+
+    # Test federations
+    store.create_federation('testfed', 'Test Federation', 2001)
+    assert store.get_federation('testfed') == ('testfed', 'Test Federation', 2001)
+    assert store.list_federations_by_owner(2001) == [('testfed', 'Test Federation')]
+    assert store.is_fed_admin('testfed', 2001) is True
+    store.add_fed_admin('testfed', 3001)
+    assert store.is_fed_admin('testfed', 3001) is True
+
+    store.set_chat_federation(1001, 'testfed', 2001)
+    assert store.get_chat_federation(1001) == ('testfed',)
+    store.leave_chat_federation(1001)
+    assert store.get_chat_federation(1001) is None
+
+    store.fed_ban_user('testfed', 3001, 'spammer', 2001)
+    assert store.get_fed_ban('testfed', 3001) == ('spammer',)
+    store.unfed_ban_user('testfed', 3001)
+    assert store.get_fed_ban('testfed', 3001) is None
+
+    # Test temp actions
+    store.add_temp_action(1001, 2001, 'tmute', 1000)
+    assert len(store.get_expired_temp_actions(2000)) == 1
+    store.clear_temp_action(1001, 2001, 'tmute')
+    assert len(store.get_expired_temp_actions(2000)) == 0
+
+    # Test buttons
+    store.save_buttons(1001, 'welcome', [('Help', 'https://example.com/help')])
+    assert store.get_buttons(1001, 'welcome') == [('Help', 'https://example.com/help')]
+
+    # Test delete user data
+    store.delete_user_data(2001)
+    assert store.get_user_count() == 0
+
+    # Test global links
+    store.set_global_link('support_group_url', 'https://t.me/testsupport')
+    assert store.get_global_link('support_group_url') == 'https://t.me/testsupport'

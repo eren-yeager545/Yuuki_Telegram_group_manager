@@ -73,6 +73,8 @@ SUDO_USERS=
 LOG_CHANNEL_ID=
 QUIZ_INTERVAL_SECONDS=3600
 SEEN_UPDATE_COOLDOWN_SECONDS=21600
+MONGO_URI=mongodb+srv://user:pass@cluster.mongodb.net/
+MONGO_DB_NAME=yuuki_bot
 ```
 
 ## Main commands
@@ -122,7 +124,7 @@ For full functionality, make the bot an admin with permission to:[code_file:1]
 ## Notes
 
 - Test in a private group before using it in a large public chat.[code_file:1]
-- `bot.db` is local SQLite storage and is ignored by git.[code_file:1]
+- `bot.db` is local SQLite storage and is used when `MONGO_URI` is not set. When `MONGO_URI` (or `MONGO_URL` / `MONGODB_URI`) is set, MongoDB is automatically used as the datastore.[code_file:1]
 - Dual-owner support is controlled by `OWNER_IDS`.[code_file:1]
 
 ## Secret safety
