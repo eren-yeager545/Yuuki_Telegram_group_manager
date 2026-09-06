@@ -71,7 +71,8 @@ def extract_reason(update: Update):
 
 
 def format_user_link(user_id: int, name: str) -> str:
-    return f'<a href="tg://user?id={user_id}">{html.escape(name)}</a>'
+    escaped_name = html.escape(name or 'User')
+    return f'{escaped_name} (<a href="tg://user?id={user_id}">tap to open profile</a>)'
 
 
 def format_user_tag(user_id: int, name: str, username: str = None) -> str:
@@ -201,53 +202,33 @@ async def purge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
     chat_id = update.effective_chat.id
+    cmd_msg_id = update.message.message_id if update.message else None
     target_user = await resolve_target_user(update, context)
+
+    if not target_user and update.message and update.message.reply_to_message:
+        target_user = update.message.reply_to_message.from_user
 
     if target_user:
         user_tag = format_user_tag(target_user.id, getattr(target_user, 'first_name', 'User'), getattr(target_user, 'username', None))
+
         mids = clear_user_messages(chat_id, target_user.id)
+        mids_set = set(mids)
+        if update.message and update.message.reply_to_message:
+            reply_user = update.message.reply_to_message.from_user
+            if reply_user and reply_user.id == target_user.id:
+                mids_set.add(update.message.reply_to_message.message_id)
 
-        if update.message.reply_to_message:
-            reply_mid = update.message.reply_to_message.message_id
-            cmd_mid = update.message.message_id
-            mids_set = set(mids)
-            for mid in range(reply_mid, cmd_mid + 1):
-                mids_set.add(mid)
-            mids = sorted(list(mids_set), reverse=True)
+        # Ensure command giver's message is NEVER deleted
+        mids_set.discard(cmd_msg_id)
 
         removed = 0
-        for mid in mids:
+        for mid in sorted(list(mids_set), reverse=True):
             try:
                 await context.bot.delete_message(chat_id, mid)
                 removed += 1
             except Exception:
                 pass
 
-        try:
-            await context.bot.delete_message(chat_id, update.message.message_id)
-        except Exception:
-            pass
-
-        log_admin_action(chat_id, update.effective_user.id, 'purge', target_id=target_user.id, details=f'removed={removed}')
-        await update.effective_chat.send_message(
-            f"Swept away! 🧹✨ All messages from {user_tag} have been purged from the group! Everything is clean and sweet now~ 🌸 (⁠人⁠*⁠´⁠∀⁠｀⁠)"
-        )
-        return
-
-    if update.message.reply_to_message:
-        reply_msg = update.message.reply_to_message
-        target_user = reply_msg.from_user
-        user_tag = format_user_tag(target_user.id, target_user.first_name, target_user.username)
-        start_id = reply_msg.message_id
-        end_id = update.message.message_id
-        removed = 0
-        for mid in range(start_id, end_id + 1):
-            try:
-                await context.bot.delete_message(chat_id, mid)
-                removed += 1
-            except Exception:
-                pass
-        clear_user_messages(chat_id, target_user.id)
         log_admin_action(chat_id, update.effective_user.id, 'purge', target_id=target_user.id, details=f'removed={removed}')
         await update.effective_chat.send_message(
             f"Swept away! 🧹✨ All messages from {user_tag} have been purged from the group! Everything is clean and sweet now~ 🌸 (⁠人⁠*⁠´⁠∀⁠｀⁠)"
@@ -506,10 +487,36 @@ async def warnaction_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
-    text = update.message.text.partition(' ')[2]
-    if '|' not in text:
-        await update.message.reply_text('Usage: /save name | content || Label - https://url')
+    text = update.message.text.partition(' ')[2].strip()
+
+    # Reply mode: /save <trigger_word>
+    if update.message.reply_to_message:
+        trigger_word = text.strip()
+        if not trigger_word:
+            await update.message.reply_text('Usage: reply to a message and send /save trigger_word')
+            return
+
+        reply_msg = update.message.reply_to_message
+        note_content = reply_msg.text or reply_msg.caption or ''
+
+        # Extract inline keyboard buttons if present
+        buttons_list = []
+        if reply_msg.reply_markup and getattr(reply_msg.reply_markup, 'inline_keyboard', None):
+            for row in reply_msg.reply_markup.inline_keyboard:
+                for btn in row:
+                    if getattr(btn, 'url', None) and getattr(btn, 'text', None):
+                        buttons_list.append(f"{btn.text} - {btn.url}")
+        buttons_blob = ' || '.join(buttons_list)
+
+        save_note(update.effective_chat.id, trigger_word, note_content, buttons_blob)
+        await update.message.reply_text(f'Saved note #{trigger_word}.')
         return
+
+    # Standard syntax: /save name | content || Label - https://url
+    if '|' not in text:
+        await update.message.reply_text('Usage: /save name | content || Label - https://url OR reply to a message with /save trigger_word')
+        return
+
     name, rest = [x.strip() for x in text.split('|', 1)]
     content, buttons_blob = rest, ''
     if '||' in rest:
@@ -547,8 +554,37 @@ async def filter_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
     text = update.message.text.partition(' ')[2].strip()
+
+    if update.message.reply_to_message:
+        reply_msg = update.message.reply_to_message
+        keyword = text.strip()
+        if not keyword:
+            await update.message.reply_text('Usage: reply to a message and send /filter trigger_word')
+            return
+
+        filter_type = 'text'
+        reply_content = ''
+
+        if reply_msg.sticker:
+            filter_type = 'sticker'
+            reply_content = reply_msg.sticker.file_id
+        elif reply_msg.voice:
+            filter_type = 'voice'
+            reply_content = reply_msg.voice.file_id
+        elif reply_msg.text and ('http://' in reply_msg.text or 'https://' in reply_msg.text or 't.me/' in reply_msg.text):
+            filter_type = 'link'
+            reply_content = reply_msg.text
+        else:
+            reply_content = reply_msg.text or reply_msg.caption or ''
+            if 'http://' in reply_content or 'https://' in reply_content or 't.me/' in reply_content:
+                filter_type = 'link'
+
+        save_filter(update.effective_chat.id, keyword, reply_content, filter_type)
+        await update.message.reply_text(f'Filter ({filter_type}) saved for "{keyword}".')
+        return
+
     if not text or '|' not in text:
-        await update.message.reply_text('Usage: /filter [text|sticker|voice|link] keyword | reply')
+        await update.message.reply_text('Usage: /filter [text|sticker|voice|link] keyword | reply OR reply to a message with /filter trigger_word')
         return
 
     parts = [x.strip() for x in text.split('|', 1)]
@@ -1092,7 +1128,7 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     first_name = getattr(target, 'first_name', 'User')
     username = getattr(target, 'username', None)
     username_str = f"@{username}" if username else "Not set"
-    user_link = f'<a href="tg://user?id={user_id}">Profile</a>'
+    user_link = format_user_link(user_id, first_name)
 
     status_str = "Member"
     banned_str = "No"

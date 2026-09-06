@@ -182,15 +182,23 @@ async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS):
         await update.message.reply_text('Only owner or sudo can use broadcast.')
         return
-    message = update.message.text.partition(' ')[2].strip()
-    if not message:
-        await update.message.reply_text('Usage: /broadcast your message')
+
+    reply_msg = update.message.reply_to_message if update.message else None
+    message_text = update.message.text.partition(' ')[2].strip() if update.message else ''
+
+    if not message_text and not reply_msg:
+        await update.message.reply_text('Usage: /broadcast your message OR reply to a message with /broadcast')
         return
+
     runner = context.application.bot_data.get('broadcast_runner')
     if not runner:
         await update.message.reply_text('Broadcast system is unavailable right now.')
         return
-    await runner(message, context)
+
+    from_chat_id = update.effective_chat.id if update.effective_chat else None
+    from_message_id = reply_msg.message_id if reply_msg else None
+
+    await runner(message_text, context, from_chat_id=from_chat_id, from_message_id=from_message_id)
     await update.message.reply_text('Broadcast finished.')
 
 
