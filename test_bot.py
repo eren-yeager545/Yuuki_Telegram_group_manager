@@ -416,3 +416,126 @@ def test_mongo_extended_group_store(monkeypatch):
     assert g_updated['is_active'] == 0
     assert g_updated['current_bot_status'] == "left"
     assert g_updated['member_count'] == 48
+
+
+
+def test_purge_and_dban_bulk(monkeypatch, tmp_path):
+    import store
+    import admin
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import Update, User, Chat, Message
+
+    db_file = str(tmp_path / "test_purge_dban.db")
+    monkeypatch.setattr(store, "DB_PATH", db_file)
+    store.init_db()
+
+    # Record user messages
+    store.record_user_message(-1001, 555, 101)
+    store.record_user_message(-1001, 555, 102)
+    store.record_user_message(-1001, 555, 103)
+
+    bot = AsyncMock()
+    bot.delete_messages = AsyncMock()
+    bot.delete_message = AsyncMock()
+    bot.ban_chat_member = AsyncMock()
+    bot.send_message = AsyncMock()
+
+    context = MagicMock()
+    context.bot = bot
+
+    # Test purge
+    user = User(id=555, first_name="Target", is_bot=False)
+    chat = Chat(id=-1001, type="supergroup")
+    chat.set_bot(bot)
+    cmd_user = User(id=999, first_name="Admin", is_bot=False)
+
+    msg = MagicMock(spec=Message)
+    msg.message_id = 9999
+    msg.reply_to_message = None
+
+    update = MagicMock(spec=Update)
+    update.effective_chat = chat
+    update.effective_user = cmd_user
+    update.message = msg
+
+    monkeypatch.setattr(admin, "resolve_target_user", AsyncMock(return_value=user))
+    monkeypatch.setattr(admin, "admin_only", AsyncMock(return_value=True))
+
+    asyncio.run(admin.purge_cmd(update, context))
+
+    assert bot.delete_messages.called or bot.delete_message.called
+    assert bot.send_message.called
+
+
+def test_feedback_and_reply_flow(monkeypatch, tmp_path):
+    import store
+    import common
+    import config
+    import bot as bot_module
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import Update, User, Chat, Message, CallbackQuery
+
+    db_file = str(tmp_path / "test_feedback.db")
+    monkeypatch.setattr(store, "DB_PATH", db_file)
+    store.init_db()
+
+    bot = AsyncMock()
+    bot.send_message = AsyncMock()
+
+    context = MagicMock()
+    context.bot = bot
+    context.user_data = {}
+
+    user = User(id=12345, first_name="Alice", is_bot=False)
+    msg = MagicMock(spec=Message)
+    msg.text = "/feedback This bot is awesome!"
+    msg.reply_to_message = None
+
+    update = MagicMock(spec=Update)
+    update.effective_user = user
+    update.effective_message = msg
+
+    monkeypatch.setattr(config, "OWNER_ID", 99999)
+
+    asyncio.run(common.feedback_cmd(update, context))
+
+    bot.send_message.assert_called_once()
+    call_args = bot.send_message.call_args
+    assert call_args.kwargs['chat_id'] == 99999
+    assert "This bot is awesome!" in call_args.kwargs['text']
+    assert "tap to open profile" in call_args.kwargs['text']
+
+    # Test reply callback
+    cb_update = MagicMock(spec=Update)
+    cb_query = MagicMock(spec=CallbackQuery)
+    cb_query.data = "reply_fb:12345"
+    cb_query.message = AsyncMock()
+    cb_update.callback_query = cb_query
+
+    cb_context = MagicMock()
+    cb_context.user_data = {}
+
+    asyncio.run(bot_module.homepage_callback(cb_update, cb_context))
+    assert cb_context.user_data['pending_feedback_reply'] == 12345
+
+    # Test DM router response from owner
+    owner_user = User(id=99999, first_name="Owner", is_bot=False)
+    owner_chat = Chat(id=99999, type="private")
+    reply_msg = MagicMock(spec=Message)
+    reply_msg.text = "Thank you for your feedback!"
+
+    dm_update = MagicMock(spec=Update)
+    dm_update.effective_user = owner_user
+    dm_update.effective_chat = owner_chat
+    dm_update.effective_message = reply_msg
+
+    dm_context = MagicMock()
+    dm_context.bot = bot
+    dm_context.user_data = {'pending_feedback_reply': 12345}
+
+    asyncio.run(bot_module.message_router(dm_update, dm_context))
+
+    assert bot.send_message.call_count == 2
+    dm_call_args = bot.send_message.call_args
+    assert dm_call_args.kwargs['chat_id'] == 12345
+    assert "Thank you for your feedback!" in dm_call_args.kwargs['text']

@@ -71,6 +71,15 @@ async def homepage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         category = data.split(':', 1)[1]
         await query.message.reply_text(build_category_help_text(registry, category))
         return
+    if data.startswith('reply_fb:'):
+        target_uid_str = data.split(':', 1)[1]
+        try:
+            target_uid = int(target_uid_str)
+            context.user_data['pending_feedback_reply'] = target_uid
+            await query.message.reply_text(f"Please send your reply message now desu~ It will be sent directly to user ID <code>{target_uid}</code> 🌸", parse_mode="HTML")
+        except Exception:
+            await query.message.reply_text("Invalid user ID for feedback reply.")
+        return
 
 
 async def datadel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -264,6 +273,24 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not msg or not chat or not user:
         return
+
+    if chat.type == 'private' and context.user_data.get('pending_feedback_reply'):
+        target_uid = context.user_data.pop('pending_feedback_reply')
+        reply_text = msg.text or msg.caption or ''
+        if not reply_text:
+            await msg.reply_text('Please send text content to reply to the user.')
+            return
+        try:
+            await context.bot.send_message(
+                chat_id=target_uid,
+                text=f"💬 <b>Message from Bot Owner:</b>\n\n{reply_text}",
+                parse_mode="HTML"
+            )
+            await msg.reply_text(f"Reply sent directly to user ID <code>{target_uid}</code> desu~ 🌸", parse_mode="HTML")
+        except Exception as e:
+            await msg.reply_text(f"Failed to send reply to user ID {target_uid}. User may have blocked the bot or not started it.")
+        return
+
     now = int(time.time())
     if chat.type in ('group', 'supergroup'):
         last_g = group_seen_cache.get(chat.id, 0)
