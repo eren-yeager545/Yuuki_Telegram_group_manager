@@ -16,7 +16,7 @@ from store import (
     get_chat_federation, get_fed_ban, get_expired_temp_actions, clear_temp_action,
     log_admin_action, delete_user_data, get_global_link, record_user_message,
 )
-from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd, feedback_cmd
+from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd, feedback_cmd, mybot_cmd, build_mybot_keyboard
 from broadcast import broadcast_cmd, broadcast_callback_handler, handle_broadcast_content
 from admin import *
 
@@ -61,6 +61,37 @@ async def homepage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     registry = context.application.bot_data.get('help_registry', {})
     data = query.data or ''
+    if data.startswith('mybot:'):
+        user = update.effective_user
+        if not user or not is_owner_or_sudo(user.id):
+            await query.answer('Owner only action desu~', show_alert=True)
+            return
+        if data == 'mybot:toggle_logger':
+            cur = get_setting(0, 'logger_status', 'on').lower()
+            new_st = 'off' if cur == 'on' else 'on'
+            set_setting(0, 'logger_status', new_st)
+            await query.answer(f"Logger turned {new_st.upper()}!")
+        elif data == 'mybot:off_logger':
+            set_setting(0, 'logger_status', 'off')
+            await query.answer("Logger turned OFF!")
+        elif data == 'mybot:logger_info':
+            await query.answer("Use /addlogger <channel> to change logger channel.", show_alert=True)
+
+        logger_status = get_setting(0, 'logger_status', 'on').upper()
+        logger_chan = get_global_link('logger_channel_id', '') or get_global_link('logger_link', '') or 'None'
+        text = (
+            "🤖 <b>My Bot Status & Control Panel</b> 🌸\n\n"
+            f"• <b>Bot Name:</b> {getattr(context.bot, 'first_name', 'Yuki')} desu~ 💕\n"
+            f"• <b>Logger Status:</b> {logger_status}\n"
+            f"• <b>Logger Channel/Group:</b> <code>{logger_chan}</code>\n\n"
+            "<i>Use the buttons below to manage logger settings desu~ ✨</i>"
+        )
+        try:
+            await query.edit_message_text(text, parse_mode='HTML', reply_markup=build_mybot_keyboard())
+        except Exception:
+            pass
+        return
+
     if data == 'home:privacy':
         await privacy_cmd(update, context)
         return
@@ -489,6 +520,7 @@ def main():
         ('ping', ping_cmd, 'Users Commands', 'Check whether the bot is online', '/ping'),
         ('rules', rules_router, 'Users Commands', 'Show rules text', '/rules'),
         ('stats', stats_cmd, 'Users Commands', 'Show bot activity status', '/stats'),
+        ('mybot', mybot_cmd, 'Owner Commands', 'Bot control panel and logger settings', '/mybot'),
         ('get', getnote_cmd, 'Users Commands', 'Get a saved note', '/get rules'),
         ('notes', notes_cmd, 'Users Commands', 'Show all saved note names', '/notes'),
         ('filters', filters_cmd, 'Users Commands', 'Show all active filter keywords', '/filters'),

@@ -147,7 +147,11 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🏓 Latency: {latency} ms\n\n"
         "Everything is running smoothly desu! ✨ (⁠≧⁠∇⁠≦⁠)/"
     )
-    await update.message.reply_text(text)
+    msg = update.effective_message
+    if not msg and update.callback_query:
+        msg = update.callback_query.message
+    if msg:
+        await msg.reply_text(text)
 
 
 async def privacy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -174,7 +178,11 @@ async def privacy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📩 Contact\n"
         f"For questions or data deletion inquiries, contact support at: {support_url}"
     )
-    await update.message.reply_text(text)
+    msg = update.effective_message
+    if not msg and update.callback_query:
+        msg = update.callback_query.message
+    if msg:
+        await msg.reply_text(text)
 
 
 async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -301,3 +309,38 @@ async def feedback_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 if __name__ == '__main__':
     from bot import main
     main()
+
+def build_mybot_keyboard():
+    logger_status = get_setting(0, 'logger_status', 'on').lower()
+    logger_channel = get_global_link('logger_channel_id', '') or get_global_link('logger_link', '') or 'Not configured'
+    status_btn_text = f"Logger Status: {'🟢 ON' if logger_status == 'on' else '🔴 OFF'}"
+    keyboard = [
+        [InlineKeyboardButton(status_btn_text, callback_data='mybot:toggle_logger')],
+        [InlineKeyboardButton(f"Logger Channel: {logger_channel}", callback_data='mybot:logger_info')],
+        [InlineKeyboardButton("Turn Off Logger ❌", callback_data='mybot:off_logger')]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def mybot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not msg:
+        return
+
+    is_owner = is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS)
+    logger_status = get_setting(0, 'logger_status', 'on').upper()
+    logger_chan = get_global_link('logger_channel_id', '') or get_global_link('logger_link', '') or 'None'
+
+    text = (
+        "🤖 <b>My Bot Status & Control Panel</b> 🌸\n\n"
+        f"• <b>Bot Name:</b> {getattr(context.bot, 'first_name', 'Yuki')} desu~ 💕\n"
+        f"• <b>Logger Status:</b> {logger_status}\n"
+        f"• <b>Logger Channel/Group:</b> <code>{logger_chan}</code>\n"
+    )
+
+    if is_owner:
+        text += "\n<i>Use the buttons below to manage logger settings desu~ ✨</i>"
+        await msg.reply_text(text, parse_mode='HTML', reply_markup=build_mybot_keyboard())
+    else:
+        await msg.reply_text(text, parse_mode='HTML')
