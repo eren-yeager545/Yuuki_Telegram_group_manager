@@ -766,3 +766,158 @@ def test_ban_admin_protection_and_guards(monkeypatch, tmp_path):
     context.args = ["Goodbye", "{user}!"]
     asyncio.run(admin.setgoodbye_cmd(update, context))
     assert store.get_setting(-1001, "goodbye_text") == "Goodbye {user}!"
+
+
+def test_tictactoe_logic_and_gameplay():
+    import tictactoe
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import Update, User, Chat, Message, CallbackQuery
+
+    # 1. Test check_winner
+    assert tictactoe.check_winner([' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ']) is None
+    assert tictactoe.check_winner(['X', 'X', 'X', ' ', ' ', ' ', ' ', ' ', ' ']) == 'X'
+    assert tictactoe.check_winner(['O', ' ', ' ', 'O', ' ', ' ', 'O', ' ', ' ']) == 'O'
+    assert tictactoe.check_winner(['X', 'O', 'X', 'X', 'O', 'O', 'O', 'X', 'X']) == 'draw'
+
+    # 2. Test minimax AI
+    board = ['X', 'X', ' ', ' ', 'O', ' ', ' ', ' ', ' ']
+    move = tictactoe.get_bot_move(board)
+    assert move == 2  # Block X from winning on row 0
+
+    # 3. Test Single Player vs Bot Command (/ttt)
+    bot_user = User(id=999, first_name="Yuki", is_bot=True)
+    p1 = User(id=101, first_name="Alice", is_bot=False)
+    chat = Chat(id=-1001, type="supergroup")
+
+    msg = MagicMock(spec=Message)
+    msg.reply_to_message = None
+    msg.reply_html = AsyncMock()
+
+    update = MagicMock(spec=Update)
+    update.effective_message = msg
+    update.effective_user = p1
+    update.effective_chat = chat
+
+    context = MagicMock()
+    context.bot = bot_user
+
+    asyncio.run(tictactoe.ttt_cmd(update, context))
+
+    msg.reply_html.assert_called_once()
+    assert len(tictactoe.GAMES) == 1
+    game_id = list(tictactoe.GAMES.keys())[0]
+    game = tictactoe.GAMES[game_id]
+    assert game['p1']['id'] == 101
+    assert game['vs_bot'] is True
+
+    # 4. Test Player Move against Bot
+    cb_query = MagicMock(spec=CallbackQuery)
+    cb_query.data = f"ttt_move:{game_id}:0"
+    cb_query.from_user = p1
+    cb_query.answer = AsyncMock()
+    cb_query.edit_message_text = AsyncMock()
+
+    cb_update = MagicMock(spec=Update)
+    cb_update.callback_query = cb_query
+
+    asyncio.run(tictactoe.ttt_callback_handler(cb_update, context))
+
+    # Board should have X at index 0 and O placed by Bot
+    assert game['board'][0] == 'X'
+    assert 'O' in game['board']
+
+    # Clean games dict
+    tictactoe.GAMES.clear()
+
+    # 5. Test Tournament PvP Challenge (/ttt in reply to another user)
+    p2 = User(id=202, first_name="Bob", is_bot=False)
+    reply_msg = MagicMock(spec=Message)
+    reply_msg.from_user = p2
+
+    pvp_msg = MagicMock(spec=Message)
+    pvp_msg.reply_to_message = reply_msg
+    pvp_msg.reply_html = AsyncMock(return_value=MagicMock(message_id=555))
+
+    pvp_update = MagicMock(spec=Update)
+    pvp_update.effective_message = pvp_msg
+    pvp_update.effective_user = p1
+    pvp_update.effective_chat = chat
+
+    asyncio.run(tictactoe.ttt_cmd(pvp_update, context))
+
+    pvp_msg.reply_html.assert_called_once()
+    assert len(tictactoe.INVITATIONS) == 1
+    inv_id = list(tictactoe.INVITATIONS.keys())[0]
+    inv = tictactoe.INVITATIONS[inv_id]
+    assert inv['p1']['id'] == 101
+    assert inv['p2']['id'] == 202
+
+    # 6. Test Decline Challenge
+    dec_query = MagicMock(spec=CallbackQuery)
+    dec_query.data = f"ttt_decline:{inv_id}"
+    dec_query.from_user = p2
+    dec_query.answer = AsyncMock()
+    dec_query.edit_message_text = AsyncMock()
+
+    dec_update = MagicMock(spec=Update)
+    dec_update.callback_query = dec_query
+
+    asyncio.run(tictactoe.ttt_callback_handler(dec_update, context))
+    assert inv_id not in tictactoe.INVITATIONS
+    dec_query.edit_message_text.assert_called_once()
+    assert "Declined" in dec_query.edit_message_text.call_args[0][0]
+
+    # 7. Test Accept Challenge & Play
+    asyncio.run(tictactoe.ttt_cmd(pvp_update, context))
+    inv_id_2 = list(tictactoe.INVITATIONS.keys())[0]
+
+    acc_query = MagicMock(spec=CallbackQuery)
+    acc_query.data = f"ttt_accept:{inv_id_2}"
+    acc_query.from_user = p2
+    acc_query.answer = AsyncMock()
+    acc_query.edit_message_text = AsyncMock()
+
+    acc_update = MagicMock(spec=Update)
+    acc_update.callback_query = acc_query
+
+    asyncio.run(tictactoe.ttt_callback_handler(acc_update, context))
+    assert inv_id_2 not in tictactoe.INVITATIONS
+    assert inv_id_2 in tictactoe.GAMES
+
+    pvp_game = tictactoe.GAMES[inv_id_2]
+    assert pvp_game['vs_bot'] is False
+
+    # Move by P1 (Alice)
+    m1_query = MagicMock(spec=CallbackQuery)
+    m1_query.data = f"ttt_move:{inv_id_2}:0"
+    m1_query.from_user = p1
+    m1_query.answer = AsyncMock()
+    m1_query.edit_message_text = AsyncMock()
+    asyncio.run(tictactoe.ttt_callback_handler(MagicMock(callback_query=m1_query), context))
+    assert pvp_game['board'][0] == 'X'
+    assert pvp_game['turn'] == 202
+
+    # Move by P2 (Bob)
+    m2_query = MagicMock(spec=CallbackQuery)
+    m2_query.data = f"ttt_move:{inv_id_2}:1"
+    m2_query.from_user = p2
+    m2_query.answer = AsyncMock()
+    m2_query.edit_message_text = AsyncMock()
+    asyncio.run(tictactoe.ttt_callback_handler(MagicMock(callback_query=m2_query), context))
+    assert pvp_game['board'][1] == 'O'
+    assert pvp_game['turn'] == 101
+
+    # 8. Test Expiry Timeout
+    tictactoe.INVITATIONS[inv_id_2] = {
+        'p1': {'id': 101, 'name': 'Alice'},
+        'p2': {'id': 202, 'name': 'Bob'},
+        'chat_id': -1001,
+        'msg_id': 777,
+        'status': 'pending'
+    }
+    dummy_job = type('Job', (), {'data': {'game_id': inv_id_2}})()
+    dummy_ctx = type('Ctx', (), {'job': dummy_job, 'bot': AsyncMock()})()
+    asyncio.run(tictactoe.expire_invitation(dummy_ctx))
+    assert inv_id_2 not in tictactoe.INVITATIONS
+    dummy_ctx.bot.edit_message_text.assert_called_once()
+    assert "Expired" in dummy_ctx.bot.edit_message_text.call_args.kwargs['text'] or "Expired" in str(dummy_ctx.bot.edit_message_text.call_args)

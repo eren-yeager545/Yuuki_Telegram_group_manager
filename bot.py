@@ -18,6 +18,7 @@ from store import (
 )
 from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd, feedback_cmd, mybot_cmd, build_mybot_keyboard
 from broadcast import broadcast_cmd, broadcast_callback_handler, handle_broadcast_content
+from tictactoe import ttt_cmd, ttt_callback_handler
 from admin import *
 from common import ai_cmd
 
@@ -581,6 +582,7 @@ def main():
         ('warns', warns_cmd, 'Moderation Commands', 'List warned users in group', '/warns'),
         ('locks', locks_cmd, 'Users Commands', 'Show lock status', '/locks'),
         ('myfeds', myfeds_cmd, 'Users Commands', 'List your federations', '/myfeds'),
+        ('ttt', ttt_cmd, 'Game Commands', 'Play Tic Tac Toe against bot or challenged user in reply', '/ttt'),
     ]
     admin_cmds = [
         ('promote', promote_cmd, 'Group Management Commands', 'Promote a member to admin', '/promote'),
@@ -639,6 +641,7 @@ def main():
         add_registered_command(app, *spec)
     app.add_handler(CallbackQueryHandler(kick_callback_handler, pattern='^kick_'))
     app.add_handler(CallbackQueryHandler(broadcast_callback_handler, pattern='^bcast_'))
+    app.add_handler(CallbackQueryHandler(ttt_callback_handler, pattern='^ttt_'))
     app.add_handler(CallbackQueryHandler(homepage_callback))
     app.add_handler(ChatMemberHandler(chat_member_router, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.StatusUpdate.ALL, service_router))
