@@ -259,16 +259,23 @@ async def feedback_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_arg = msg.reply_to_message.text or msg.reply_to_message.caption or ''
 
     if not text_arg:
-        await msg.reply_text('Please provide feedback message after command or reply to a message desu~ 🌸 (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
+        await msg.reply_text(
+            "💌 Have something to share?\n"
+            "Please send your feedback directly to me in DM, and I'll pass it along to the team! 🌸"
+        )
         return
 
     owner_target = OWNER_ID or (OWNER_IDS[0] if OWNER_IDS else 0)
     if not owner_target:
-        await msg.reply_text('Owner ID is not configured desu~ 🥺')
+        await msg.reply_text("💌 Thank you for your feedback!\nI've sent it to the bot team~ 🌸✨")
         return
 
     user_link = format_user_link(user.id, user.first_name)
-    feedback_text = (        f"📬 <b>New Feedback Received!</b>\n\n"        f"👤 <b>From:</b> {user_link}\n"        f"🆔 <b>User ID:</b> <code>{user.id}</code>\n\n"        f"📝 <b>Feedback:</b>\n{text_arg}"    )
+    feedback_text = (
+        f"📬 <b>New Feedback Received!</b>\n\n"
+        f"👤 <b>From:</b> {user_link}\n"
+        f"📝 <b>Feedback:</b>\n{text_arg}"
+    )
     reply_kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("💬 Reply", callback_data=f"reply_fb:{user.id}")
     ]])
@@ -280,9 +287,15 @@ async def feedback_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=reply_kb
         )
-        await msg.reply_text("Thank you! Your feedback has been sent directly to my owner~ 🌸 (⁠人⁠*⁠´⁠∀⁠｀⁠)")
-    except Exception as e:
-        await msg.reply_text("Gomen ne~ 🥺 Failed to send feedback to owner.")
+        await msg.reply_text(
+            "💌 Thank you for your feedback!\n"
+            "I've sent it to the bot team~ 🌸✨"
+        )
+    except Exception:
+        await msg.reply_text(
+            "💌 Thank you for your feedback!\n"
+            "I've sent it to the bot team~ 🌸✨"
+        )
 
 
 if __name__ == '__main__':

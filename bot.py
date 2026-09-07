@@ -16,7 +16,7 @@ from store import (
     get_chat_federation, get_fed_ban, get_expired_temp_actions, clear_temp_action,
     log_admin_action, delete_user_data, get_global_link, record_user_message,
 )
-from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd
+from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd, feedback_cmd
 from broadcast import broadcast_cmd, broadcast_callback_handler, handle_broadcast_content
 from admin import *
 
@@ -38,11 +38,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
             msg_obj = update.callback_query.message
 
     if msg_obj:
-        cid = await safe_reply_error(
+        await safe_reply_error(
             msg_obj,
-            "Gomen ne~ 🥺 Something went wrong! (⁠✿⁠☉⁠｡⁠☉⁠)\nReference ID: {cid}\nPlease provide this reference ID if you need support desu~ 🌸"
+            "☁️ Oopsie! Something went a little wrong. Please try again in a moment~ 💗"
         )
-        logger.error('Error handling update with Reference ID: %s', cid)
 
 
 def register_help(app: Application, category: str, command: str, usage: str, example: str):
@@ -319,8 +318,13 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if msg.text and msg.text.startswith('#') and len(msg.text.split()) == 1:
             row = get_note(chat.id, msg.text[1:].strip())
             if row:
-                content, buttons_blob = row
-                await msg.reply_text(content, reply_markup=build_keyboard(parse_buttons_blob(buttons_blob)))
+                content = row[0]
+                buttons_blob = row[1] if len(row) > 1 else ''
+                note_type = row[2] if len(row) > 2 else 'text'
+                try:
+                    await send_note_reply(msg, content, buttons_blob, note_type)
+                except Exception:
+                    pass
                 return
 
         has_link = bool('http://' in lower or 'https://' in lower or 't.me/' in lower)
@@ -429,21 +433,31 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 matched = True
             elif f_type == 'link' and keyword in lower:
                 matched = True
+            elif f_type in ('document', 'pdf') and keyword in lower:
+                matched = True
 
             if matched:
                 if f_type == 'sticker':
                     try:
                         await msg.reply_sticker(reply)
                     except Exception:
-                        await msg.reply_text(f"[{keyword}] {reply}")
+                        await msg.reply_text(reply)
                 elif f_type == 'voice':
                     try:
                         await msg.reply_voice(reply)
                     except Exception:
-                        await msg.reply_text(f"[{keyword}] {reply}")
+                        await msg.reply_text(reply)
+                elif f_type in ('document', 'pdf'):
+                    file_id = reply
+                    caption = None
+                    if '||' in reply:
+                        file_id, caption = reply.split('||', 1)
+                    try:
+                        await msg.reply_document(document=file_id, caption=caption if caption else None)
+                    except Exception:
+                        await msg.reply_text(caption if caption else "📄 Document")
                 else:
-                    reply_text = reply if keyword in reply.lower() else f"[{keyword}] {reply}"
-                    await msg.reply_text(reply_text)
+                    await msg.reply_text(reply)
                 break
 
 
@@ -479,6 +493,7 @@ def main():
         ('notes', notes_cmd, 'Users Commands', 'Show all saved note names', '/notes'),
         ('filters', filters_cmd, 'Users Commands', 'Show all active filter keywords', '/filters'),
         ('privacy', privacy_cmd, 'Users Commands', 'Show privacy text', '/privacy'),
+        ('feedback', feedback_cmd, 'Users Commands', 'Send feedback to bot team', '/feedback great bot!'),
         ('datadel', datadel_cmd, 'Owner Commands', 'Delete all stored data for a user ID', '/datadel 123456789'),
         ('addsupport', addsupport_cmd, 'Owner Commands', 'Set support group button link', '/addsupport https://t.me/your_support_group'),
         ('addchannel', addchannel_cmd, 'Owner Commands', 'Set update channel button link', '/addchannel https://t.me/your_update_channel'),
@@ -495,6 +510,8 @@ def main():
         ('myfeds', myfeds_cmd, 'Users Commands', 'List your federations', '/myfeds'),
     ]
     admin_cmds = [
+        ('promote', promote_cmd, 'Group Management Commands', 'Promote a member to admin', '/promote'),
+        ('demote', demote_cmd, 'Group Management Commands', 'Demote an admin', '/demote'),
         ('ban', ban_cmd, 'Group Management Commands', 'Reply-ban a user', '/ban'),
         ('unban', unban_cmd, 'Group Management Commands', 'Unban by user id', '/unban 1234'),
         ('kick', kick_cmd, 'Group Management Commands', 'Reply-kick a user', '/kick'),

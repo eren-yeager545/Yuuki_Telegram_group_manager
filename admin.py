@@ -254,7 +254,7 @@ async def dban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.ban_chat_member(chat_id, target.id, revoke_messages=True)
     except Exception as e:
-        cid = await safe_reply_error(update.effective_message, "Gomen ne~ 🥺 I couldn't ban that user!\nReference ID: {cid}")
+        await safe_reply_error(update.effective_message, "🌷 Aww, Telegram won't let me perform that action on this member.")
         return
 
     mids = clear_user_messages(chat_id, target.id)
@@ -487,53 +487,91 @@ async def warnaction_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
-    text = update.message.text.partition(' ')[2].strip()
+    text = (update.message.text or update.message.caption or '').partition(' ')[2].strip() if update.message else ''
 
-    # Reply mode: /save <trigger_word>
-    if update.message.reply_to_message:
-        trigger_word = text.strip()
-        if not trigger_word:
-            await update.message.reply_text('Usage: reply to a message and send /save trigger_word')
+    try:
+        # Reply mode: /save <trigger_word>
+        if update.message and update.message.reply_to_message:
+            trigger_word = text.strip()
+            if not trigger_word:
+                await update.message.reply_text('🌸 Please specify a note name desu! Usage: reply to a message and send /save note_name')
+                return
+
+            reply_msg = update.message.reply_to_message
+            note_type = 'text'
+            note_content = ''
+
+            if reply_msg.document:
+                note_type = 'document'
+                cap = reply_msg.caption or ''
+                note_content = f"{reply_msg.document.file_id}||{cap}"
+            elif reply_msg.sticker:
+                note_type = 'sticker'
+                note_content = reply_msg.sticker.file_id
+            elif reply_msg.voice:
+                note_type = 'voice'
+                note_content = reply_msg.voice.file_id
+            else:
+                note_content = reply_msg.text or reply_msg.caption or ''
+
+            # Extract inline keyboard buttons if present
+            buttons_list = []
+            if reply_msg.reply_markup and getattr(reply_msg.reply_markup, 'inline_keyboard', None):
+                for row in reply_msg.reply_markup.inline_keyboard:
+                    for btn in row:
+                        if getattr(btn, 'url', None) and getattr(btn, 'text', None):
+                            buttons_list.append(f"{btn.text} - {btn.url}")
+            buttons_blob = ' || '.join(buttons_list)
+
+            save_note(update.effective_chat.id, trigger_word, note_content, buttons_blob, note_type)
+            await update.message.reply_text("💾✨ Saved successfully!\nYour note is safely tucked away~ 🌸")
             return
 
-        reply_msg = update.message.reply_to_message
-        note_content = reply_msg.text or reply_msg.caption or ''
+        # Standard syntax: /save name | content || Label - https://url
+        if '|' not in text:
+            await update.message.reply_text('🌸 Usage: /save name | content || Label - https://url OR reply to a message with /save note_name')
+            return
 
-        # Extract inline keyboard buttons if present
-        buttons_list = []
-        if reply_msg.reply_markup and getattr(reply_msg.reply_markup, 'inline_keyboard', None):
-            for row in reply_msg.reply_markup.inline_keyboard:
-                for btn in row:
-                    if getattr(btn, 'url', None) and getattr(btn, 'text', None):
-                        buttons_list.append(f"{btn.text} - {btn.url}")
-        buttons_blob = ' || '.join(buttons_list)
+        name, rest = [x.strip() for x in text.split('|', 1)]
+        note_content, buttons_blob = rest, ''
+        if '||' in rest:
+            note_content, buttons_blob = [x.strip() for x in rest.split('||', 1)]
+        save_note(update.effective_chat.id, name, note_content, buttons_blob, 'text')
+        await update.message.reply_text("💾✨ Saved successfully!\nYour note is safely tucked away~ 🌸")
+    except Exception:
+        await update.message.reply_text("🥺 Aww, I couldn't save that note right now. Please try again! 💕")
 
-        save_note(update.effective_chat.id, trigger_word, note_content, buttons_blob)
-        await update.message.reply_text(f'Saved note #{trigger_word}.')
-        return
 
-    # Standard syntax: /save name | content || Label - https://url
-    if '|' not in text:
-        await update.message.reply_text('Usage: /save name | content || Label - https://url OR reply to a message with /save trigger_word')
-        return
-
-    name, rest = [x.strip() for x in text.split('|', 1)]
-    content, buttons_blob = rest, ''
-    if '||' in rest:
-        content, buttons_blob = [x.strip() for x in rest.split('||', 1)]
-    save_note(update.effective_chat.id, name, content, buttons_blob)
-    await update.message.reply_text(f'Saved note #{name}.')
+async def send_note_reply(msg, content, buttons_blob, note_type='text'):
+    reply_markup = build_keyboard(parse_buttons_blob(buttons_blob)) if buttons_blob else None
+    if note_type == 'document':
+        file_id = content
+        caption = None
+        if '||' in content:
+            file_id, caption = content.split('||', 1)
+        await msg.reply_document(document=file_id, caption=caption if caption else None, reply_markup=reply_markup)
+    elif note_type == 'sticker':
+        await msg.reply_sticker(sticker=content, reply_markup=reply_markup)
+    elif note_type == 'voice':
+        await msg.reply_voice(voice=content, reply_markup=reply_markup)
+    else:
+        await msg.reply_text(text=content, reply_markup=reply_markup)
 
 
 async def getnote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
+    if not context.args or not update.effective_chat or not update.message:
         return
     row = get_note(update.effective_chat.id, context.args[0])
     if not row:
-        await update.message.reply_text('Note not found.')
+        await update.message.reply_text("🌸 Aww, I couldn't find that note desu~ 💕")
         return
-    content, buttons_blob = row
-    await update.message.reply_text(content, reply_markup=build_keyboard(parse_buttons_blob(buttons_blob)))
+    content = row[0]
+    buttons_blob = row[1] if len(row) > 1 else ''
+    note_type = row[2] if len(row) > 2 else 'text'
+    try:
+        await send_note_reply(update.message, content, buttons_blob, note_type)
+    except Exception:
+        await update.message.reply_text("🥺 Aww, I couldn't send that note right now. Please try again! 💕")
 
 
 async def notes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -553,9 +591,9 @@ async def clearnote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def filter_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
-    text = update.message.text.partition(' ')[2].strip()
+    text = (update.message.text or update.message.caption or '').partition(' ')[2].strip() if update.message else ''
 
-    if update.message.reply_to_message:
+    if update.message and update.message.reply_to_message:
         reply_msg = update.message.reply_to_message
         keyword = text.strip()
         if not keyword:
@@ -565,7 +603,11 @@ async def filter_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filter_type = 'text'
         reply_content = ''
 
-        if reply_msg.sticker:
+        if reply_msg.document:
+            filter_type = 'document'
+            cap = reply_msg.caption or ''
+            reply_content = f"{reply_msg.document.file_id}||{cap}"
+        elif reply_msg.sticker:
             filter_type = 'sticker'
             reply_content = reply_msg.sticker.file_id
         elif reply_msg.voice:
@@ -584,7 +626,7 @@ async def filter_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not text or '|' not in text:
-        await update.message.reply_text('Usage: /filter [text|sticker|voice|link] keyword | reply OR reply to a message with /filter trigger_word')
+        await update.message.reply_text('Usage: /filter [text|sticker|voice|link|document] keyword | reply OR reply to a message with /filter trigger_word')
         return
 
     parts = [x.strip() for x in text.split('|', 1)]
@@ -594,8 +636,10 @@ async def filter_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filter_type = 'text'
     keyword = left_part
 
-    if len(left_words) == 2 and left_words[0].lower() in ('text', 'sticker', 'voice', 'link'):
+    if len(left_words) == 2 and left_words[0].lower() in ('text', 'sticker', 'voice', 'link', 'document', 'pdf'):
         filter_type = left_words[0].lower()
+        if filter_type == 'pdf':
+            filter_type = 'document'
         keyword = left_words[1]
 
     save_filter(update.effective_chat.id, keyword, reply, filter_type)
@@ -609,7 +653,7 @@ async def filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('No active filters in this chat.')
         return
 
-    categorized = {'text': [], 'sticker': [], 'voice': [], 'link': []}
+    categorized = {'text': [], 'sticker': [], 'voice': [], 'link': [], 'document': []}
     for kw, reply, f_type in all_filters:
         if f_type in categorized:
             categorized[f_type].append(kw)
@@ -621,7 +665,8 @@ async def filters_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'text': '📝 Text',
         'sticker': '🖼️ Sticker',
         'voice': '🎤 Voice',
-        'link': '🔗 Link'
+        'link': '🔗 Link',
+        'document': '📄 Document/PDF'
     }
 
     for f_type, label in type_labels.items():
@@ -1220,3 +1265,151 @@ async def zombies_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("")
     lines.append("Use `/zombies clean` to remove these records from group database tracking.")
     await update.message.reply_html("\n".join(lines), disable_web_page_preview=True)
+
+
+async def promote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_chat or update.effective_chat.type not in ('group', 'supergroup'):
+        await update.message.reply_text("🌸 This command can only be used in groups desu~ 💕")
+        return
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id if update.effective_user else 0
+
+    # 1. Check user permissions to promote/manage admins
+    try:
+        user_member = await context.bot.get_chat_member(chat_id, user_id)
+        if user_member.status == 'creator' or is_owner_or_sudo(user_id):
+            can_manage = True
+        elif user_member.status == 'administrator':
+            can_manage = getattr(user_member, 'can_promote_members', False)
+        else:
+            can_manage = False
+
+        if not can_manage:
+            await update.message.reply_text("🥺 Ehehe, I don't have enough permission to do that yet! Please make sure I'm an admin with the required permissions. 🌸")
+            return
+    except Exception:
+        await update.message.reply_text("🥺 Ehehe, I don't have enough permission to do that yet! Please make sure I'm an admin with the required permissions. 🌸")
+        return
+
+    # 2. Check bot permissions to promote members
+    try:
+        bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
+        if bot_member.status != 'administrator' or not getattr(bot_member, 'can_promote_members', False):
+            await update.message.reply_text("«🥺 Oopsie! I can't do that right now because Telegram doesn't allow me to change this member's permissions. 💕\nPlease make sure I have the required admin permissions!»")
+            return
+    except Exception:
+        await update.message.reply_text("«🥺 Oopsie! I can't do that right now because Telegram doesn't allow me to change this member's permissions. 💕\nPlease make sure I have the required admin permissions!»")
+        return
+
+    # 3. Resolve and validate target user
+    target = await resolve_target_user(update, context)
+    if not target or target.id == update.effective_user.id:
+        await update.message.reply_text("🌸 Please reply to or specify a valid group member you want to promote!")
+        return
+
+    try:
+        target_member = await context.bot.get_chat_member(chat_id, target.id)
+        if target_member.status in ('left', 'kicked'):
+            await update.message.reply_text("🌷 Aww, Telegram won't let me perform that action on this member.")
+            return
+        if target_member.status in ('administrator', 'creator'):
+            await update.message.reply_text("🌸 That member is already an admin desu~ 💕")
+            return
+    except Exception:
+        await update.message.reply_text("🌷 Aww, Telegram won't let me perform that action on this member.")
+        return
+
+    # 4. Promote target member
+    try:
+        await context.bot.promote_chat_member(
+            chat_id=chat_id,
+            user_id=target.id,
+            can_change_info=True,
+            can_delete_messages=True,
+            can_invite_users=True,
+            can_restrict_members=True,
+            can_pin_messages=True,
+            can_manage_video_chats=True
+        )
+        tag = format_user_tag(target.id, getattr(target, 'first_name', 'User'), getattr(target, 'username', None))
+        log_admin_action(chat_id, user_id, 'promote', target.id)
+        await update.message.reply_html(f"👑✨ Yay! {tag} has been promoted to group admin! 🌸")
+    except Exception:
+        await update.message.reply_text("«🥺 Oopsie! I can't do that right now because Telegram doesn't allow me to change this member's permissions. 💕\nPlease make sure I have the required admin permissions!»")
+
+
+async def demote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_chat or update.effective_chat.type not in ('group', 'supergroup'):
+        await update.message.reply_text("🌸 This command can only be used in groups desu~ 💕")
+        return
+
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id if update.effective_user else 0
+
+    # 1. Check user permissions to manage/demote admins
+    try:
+        user_member = await context.bot.get_chat_member(chat_id, user_id)
+        if user_member.status == 'creator' or is_owner_or_sudo(user_id):
+            can_manage = True
+        elif user_member.status == 'administrator':
+            can_manage = getattr(user_member, 'can_promote_members', False)
+        else:
+            can_manage = False
+
+        if not can_manage:
+            await update.message.reply_text("🥺 Ehehe, I don't have enough permission to do that yet! Please make sure I'm an admin with the required permissions. 🌸")
+            return
+    except Exception:
+        await update.message.reply_text("🥺 Ehehe, I don't have enough permission to do that yet! Please make sure I'm an admin with the required permissions. 🌸")
+        return
+
+    # 2. Check bot permissions
+    try:
+        bot_member = await context.bot.get_chat_member(chat_id, context.bot.id)
+        if bot_member.status != 'administrator' or not getattr(bot_member, 'can_promote_members', False):
+            await update.message.reply_text("«🥺 Oopsie! I can't do that right now because Telegram doesn't allow me to change this member's permissions. 💕\nPlease make sure I have the required admin permissions!»")
+            return
+    except Exception:
+        await update.message.reply_text("«🥺 Oopsie! I can't do that right now because Telegram doesn't allow me to change this member's permissions. 💕\nPlease make sure I have the required admin permissions!»")
+        return
+
+    # 3. Resolve target
+    target = await resolve_target_user(update, context)
+    if not target or target.id == update.effective_user.id:
+        await update.message.reply_text("🌸 Please reply to or specify a valid admin you want to demote!")
+        return
+
+    try:
+        target_member = await context.bot.get_chat_member(chat_id, target.id)
+        if target_member.status == 'creator':
+            await update.message.reply_text("«🌸 Ehehe, I can't do that to an admin! Telegram won't let me change their permissions this way. 🥺»")
+            return
+        if target_member.status != 'administrator':
+            await update.message.reply_text("🌸 That member is not an admin desu~ 💕")
+            return
+    except Exception:
+        await update.message.reply_text("«🌸 Ehehe, I can't do that to an admin! Telegram won't let me change their permissions this way. 🥺»")
+        return
+
+    # 4. Demote target admin
+    try:
+        await context.bot.promote_chat_member(
+            chat_id=chat_id,
+            user_id=target.id,
+            can_change_info=False,
+            can_post_messages=False,
+            can_edit_messages=False,
+            can_delete_messages=False,
+            can_invite_users=False,
+            can_restrict_members=False,
+            can_pin_messages=False,
+            can_promote_members=False,
+            can_manage_video_chats=False,
+            is_anonymous=False
+        )
+        tag = format_user_tag(target.id, getattr(target, 'first_name', 'User'), getattr(target, 'username', None))
+        log_admin_action(chat_id, user_id, 'demote', target.id)
+        await update.message.reply_html(f"🌸 {tag} has been demoted back to a normal member desu~ 💕")
+    except Exception:
+        await update.message.reply_text("«🌸 Ehehe, I can't do that to an admin! Telegram won't let me change their permissions this way. 🥺»")
