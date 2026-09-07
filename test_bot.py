@@ -539,3 +539,104 @@ def test_feedback_and_reply_flow(monkeypatch, tmp_path):
     dm_call_args = bot.send_message.call_args
     assert dm_call_args.kwargs['chat_id'] == 12345
     assert "Thank you for your feedback!" in dm_call_args.kwargs['text']
+
+
+def test_broadcast_system(monkeypatch, tmp_path):
+    import store
+    import broadcast
+    import config
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import Update, User, Chat, Message, CallbackQuery
+    from telegram.error import Forbidden
+
+    db_file = str(tmp_path / "test_broadcast.db")
+    monkeypatch.setattr(store, "DB_PATH", db_file)
+    store.init_db()
+
+    # Populate sample database
+    store.upsert_user(1001, "User One", "user1")
+    store.upsert_user(1002, "User Two", "user2")
+    store.upsert_group(-1001, "Group One", is_active=1)
+    store.upsert_group(-1002, "Group Two", is_active=1)
+
+    owner_id = 99999
+    monkeypatch.setattr(broadcast, "OWNER_IDS", [owner_id])
+    monkeypatch.setattr("helpers.is_owner", lambda uid, owner_ids=None: uid == owner_id)
+
+    bot = AsyncMock()
+    bot.send_message = AsyncMock()
+    bot.copy_message = AsyncMock()
+
+    context = MagicMock()
+    context.bot = bot
+
+    owner_user = User(id=owner_id, first_name="Owner", is_bot=False)
+    normal_user = User(id=11111, first_name="Normal", is_bot=False)
+
+    # 1. Non-owner /broadcast rejection
+    no_owner_msg = MagicMock(spec=Message)
+    no_owner_msg.reply_text = AsyncMock()
+    no_owner_update = MagicMock(spec=Update)
+    no_owner_update.effective_user = normal_user
+    no_owner_update.message = no_owner_msg
+
+    asyncio.run(broadcast.broadcast_cmd(no_owner_update, context))
+    no_owner_msg.reply_text.assert_called_once()
+    assert "Only the Bot Owner" in no_owner_msg.reply_text.call_args[0][0]
+
+    # 2. Owner /broadcast initial prompt
+    owner_msg = MagicMock(spec=Message)
+    owner_msg.reply_text = AsyncMock()
+    owner_update = MagicMock(spec=Update)
+    owner_update.effective_user = owner_user
+    owner_update.message = owner_msg
+
+    asyncio.run(broadcast.broadcast_cmd(owner_update, context))
+    owner_msg.reply_text.assert_called_once()
+    assert "Choose Broadcast Type" in owner_msg.reply_text.call_args[0][0]
+    assert broadcast.BROADCAST_SESSIONS[owner_id]["status"] == "selecting_target"
+
+    # 3. Target Selection Callback ("both")
+    cb_query = MagicMock(spec=CallbackQuery)
+    cb_query.data = "bcast_target:both"
+    cb_query.answer = AsyncMock()
+    cb_query.edit_message_text = AsyncMock()
+
+    cb_update = MagicMock(spec=Update)
+    cb_update.effective_user = owner_user
+    cb_update.callback_query = cb_query
+
+    asyncio.run(broadcast.broadcast_callback_handler(cb_update, context))
+    cb_query.edit_message_text.assert_called_once()
+    assert "Send the message you want to broadcast" in cb_query.edit_message_text.call_args[0][0]
+    assert broadcast.BROADCAST_SESSIONS[owner_id]["status"] == "waiting_content"
+
+    # 4. Handle Content message & Execution
+    content_msg = MagicMock(spec=Message)
+    content_msg.chat_id = owner_id
+    content_msg.message_id = 7777
+
+    content_chat = Chat(id=owner_id, type="private")
+
+    content_update = MagicMock(spec=Update)
+    content_update.effective_user = owner_user
+    content_update.effective_chat = content_chat
+    content_update.effective_message = content_msg
+
+    # Mock send_single_recipient behavior: user 1002 forbidden, group -1002 forbidden
+    async def mock_copy_message(chat_id, from_chat_id, message_id):
+        if chat_id in (1002, -1002):
+            raise Forbidden("Bot was blocked by the user")
+        return MagicMock()
+
+    bot.copy_message.side_effect = mock_copy_message
+
+    # Handle broadcast content triggers async task
+    asyncio.run(broadcast.execute_broadcast(context, owner_id, owner_id, 7777, 'both'))
+
+    # Verify results
+    assert owner_id not in broadcast.BROADCAST_SESSIONS
+
+    # Verify group -1002 was marked inactive in DB
+    g2 = store.get_group_by_id(-1002)
+    assert g2["is_active"] == 0

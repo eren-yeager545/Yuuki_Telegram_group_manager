@@ -435,6 +435,18 @@ def get_active_group_count():
         return c.execute('SELECT COUNT(*) FROM groups WHERE is_active IS NULL OR is_active = 1').fetchone()[0]
 
 
+
+def get_all_user_ids():
+    if is_mongo():
+        db = get_mongo_db()
+        docs = db['users'].find({}, {'user_id': 1})
+        return [doc['user_id'] for doc in docs if 'user_id' in doc]
+
+    with closing(conn()) as c:
+        rows = c.execute('SELECT user_id FROM users').fetchall()
+        return [r[0] for r in rows]
+
+
 def get_user_count():
     if is_mongo():
         db = get_mongo_db()
