@@ -157,7 +157,7 @@ DEFAULT_GOODBYE = """🥺 {user} has left the group.
 def render_template(text, user, chat):
     if not user:
         return text or ''
-    u_tag = f"@{user.username}" if getattr(user, 'username', None) else f'{(user.first_name or "User")} (<a href="tg://user?id={user.id}">tap to open profile</a>)'
+    u_tag = f"@{user.username}" if getattr(user, 'username', None) else f'<a href="tg://user?id={user.id}">{html.escape(user.first_name or "User")}</a>'
     c_title = (chat.title or '') if chat else ''
     fn = user.first_name or ''
     ln = user.last_name or ''
@@ -491,19 +491,21 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 active_quizzes.pop(chat.id, None)
                 return
 
-        # Filters matching logic
+        # Filters matching logic (triggers ONLY when the message matches the trigger separately)
+        clean_text = txt.strip().lower()
         filters_list = get_filters(chat.id)
         for keyword, reply, f_type in filters_list:
+            kw_clean = keyword.strip().lower()
             matched = False
-            if f_type == 'text' and keyword in lower:
+            if f_type == 'text' and clean_text == kw_clean:
                 matched = True
-            elif f_type == 'sticker' and (has_sticker and (keyword in (msg.sticker.emoji or '').lower() or keyword in (msg.sticker.set_name or '').lower()) or keyword in lower):
+            elif f_type == 'sticker' and ((has_sticker and (kw_clean in (msg.sticker.emoji or '').lower() or kw_clean in (msg.sticker.set_name or '').lower())) or clean_text == kw_clean):
                 matched = True
-            elif f_type == 'voice' and keyword in lower:
+            elif f_type == 'voice' and clean_text == kw_clean:
                 matched = True
-            elif f_type == 'link' and keyword in lower:
+            elif f_type == 'link' and clean_text == kw_clean:
                 matched = True
-            elif f_type in ('document', 'pdf') and keyword in lower:
+            elif f_type in ('document', 'pdf') and clean_text == kw_clean:
                 matched = True
 
             if matched:
@@ -587,7 +589,6 @@ def main():
         ('unban', unban_cmd, 'Group Management Commands', 'Unban by user id', '/unban 1234'),
         ('kick', kick_cmd, 'Group Management Commands', 'Reply-kick a user', '/kick'),
         ('del', del_cmd, 'Group Management Commands', 'Delete replied message', '/del'),
-        ('purge', purge_cmd, 'Group Management Commands', 'Purge from replied message to current', '/purge'),
         ('dban', dban_cmd, 'Group Management Commands', 'Ban user and purge all their messages', '/dban'),
         ('pin', pin_cmd, 'Group Management Commands', 'Pin replied message', '/pin'),
         ('unpin', unpin_cmd, 'Group Management Commands', 'Clear all pins', '/unpin'),
@@ -616,6 +617,7 @@ def main():
         ('setrules', setrules_cmd, 'Moderation Commands', 'Set rules text', '/setrules no spam'),
         ('rulesbtn', rulesbtn_cmd, 'Moderation Commands', 'Set rules buttons', '/rulesbtn Rules - https://example.com'),
         ('modlog', modlog_cmd, 'Moderation Commands', 'Show recent moderation logs (admins only)', '/modlog'),
+        ('history', history_cmd, 'Moderation Commands', 'Show recent moderation history for group or user', '/history'),
         ('groupquota', groupquota_cmd, 'Help Sections', 'Show per-group quotas and retention caps', '/groupquota'),
         ('reports', reports_cmd, 'Moderation Commands', 'Enable or disable reports', '/reports on'),
         ('newfed', newfed_cmd, 'Federation Commands', 'Create federation', '/newfed myfed My Federation'),
@@ -635,6 +637,7 @@ def main():
     ]
     for spec in user_cmds + admin_cmds:
         add_registered_command(app, *spec)
+    app.add_handler(CallbackQueryHandler(kick_callback_handler, pattern='^kick_'))
     app.add_handler(CallbackQueryHandler(broadcast_callback_handler, pattern='^bcast_'))
     app.add_handler(CallbackQueryHandler(homepage_callback))
     app.add_handler(ChatMemberHandler(chat_member_router, ChatMemberHandler.MY_CHAT_MEMBER))

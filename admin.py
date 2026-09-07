@@ -57,10 +57,14 @@ def build_keyboard(rows):
 
 
 async def admin_only(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat and update.effective_chat.type in ('group', 'supergroup'):
-        if not await is_admin(update, context):
+    if not update.effective_chat or update.effective_chat.type not in ('group', 'supergroup'):
+        if update.message:
+            await update.message.reply_text('Gomen ne~ 🌸 This command can only be used inside group or supergroup chats desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
+        return False
+    if not await is_admin(update, context):
+        if update.message:
             await update.message.reply_text('Gomen ne~ 🌸 Only group admins can use this command desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
-            return False
+        return False
     return True
 
 
@@ -82,7 +86,7 @@ def extract_reason(update: Update):
 
 def format_user_link(user_id: int, name: str) -> str:
     escaped_name = html.escape(name or 'User')
-    return f'{escaped_name} (<a href="tg://user?id={user_id}">tap to open profile</a>)'
+    return f'<a href="tg://user?id={user_id}">{escaped_name}</a>'
 
 
 def format_user_tag(user_id: int, name: str, username: str = None) -> str:
@@ -163,13 +167,12 @@ async def apply_action(chat_id, target_id, action, context, duration_seconds=Non
 async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
-    if chat and chat.type in ('group', 'supergroup'):
-        if not await is_admin(update, context):
-            await update.message.reply_text(""" Oopsie~! 🐾
-You don't have permission to use /ban!
-Let an admin handle it for you. 🌷""")
-            return
-    elif not await admin_only(update, context):
+    if not chat or chat.type not in ('group', 'supergroup'):
+        await update.message.reply_text("🌸 /ban command can only be used in group chats desu~ 💕")
+        return
+
+    if not await is_admin(update, context):
+        await update.message.reply_text("Gomen ne~ 🌸 /ban command is only for admins desu! Let an admin handle it for you~ (⁠⁠◕⁠‿⁠◕⁠✿⁠)")
         return
 
     target = await resolve_target_user(update, context)
@@ -212,11 +215,62 @@ async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
     target = await resolve_target_user(update, context)
-    if target:
-        await context.bot.ban_chat_member(update.effective_chat.id, target.id)
-        await context.bot.unban_chat_member(update.effective_chat.id, target.id)
-        log_admin_action(update.effective_chat.id, update.effective_user.id, 'kick', target.id)
-        await update.message.reply_html(f'Kicked {format_user_tag(target.id, target.first_name, target.username)}.')
+    if not target or target.id == update.effective_user.id:
+        await update.message.reply_text("🌸 Please reply to or specify a valid user to kick desu~")
+        return
+
+    chat = update.effective_chat
+    if chat and chat.type in ('group', 'supergroup'):
+        if await is_target_admin(chat.id, target.id, context):
+            await update.message.reply_text("🥺 Ehehe… I can't kick an admin!")
+            return
+
+    target_tag = format_user_tag(target.id, getattr(target, 'first_name', 'User'), getattr(target, 'username', None))
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Yes", callback_data=f"kick_confirm:{target.id}:{update.effective_user.id}"),
+            InlineKeyboardButton("No", callback_data=f"kick_cancel:{target.id}:{update.effective_user.id}")
+        ]
+    ])
+    await update.message.reply_html(
+        f"Are you sure you want to kick {target_tag}? 🌸",
+        reply_markup=keyboard
+    )
+
+
+async def kick_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith(('kick_confirm:', 'kick_cancel:')):
+        return
+
+    parts = query.data.split(':')
+    action, target_id_str, admin_id_str = parts[0], parts[1], parts[2]
+    target_id = int(target_id_str)
+    admin_id = int(admin_id_str)
+
+    if query.from_user.id != admin_id:
+        await query.answer("Gomen ne~ Only the admin who issued this kick command can confirm it desu! 🌸", show_alert=True)
+        return
+
+    await query.answer()
+    chat_id = query.message.chat_id
+
+    if action == 'kick_cancel':
+        await query.edit_message_text("Kick action canceled desu~ 🌸")
+        return
+
+    try:
+        await context.bot.ban_chat_member(chat_id, target_id)
+        await context.bot.unban_chat_member(chat_id, target_id)
+        log_admin_action(chat_id, admin_id, 'kick', target_id)
+        u_info = get_user_by_id(target_id)
+        if u_info:
+            target_tag = format_user_tag(u_info[0], u_info[1] or 'User', u_info[2])
+        else:
+            target_tag = format_user_link(target_id, f"User {target_id}")
+        await query.edit_message_text(f"Kicked {target_tag} desu~ 🌸", parse_mode='HTML')
+    except Exception:
+        await query.edit_message_text("🌷 Aww, Telegram won't let me kick that member right now.")
 
 
 async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -229,48 +283,6 @@ async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log_admin_action(update.effective_chat.id, update.effective_user.id, 'del', update.message.reply_to_message.from_user.id)
         except Exception:
             await update.message.reply_text('I could not delete that message.')
-
-
-async def purge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await admin_only(update, context):
-        return
-    chat_id = update.effective_chat.id
-    cmd_msg_id = update.message.message_id if update.message else None
-    target_user = await resolve_target_user(update, context)
-
-    if not target_user and update.message and update.message.reply_to_message:
-        target_user = update.message.reply_to_message.from_user
-
-    if target_user:
-        user_tag = format_user_tag(target_user.id, getattr(target_user, 'first_name', 'User'), getattr(target_user, 'username', None))
-
-        mids = clear_user_messages(chat_id, target_user.id)
-        mids_set = set(mids)
-        if update.message and update.message.reply_to_message:
-            reply_user = update.message.reply_to_message.from_user
-            if reply_user and reply_user.id == target_user.id:
-                mids_set.add(update.message.reply_to_message.message_id)
-
-        # Ensure command giver's message is NEVER deleted
-        mids_set.discard(cmd_msg_id)
-
-        removed = 0
-        for mid in sorted(list(mids_set), reverse=True):
-            try:
-                await context.bot.delete_message(chat_id, mid)
-                removed += 1
-            except Exception:
-                pass
-
-        log_admin_action(chat_id, update.effective_user.id, 'purge', target_id=target_user.id, details=f'removed={removed}')
-        await update.effective_chat.send_message(
-            f"Swept away! 🧹✨ All messages from {user_tag} have been purged from the group! Everything is clean and sweet now~ 🌸 (⁠人⁠*⁠´⁠∀⁠｀⁠)"
-        )
-        return
-
-    await update.message.reply_text(
-        "Reply to a message or specify a user (`/purge @username`) to delete all messages from that selected user desu~ 🌸 (⁠⁠◕⁠‿⁠◕⁠✿⁠)"
-    )
 
 
 async def dban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1494,3 +1506,67 @@ Bye-bye, take care! 🌸""")
         log_admin_action(chat.id, user.id, 'kickme', user.id)
     except Exception:
         await safe_reply_error(update.effective_message, "🌷 Oopsie! Telegram won't let me kick you right now.")
+
+
+
+
+async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if not chat or chat.type not in ('group', 'supergroup'):
+        await update.message.reply_text("🌸 /history command can only be used in group chats desu~ 💕")
+        return
+    if not await is_admin(update, context):
+        await update.message.reply_text("Gomen ne~ 🌸 Only group admins can view moderation history desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)")
+        return
+
+    target = None
+    if context.args or (update.message and update.message.reply_to_message):
+        target = await resolve_target_user(update, context)
+
+    rows = get_recent_audit_logs(chat.id, 50)
+    if target:
+        rows = [r for r in rows if r[2] == target.id or r[0] == target.id]
+
+    if not rows:
+        await update.message.reply_text("📋 Moderation History\n\nNo recent moderation history found.")
+        return
+
+    lines_out = ["📋 Moderation History", ""]
+    action_emojis = {
+        'ban': '🚫 BAN',
+        'unban': '✅ UNBAN',
+        'kick': '👞 KICK',
+        'mute': '🔇 MUTE',
+        'unmute': '🔊 UNMUTE',
+        'warn': '⚠️ WARN',
+        'clearwarns': '🧹 CLEAR WARNS',
+        'report': '🚨 REPORT',
+        'pin': '📌 PIN'
+    }
+
+    for actor_id, action, target_id, details, created_at in rows[:20]:
+        action_upper = action.split()[0].lower() if action else ''
+        header = action_emojis.get(action_upper, f"⚡ {action.upper()}")
+
+        if target_id:
+            u_info = get_user_by_id(target_id)
+            if u_info:
+                user_str = format_user_tag(u_info[0], u_info[1] or 'User', u_info[2])
+            else:
+                user_str = format_user_link(target_id, f"User {target_id}")
+        else:
+            actor_info = get_user_by_id(actor_id)
+            if actor_info:
+                user_str = format_user_tag(actor_info[0], actor_info[1] or 'Admin', actor_info[2])
+            else:
+                user_str = format_user_link(actor_id, f"Admin {actor_id}")
+
+        rel_time = format_relative_time(created_at)
+        lines_out.append(f"{header}")
+        lines_out.append(f"👤 {user_str}")
+        if details:
+            lines_out.append(f"📝 {html.escape(details)}")
+        lines_out.append(f"🕐 {rel_time}")
+        lines_out.append("")
+
+    await update.message.reply_html("\n".join(lines_out), disable_web_page_preview=True)

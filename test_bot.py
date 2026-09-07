@@ -247,7 +247,7 @@ def test_command_logic(monkeypatch, tmp_path):
 
     # Test format_user_tag and format_user_link
     assert admin.format_user_tag(100, "Alice", "alice") == "@alice"
-    assert admin.format_user_tag(200, "Bob", None) == 'Bob (<a href="tg://user?id=200">tap to open profile</a>)'
+    assert admin.format_user_tag(200, "Bob", None) == '<a href="tg://user?id=200">Bob</a>'
 
     # Test zombies functions
     store.touch_member(-1001, 301, status='left')
@@ -461,7 +461,7 @@ def test_purge_and_dban_bulk(monkeypatch, tmp_path):
     monkeypatch.setattr(admin, "resolve_target_user", AsyncMock(return_value=user))
     monkeypatch.setattr(admin, "admin_only", AsyncMock(return_value=True))
 
-    asyncio.run(admin.purge_cmd(update, context))
+    asyncio.run(admin.dban_cmd(update, context))
 
     assert bot.delete_messages.called or bot.delete_message.called
     assert bot.send_message.called
@@ -503,7 +503,7 @@ def test_feedback_and_reply_flow(monkeypatch, tmp_path):
     call_args = bot.send_message.call_args
     assert call_args.kwargs['chat_id'] == 99999
     assert "This bot is awesome!" in call_args.kwargs['text']
-    assert "tap to open profile" in call_args.kwargs['text']
+    assert "tg://user?id=12345" in call_args.kwargs['text']
 
     # Test reply callback
     cb_update = MagicMock(spec=Update)
@@ -739,7 +739,7 @@ def test_ban_admin_protection_and_guards(monkeypatch, tmp_path):
     # 1. Non-admin calls /ban
     monkeypatch.setattr(admin, "is_admin", AsyncMock(return_value=False))
     asyncio.run(admin.ban_cmd(update, context))
-    assert "You don't have permission to use /ban!" in msg.reply_text.call_args[0][0]
+    assert "/ban command is only for admins desu!" in msg.reply_text.call_args[0][0]
 
     # 2. Admin tries to ban another admin
     update.effective_user = admin_user
