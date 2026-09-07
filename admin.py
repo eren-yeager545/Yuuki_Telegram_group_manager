@@ -18,6 +18,16 @@ from store import (
 from helpers import is_admin, is_owner_or_sudo, safe_reply_error
 
 
+async def is_target_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if is_owner_or_sudo(user_id):
+        return True
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        return member.status in ('administrator', 'creator')
+    except Exception:
+        return False
+
+
 def parse_duration_to_seconds(token: str):
     if not token:
         return None
@@ -151,13 +161,36 @@ async def apply_action(chat_id, target_id, action, context, duration_seconds=Non
 
 
 async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await admin_only(update, context):
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat and chat.type in ('group', 'supergroup'):
+        if not await is_admin(update, context):
+            await update.message.reply_text(""" Oopsie~! 🐾
+You don't have permission to use /ban!
+Let an admin handle it for you. 🌷""")
+            return
+    elif not await admin_only(update, context):
         return
+
     target = await resolve_target_user(update, context)
-    if target:
-        await context.bot.ban_chat_member(update.effective_chat.id, target.id)
-        log_admin_action(update.effective_chat.id, update.effective_user.id, 'ban', target.id)
-        await update.message.reply_html(f'Banned {format_user_tag(target.id, target.first_name, target.username)}.')
+    if not target:
+        await update.message.reply_text("🌸 Please reply to or specify a valid group member to ban desu~")
+        return
+
+    if chat and chat.type in ('group', 'supergroup'):
+        if await is_target_admin(chat.id, target.id, context):
+            await update.message.reply_text(""" 🥺 Ehehe… I can't ban an admin!
+They're part of the team, silly~ 💕
+Try choosing a regular member instead! 🌸""")
+            return
+
+    try:
+        await context.bot.ban_chat_member(chat.id, target.id)
+        log_admin_action(chat.id, user.id, 'ban', target.id)
+        tag = format_user_tag(target.id, getattr(target, 'first_name', 'User'), getattr(target, 'username', None))
+        await update.message.reply_html(f'Banned {tag}.')
+    except Exception:
+        await safe_reply_error(update.effective_message, "🌷 Aww, Telegram won't let me perform that action on this member.")
 
 
 async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1413,3 +1446,51 @@ async def demote_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_html(f"🌸 {tag} has been demoted back to a normal member desu~ 💕")
     except Exception:
         await update.message.reply_text("«🌸 Ehehe, I can't do that to an admin! Telegram won't let me change their permissions this way. 🥺»")
+
+
+
+async def setwelcome_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await admin_only(update, context):
+        return
+    text = ' '.join(context.args).strip() if context.args else ''
+    if not text and update.message and update.message.reply_to_message and update.message.reply_to_message.text:
+        text = update.message.reply_to_message.text.strip()
+    if not text:
+        await update.message.reply_text('Usage: /setwelcome <text> - Set custom welcome message. Placeholders: {user}, {group} desu~ 🌸')
+        return
+    set_setting(update.effective_chat.id, 'welcome_text', text)
+    set_setting(update.effective_chat.id, 'welcome', 'on')
+    await update.message.reply_text('🌸 Custom welcome message saved successfully! 💕')
+
+
+async def setgoodbye_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await admin_only(update, context):
+        return
+    text = ' '.join(context.args).strip() if context.args else ''
+    if not text and update.message and update.message.reply_to_message and update.message.reply_to_message.text:
+        text = update.message.reply_to_message.text.strip()
+    if not text:
+        await update.message.reply_text('Usage: /setgoodbye <text> - Set custom goodbye message. Placeholders: {user} desu~ 🌸')
+        return
+    set_setting(update.effective_chat.id, 'goodbye_text', text)
+    set_setting(update.effective_chat.id, 'goodbye', 'on')
+    await update.message.reply_text('🌸 Custom goodbye message saved successfully! 💕')
+
+
+
+async def kickme_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user or chat.type not in ('group', 'supergroup'):
+        await update.message.reply_text("🌸 /kickme can only be used in group chats!")
+        return
+
+    try:
+        await update.message.reply_text(""" 🥺 Aww, you want to leave?
+Okayyy… kicking you out gently! 👋💗
+Bye-bye, take care! 🌸""")
+        await context.bot.ban_chat_member(chat.id, user.id)
+        await context.bot.unban_chat_member(chat.id, user.id)
+        log_admin_action(chat.id, user.id, 'kickme', user.id)
+    except Exception:
+        await safe_reply_error(update.effective_message, "🌷 Oopsie! Telegram won't let me kick you right now.")

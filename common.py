@@ -344,3 +344,51 @@ async def mybot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(text, parse_mode='HTML', reply_markup=build_mybot_keyboard())
     else:
         await msg.reply_text(text, parse_mode='HTML')
+
+
+
+async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not msg:
+        return
+    prompt = ' '.join(context.args).strip() if context.args else ''
+    if not prompt and msg.reply_to_message and msg.reply_to_message.text:
+        prompt = msg.reply_to_message.text.strip()
+
+    if not prompt:
+        await msg.reply_text('🌸 Please ask me something using  or reply to a message desu~! 💕')
+        return
+
+    import config
+    api_key = getattr(config, 'OPENAI_API_KEY', '') or getattr(config, 'AI_API_KEY', '')
+    if not api_key:
+        await msg.reply_text('🥺 AI Chatbot API key is not configured yet! Please ask the bot owner to set  or  in ~ 🌸')
+        return
+
+    system_prompt = (
+        'You are Yuki, a cute, enthusiastic, and polite 17-year-old college student from Tokyo. '
+        'Adopt a sweet, cheerful persona with kaomojis and cute emojis. Be helpful and friendly desu~ 💕'
+    )
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                'https://api.openai.com/v1/chat/completions',
+                headers={'Authorization': f'Bearer {api_key}'},
+                json={
+                    'model': getattr(config, 'AI_MODEL', 'gpt-3.5-turbo'),
+                    'messages': [
+                        {'role': 'system', 'content': system_prompt},
+                        {'role': 'user', 'content': prompt}
+                    ]
+                }
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                reply_text = data['choices'][0]['message']['content'].strip()
+                await msg.reply_text(f'🌸 {reply_text}')
+            else:
+                await msg.reply_text(f'🥺 Oopsie~! The AI API returned an error ({resp.status_code}) desu~ 🌸')
+    except Exception:
+        await msg.reply_text("☁️ Oopsie! I couldn't reach the AI service right now. Please try again in a moment~ 💗")

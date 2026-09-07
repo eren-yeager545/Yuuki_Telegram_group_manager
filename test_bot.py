@@ -699,3 +699,70 @@ def test_new_features_pytest(monkeypatch, tmp_path):
     ctx_log.bot = AsyncMock()
     asyncio.run(logger_helper.send_logger_notification(ctx_log, "Test message"))
     ctx_log.bot.send_message.assert_not_called()
+
+
+def test_ban_admin_protection_and_guards(monkeypatch, tmp_path):
+    import store
+    import admin
+    import common
+    from unittest.mock import AsyncMock, MagicMock
+    import asyncio
+    from telegram import User, Chat, Message
+
+    db_file = str(tmp_path / "test_ban_guards.db")
+    monkeypatch.setattr(store, "DB_PATH", db_file)
+    store.init_db()
+
+    # Setup mocks
+    bot = AsyncMock()
+    bot.ban_chat_member = AsyncMock()
+    bot.unban_chat_member = AsyncMock()
+    bot.send_message = AsyncMock()
+
+    context = MagicMock()
+    context.bot = bot
+
+    chat = Chat(id=-1001, type="supergroup")
+    cmd_user = User(id=111, first_name="NormalUser", is_bot=False)
+    admin_user = User(id=222, first_name="AdminUser", is_bot=False)
+    target_admin = User(id=333, first_name="TargetAdmin", is_bot=False)
+
+    msg = MagicMock(spec=Message)
+    msg.reply_text = AsyncMock()
+    msg.reply_html = AsyncMock()
+
+    update = MagicMock()
+    update.effective_chat = chat
+    update.effective_user = cmd_user
+    update.message = msg
+
+    # 1. Non-admin calls /ban
+    monkeypatch.setattr(admin, "is_admin", AsyncMock(return_value=False))
+    asyncio.run(admin.ban_cmd(update, context))
+    assert "You don't have permission to use /ban!" in msg.reply_text.call_args[0][0]
+
+    # 2. Admin tries to ban another admin
+    update.effective_user = admin_user
+    monkeypatch.setattr(admin, "is_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(admin, "resolve_target_user", AsyncMock(return_value=target_admin))
+    monkeypatch.setattr(admin, "is_target_admin", AsyncMock(return_value=True))
+
+    msg.reply_text.reset_mock()
+    asyncio.run(admin.ban_cmd(update, context))
+    assert "Ehehe… I can't ban an admin!" in msg.reply_text.call_args[0][0]
+
+    # 3. Test /kickme command
+    msg.reply_text.reset_mock()
+    asyncio.run(admin.kickme_cmd(update, context))
+    assert "kicking you out gently!" in msg.reply_text.call_args[0][0]
+    bot.ban_chat_member.assert_called_with(-1001, 222)
+    bot.unban_chat_member.assert_called_with(-1001, 222)
+
+    # 4. Test /setwelcome and /setgoodbye
+    context.args = ["Welcome", "{user}", "to", "{group}!"]
+    asyncio.run(admin.setwelcome_cmd(update, context))
+    assert store.get_setting(-1001, "welcome_text") == "Welcome {user} to {group}!"
+
+    context.args = ["Goodbye", "{user}!"]
+    asyncio.run(admin.setgoodbye_cmd(update, context))
+    assert store.get_setting(-1001, "goodbye_text") == "Goodbye {user}!"

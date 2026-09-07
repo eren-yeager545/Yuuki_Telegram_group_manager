@@ -19,6 +19,7 @@ from store import (
 from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd, feedback_cmd, mybot_cmd, build_mybot_keyboard
 from broadcast import broadcast_cmd, broadcast_callback_handler, handle_broadcast_content
 from admin import *
+from common import ai_cmd
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -139,8 +140,31 @@ def note_keyboard(chat_id, scope):
     return InlineKeyboardMarkup([[InlineKeyboardButton(text=label, url=url)] for label, url in rows]) if rows else None
 
 
+DEFAULT_WELCOME = """ 🌸 Welcome, {user}! 🎀
+
+✨ Glad to have you here in {group}!
+
+💫 Make yourself comfortable, have fun, and enjoy the chat~
+📜 Don’t forget to check the group rules!
+
+🥰 Have a wonderful time with everyone! 💕"""
+
+DEFAULT_GOODBYE = """🥺 {user} has left the group.
+
+🌸 Goodbye~ Take care out there!
+💗 You’re always welcome to come back!"""
+
 def render_template(text, user, chat):
-    return (text or '').replace('{first}', user.first_name or '').replace('{last}', user.last_name or '').replace('{fullname}', user.full_name or '').replace('{username}', '@' + user.username if user.username else user.full_name).replace('{chatname}', chat.title or '')
+    if not user:
+        return text or ''
+    u_tag = f"@{user.username}" if getattr(user, 'username', None) else f'{(user.first_name or "User")} (<a href="tg://user?id={user.id}">tap to open profile</a>)'
+    c_title = (chat.title or '') if chat else ''
+    fn = user.first_name or ''
+    ln = user.last_name or ''
+    full = user.full_name or fn
+    un = f"@{user.username}" if getattr(user, 'username', None) else full
+
+    return (text or '')         .replace('{user}', u_tag)         .replace('{group}', c_title)         .replace('{first}', fn)         .replace('{last}', ln)         .replace('{fullname}', full)         .replace('{username}', un)         .replace('{chatname}', c_title)
 
 
 async def expire_quiz(context: ContextTypes.DEFAULT_TYPE):
@@ -272,22 +296,37 @@ async def service_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    if msg.new_chat_members and get_setting(chat.id, 'welcome', 'off') == 'on':
+    if msg.new_chat_members:
         for member in msg.new_chat_members:
-            mute_for = get_setting(chat.id, 'welcome_mute', 'off')
-            if mute_for != 'off':
-                seconds = parse_duration_to_seconds(mute_for)
-                if seconds:
+            if not bot_id or member.id != bot_id:
+                mute_for = get_setting(chat.id, 'welcome_mute', 'off')
+                if mute_for != 'off':
+                    seconds = parse_duration_to_seconds(mute_for)
+                    if seconds:
+                        try:
+                            await context.bot.restrict_chat_member(chat.id, member.id, permissions=ChatPermissions(can_send_messages=False), until_date=int(time.time()) + seconds)
+                        except Exception:
+                            pass
+                w_status = get_setting(chat.id, 'welcome', 'on')
+                if w_status != 'off':
+                    w_text = get_setting(chat.id, 'welcome_text', '') or DEFAULT_WELCOME
+                    text = render_template(w_text, member, chat)
                     try:
-                        await context.bot.restrict_chat_member(chat.id, member.id, permissions=ChatPermissions(can_send_messages=False), until_date=int(time.time()) + seconds)
+                        await msg.reply_html(text, reply_markup=note_keyboard(chat.id, 'welcome'))
                     except Exception:
-                        pass
-            text = render_template(get_setting(chat.id, 'welcome_text', 'Welcome {first}!'), member, chat)
-            await msg.reply_text(text, reply_markup=note_keyboard(chat.id, 'welcome'))
+                        await msg.reply_text(text, reply_markup=note_keyboard(chat.id, 'welcome'))
 
-    if msg.left_chat_member and get_setting(chat.id, 'goodbye', 'off') == 'on':
-        template = get_setting(chat.id, 'goodbye_text', 'Goodbye {fullname} 🌙')
-        await msg.reply_text(render_template(template, msg.left_chat_member, chat))
+    if msg.left_chat_member:
+        left_m = msg.left_chat_member
+        if not bot_id or left_m.id != bot_id:
+            g_status = get_setting(chat.id, 'goodbye', 'on')
+            if g_status != 'off':
+                g_text = get_setting(chat.id, 'goodbye_text', '') or DEFAULT_GOODBYE
+                text = render_template(g_text, left_m, chat)
+                try:
+                    await msg.reply_html(text)
+                except Exception:
+                    await msg.reply_text(text)
 
 
 async def maybe_delete(msg):
@@ -568,7 +607,11 @@ def main():
         ('lock', lock_cmd, 'Moderation Commands', 'Lock content type', '/lock links'),
         ('unlock', unlock_cmd, 'Moderation Commands', 'Unlock content type', '/unlock links'),
         ('welcome', welcome_cmd, 'Moderation Commands', 'Manage welcome settings', '/welcome text Welcome {first}'),
+        ('setwelcome', setwelcome_cmd, 'Moderation Commands', 'Set custom welcome message', '/setwelcome Welcome {user}!'),
         ('goodbye', goodbye_cmd, 'Moderation Commands', 'Manage goodbye settings', '/goodbye text Bye {fullname}'),
+        ('setgoodbye', setgoodbye_cmd, 'Moderation Commands', 'Set custom goodbye message', '/setgoodbye Goodbye {user}!'),
+        ('kickme', kickme_cmd, 'Group Management Commands', 'Kick yourself out of the group', '/kickme'),
+        ('ai', ai_cmd, 'Utility Commands', 'Ask AI chatbot a question', '/ai hello'),
         ('flood', flood_cmd, 'Moderation Commands', 'Set antiflood', '/flood 6 tmute 10m'),
         ('setrules', setrules_cmd, 'Moderation Commands', 'Set rules text', '/setrules no spam'),
         ('rulesbtn', rulesbtn_cmd, 'Moderation Commands', 'Set rules buttons', '/rulesbtn Rules - https://example.com'),
