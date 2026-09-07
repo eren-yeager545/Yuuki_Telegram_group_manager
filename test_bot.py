@@ -74,7 +74,7 @@ def test_error_handler_with_message():
     asyncio.run(error_handler(update, context))
 
     mock_msg.reply_text.assert_called_once()
-    assert "Reference ID:" in mock_msg.reply_text.call_args[0][0]
+    assert "Oopsie!" in mock_msg.reply_text.call_args[0][0]
 
 
 def test_error_handler_without_message():
@@ -136,7 +136,7 @@ def test_mongo_store_operations(monkeypatch):
     # Test notes
     assert store.check_chat_quota(1001, 'notes') is True
     store.save_note(1001, 'rules', 'Rule 1: Be nice', 'Click - https://example.com')
-    assert store.get_note(1001, 'rules') == ('Rule 1: Be nice', 'Click - https://example.com')
+    assert store.get_note(1001, 'rules') == ('Rule 1: Be nice', 'Click - https://example.com', 'text')
     assert store.list_notes(1001) == [('rules',)]
     store.delete_note(1001, 'rules')
     assert store.get_note(1001, 'rules') is None

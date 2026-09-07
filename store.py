@@ -31,7 +31,7 @@ MAX_LENGTHS = {
     'setting_value': 4000,
 }
 
-VALID_FILTER_TYPES = {'text', 'sticker', 'voice', 'link'}
+VALID_FILTER_TYPES = {'text', 'sticker', 'voice', 'link', 'document', 'pdf'}
 
 _mongo_client = None
 _mongo_db = None
@@ -154,6 +154,11 @@ def init_db():
         cols = [row[1] for row in cur.fetchall()]
         if 'filter_type' not in cols:
             cur.execute("ALTER TABLE filters ADD COLUMN filter_type TEXT DEFAULT 'text'")
+
+        cur.execute("PRAGMA table_info(notes)")
+        cols = [row[1] for row in cur.fetchall()]
+        if 'note_type' not in cols:
+            cur.execute("ALTER TABLE notes ADD COLUMN note_type TEXT DEFAULT 'text'")
 
         cur.execute("PRAGMA table_info(group_members)")
         cols = [row[1] for row in cur.fetchall()]
@@ -562,18 +567,19 @@ def reset_warns(chat_id, user_id):
         c.commit()
 
 
-def save_note(chat_id, name, content, buttons=''):
+def save_note(chat_id, name, content, buttons='', note_type='text'):
+    note_type = (note_type or 'text').lower().strip()
     if is_mongo():
         db = get_mongo_db()
         db['notes'].update_one(
             {'chat_id': chat_id, 'name': name.lower()},
-            {'$set': {'content': content, 'buttons': buttons}},
+            {'$set': {'content': content, 'buttons': buttons, 'note_type': note_type}},
             upsert=True
         )
         return
 
     with closing(conn()) as c:
-        c.execute('INSERT INTO notes(chat_id,name,content,buttons) VALUES(?,?,?,?) ON CONFLICT(chat_id,name) DO UPDATE SET content=excluded.content, buttons=excluded.buttons', (chat_id, name.lower(), content, buttons))
+        c.execute('INSERT INTO notes(chat_id,name,content,buttons,note_type) VALUES(?,?,?,?,?) ON CONFLICT(chat_id,name) DO UPDATE SET content=excluded.content, buttons=excluded.buttons, note_type=excluded.note_type', (chat_id, name.lower(), content, buttons, note_type))
         c.commit()
 
 
@@ -581,10 +587,11 @@ def get_note(chat_id, name):
     if is_mongo():
         db = get_mongo_db()
         doc = db['notes'].find_one({'chat_id': chat_id, 'name': name.lower()})
-        return (doc['content'], doc.get('buttons', '')) if doc else None
+        return (doc['content'], doc.get('buttons', ''), doc.get('note_type', 'text')) if doc else None
 
     with closing(conn()) as c:
-        return c.execute('SELECT content, buttons FROM notes WHERE chat_id=? AND name=?', (chat_id, name.lower())).fetchone()
+        row = c.execute('SELECT content, buttons, COALESCE(note_type, "text") FROM notes WHERE chat_id=? AND name=?', (chat_id, name.lower())).fetchone()
+        return row if row else None
 
 
 def list_notes(chat_id):
