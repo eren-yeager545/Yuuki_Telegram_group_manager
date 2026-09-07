@@ -16,7 +16,8 @@ from store import (
     get_chat_federation, get_fed_ban, get_expired_temp_actions, clear_temp_action,
     log_admin_action, delete_user_data, get_global_link, record_user_message,
 )
-from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, broadcast_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd
+from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd
+from broadcast import broadcast_cmd, broadcast_callback_handler, handle_broadcast_content
 from admin import *
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -272,6 +273,9 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
     if not msg or not chat or not user:
+        return
+
+    if await handle_broadcast_content(update, context):
         return
 
     if chat.type == 'private' and context.user_data.get('pending_feedback_reply'):
@@ -539,6 +543,7 @@ def main():
     ]
     for spec in user_cmds + admin_cmds:
         add_registered_command(app, *spec)
+    app.add_handler(CallbackQueryHandler(broadcast_callback_handler, pattern='^bcast_'))
     app.add_handler(CallbackQueryHandler(homepage_callback))
     app.add_handler(ChatMemberHandler(chat_member_router, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.StatusUpdate.ALL, service_router))
