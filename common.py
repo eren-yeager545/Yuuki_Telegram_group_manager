@@ -246,6 +246,45 @@ async def addlogger_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Logger channel reference updated.')
 
 
+async def feedback_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from config import OWNER_ID, OWNER_IDS
+    from admin import format_user_link
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not msg:
+        return
+
+    text_arg = msg.text.partition(' ')[2].strip() if msg.text else ''
+    if not text_arg and msg.reply_to_message:
+        text_arg = msg.reply_to_message.text or msg.reply_to_message.caption or ''
+
+    if not text_arg:
+        await msg.reply_text('Please provide feedback message after command or reply to a message desu~ 🌸 (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
+        return
+
+    owner_target = OWNER_ID or (OWNER_IDS[0] if OWNER_IDS else 0)
+    if not owner_target:
+        await msg.reply_text('Owner ID is not configured desu~ 🥺')
+        return
+
+    user_link = format_user_link(user.id, user.first_name)
+    feedback_text = (        f"📬 <b>New Feedback Received!</b>\n\n"        f"👤 <b>From:</b> {user_link}\n"        f"🆔 <b>User ID:</b> <code>{user.id}</code>\n\n"        f"📝 <b>Feedback:</b>\n{text_arg}"    )
+    reply_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("💬 Reply", callback_data=f"reply_fb:{user.id}")
+    ]])
+
+    try:
+        await context.bot.send_message(
+            chat_id=owner_target,
+            text=feedback_text,
+            parse_mode="HTML",
+            reply_markup=reply_kb
+        )
+        await msg.reply_text("Thank you! Your feedback has been sent directly to my owner~ 🌸 (⁠人⁠*⁠´⁠∀⁠｀⁠)")
+    except Exception as e:
+        await msg.reply_text("Gomen ne~ 🥺 Failed to send feedback to owner.")
+
+
 if __name__ == '__main__':
     from bot import main
     main()
