@@ -640,3 +640,62 @@ def test_broadcast_system(monkeypatch, tmp_path):
     # Verify group -1002 was marked inactive in DB
     g2 = store.get_group_by_id(-1002)
     assert g2["is_active"] == 0
+
+
+def test_new_features_pytest(monkeypatch, tmp_path):
+    import store
+    import bot as bot_module
+    import common
+    import logger_helper
+    from unittest.mock import AsyncMock, MagicMock
+    import asyncio
+
+    db_file = str(tmp_path / "test_new_features.db")
+    monkeypatch.setattr(store, "DB_PATH", db_file)
+    store.init_db()
+
+    # 1. Test Filter Word Boundary Matching
+    store.save_filter(10001, "help", "Hello! How can I help you?", "text")
+    filters_list = store.get_filters(10001)
+    import re
+
+    # 'helping' should NOT match 'help'
+    lower_text = "i am a helping hand"
+    matched = any(bool(re.search(r'\b' + re.escape(kw) + r'\b', lower_text)) for kw, rep, f_type in filters_list)
+    assert not matched
+
+    # 'can you help me' SHOULD match 'help'
+    lower_text_2 = "can you help me"
+    matched_2 = any(bool(re.search(r'\b' + re.escape(kw) + r'\b', lower_text_2)) for kw, rep, f_type in filters_list)
+    assert matched_2
+
+    # 2. Test Privacy Policy Callback / Message Handling
+    update_cb = MagicMock()
+    update_cb.effective_message = None
+    update_cb.callback_query = MagicMock()
+    update_cb.callback_query.message = AsyncMock()
+    context_cb = MagicMock()
+
+    asyncio.run(common.privacy_cmd(update_cb, context_cb))
+    update_cb.callback_query.message.reply_text.assert_called_once()
+
+    # 3. Test /mybot command & Logger Status Toggle
+    store.set_setting(0, 'logger_status', 'on')
+    store.set_global_link('logger_channel_id', '-100123456789')
+
+    update_mybot = MagicMock()
+    update_mybot.effective_user.id = 99999
+    update_mybot.effective_message = AsyncMock()
+    context_mybot = MagicMock()
+    context_mybot.bot.first_name = "Yuki"
+
+    monkeypatch.setattr(common, 'OWNER_IDS', [99999])
+    asyncio.run(common.mybot_cmd(update_mybot, context_mybot))
+    update_mybot.effective_message.reply_text.assert_called_once()
+
+    # Test logger_helper respects logger_status = 'off'
+    store.set_setting(0, 'logger_status', 'off')
+    ctx_log = MagicMock()
+    ctx_log.bot = AsyncMock()
+    asyncio.run(logger_helper.send_logger_notification(ctx_log, "Test message"))
+    ctx_log.bot.send_message.assert_not_called()

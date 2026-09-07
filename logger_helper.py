@@ -75,6 +75,11 @@ def parse_logger_target(raw_target: Union[int, str]) -> Optional[Union[int, str]
 
 
 async def send_logger_notification(context: ContextTypes.DEFAULT_TYPE, message_text: str, group_chat_id: Optional[int] = None):
+    logger_status = get_setting(0, 'logger_status', 'on').lower()
+    if logger_status == 'off':
+        logger.info("Logger notification skipped: logger is disabled (OFF).")
+        return
+
     targets = []
 
     if group_chat_id:
