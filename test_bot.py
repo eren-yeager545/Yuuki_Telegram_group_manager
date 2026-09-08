@@ -921,3 +921,34 @@ def test_tictactoe_logic_and_gameplay():
     assert inv_id_2 not in tictactoe.INVITATIONS
     dummy_ctx.bot.edit_message_text.assert_called_once()
     assert "Expired" in dummy_ctx.bot.edit_message_text.call_args.kwargs['text'] or "Expired" in str(dummy_ctx.bot.edit_message_text.call_args)
+
+
+
+def test_health_check_endpoint():
+    import asyncio
+    import json
+    import urllib.request
+    import tornado.httpserver
+    import bot
+    from telegram.ext._utils.webhookhandler import WebhookAppClass
+
+    async def run_test():
+        app = WebhookAppClass('/test-webhook-path', None, None)
+        server = tornado.httpserver.HTTPServer(app)
+        server.listen(8999, address='127.0.0.1')
+        await asyncio.sleep(0.05)
+        loop = asyncio.get_running_loop()
+        res = await loop.run_in_executor(None, lambda: urllib.request.urlopen('http://127.0.0.1:8999/'))
+        assert res.status == 200
+        assert 'application/json' in res.headers.get('Content-Type', '')
+        data = json.loads(res.read().decode('utf-8'))
+        assert data == {'service': 'telegram-bot', 'status': 'ok'}
+
+        try:
+            await loop.run_in_executor(None, lambda: urllib.request.urlopen('http://127.0.0.1:8999/test-webhook-path'))
+        except urllib.error.HTTPError as e:
+            assert e.code == 405
+
+        server.stop()
+
+    asyncio.run(run_test())
