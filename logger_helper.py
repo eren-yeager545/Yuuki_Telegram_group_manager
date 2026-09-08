@@ -6,7 +6,7 @@ from telegram.ext import ContextTypes
 import config
 from store import (
     upsert_user, get_user_count, upsert_group, set_group_inactive,
-    get_active_group_count, get_group_by_id, get_global_link, get_setting
+    get_active_group_count, get_group_by_id, get_global_link, get_setting, delete_group_data
 )
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,19 @@ def format_logger_message(event_title: str, body: str, bot_name: str, date_time:
         f"🕐 {date_time}\n"
         f"{DIVIDER}"
     )
+
+
+
+async def notify_owners(context: ContextTypes.DEFAULT_TYPE, message_text: str):
+    owner_ids = getattr(config, 'OWNER_IDS', [])
+    if not owner_ids and getattr(config, 'OWNER_ID', None):
+        owner_ids = [config.OWNER_ID]
+    for oid in owner_ids:
+        if oid:
+            try:
+                await context.bot.send_message(chat_id=oid, text=message_text, parse_mode='HTML', disable_web_page_preview=True)
+            except Exception as e:
+                logger.warning('Failed sending owner notification to %s: %s', oid, type(e).__name__)
 
 
 def parse_logger_target(raw_target: Union[int, str]) -> Optional[Union[int, str]]:
@@ -155,6 +168,7 @@ async def log_user_started_event(user: User, context: ContextTypes.DEFAULT_TYPE)
 
     msg = format_logger_message("NEW USER STARTED 🌸", body, bot_name, now_str)
     await send_logger_notification(context, msg)
+    await notify_owners(context, msg)
 
 
 async def log_group_added_event(chat: Chat, from_user: Optional[User], context: ContextTypes.DEFAULT_TYPE):
@@ -207,6 +221,7 @@ async def log_group_added_event(chat: Chat, from_user: Optional[User], context: 
 
     msg = format_logger_message("NEW GROUP ADDED ✨", body, bot_name, now_str)
     await send_logger_notification(context, msg, group_chat_id=chat.id)
+    await notify_owners(context, msg)
 
 
 async def log_group_removed_event(chat: Chat, from_user: Optional[User], context: ContextTypes.DEFAULT_TYPE, removal_status='kicked'):
@@ -231,11 +246,7 @@ async def log_group_removed_event(chat: Chat, from_user: Optional[User], context
         if existing_group and existing_group.get('member_count'):
             member_count = str(existing_group.get('member_count'))
 
-    set_group_inactive(
-        chat_id=chat.id,
-        current_bot_status=removal_status,
-        member_count=int(member_count) if member_count.isdigit() else None
-    )
+    delete_group_data(chat.id)
 
     total_groups = get_active_group_count()
     now_str = format_utc_now()
@@ -267,6 +278,7 @@ async def log_group_removed_event(chat: Chat, from_user: Optional[User], context
 
     msg = format_logger_message("BOT BANNED / REMOVED 💔", body, bot_name, now_str)
     await send_logger_notification(context, msg, group_chat_id=chat.id)
+    await notify_owners(context, msg)
 
 
 async def log_user_joined_group_event(user: User, chat: Chat, context: ContextTypes.DEFAULT_TYPE):
