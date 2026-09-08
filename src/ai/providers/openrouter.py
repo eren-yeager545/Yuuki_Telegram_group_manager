@@ -12,7 +12,7 @@ class OpenRouterProvider(AIProvider):
 
     def __init__(self, api_keys: List[str], model: Optional[str] = None):
         super().__init__(api_keys)
-        self.model = (model or os.getenv("OPENROUTER_MODEL", "google/gemma-4-31b")).strip() or "google/gemma-4-31b"
+        self.model = (model or os.getenv("OPENROUTER_MODEL", "google/gemma-4-31b-it:free")).strip() or "google/gemma-4-31b-it:free"
 
     async def generate_response_with_key(
         self,
