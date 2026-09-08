@@ -115,3 +115,7 @@ For full functionality, make Yuuki an admin with permission to:
 
 - `bot.db` is local SQLite storage and is used when `MONGO_URI` is not set. When `MONGO_URI` (or `MONGO_URL` / `MONGODB_URI`) is set, MongoDB is automatically used.
 - Dual-owner support is controlled by `OWNER_IDS`.
+
+## Security Warning & Secret Rotation
+
+⚠️ **Important Security Warning:** If any bot token, API key, database URI, or secret credential was previously hardcoded or committed to git, assume it is compromised because old values remain in git history. **Rotate any previously hardcoded secrets immediately** before deploying to production.
