@@ -180,19 +180,19 @@ async def test_provider_manager_openrouter_failover():
         gemini_keys=["gemini_k1"],
         groq_keys=[],
         openrouter_keys=["openrouter_k1"],
-        openrouter_model="google/gemma-4-31b"
+        openrouter_model="google/gemma-4-31b-it:free"
     )
 
     mgr.providers["gemini"].generate_response_with_key = AsyncMock(side_effect=RuntimeError("Gemini Down"))
 
     mgr.providers["openrouter"].generate_response_with_key = AsyncMock(
-        return_value=AIResponse(text="Konnichiwa from OpenRouter!", provider="openrouter", model="google/gemma-4-31b")
+        return_value=AIResponse(text="Konnichiwa from OpenRouter!", provider="openrouter", model="google/gemma-4-31b-it:free")
     )
 
     resp = await mgr.chat(messages=[{"role": "user", "content": "hello"}], system_prompt="test")
     assert resp.text == "Konnichiwa from OpenRouter!"
     assert resp.provider == "openrouter"
-    assert resp.model == "google/gemma-4-31b"
+    assert resp.model == "google/gemma-4-31b-it:free"
 
 
 @pytest.mark.asyncio
@@ -360,7 +360,7 @@ async def test_gemini_provider_error_masking_no_key_leak():
 # Tests for OpenRouterProvider
 @pytest.mark.asyncio
 async def test_openrouter_provider_generate_response_success():
-    provider = OpenRouterProvider(api_keys=["sk-or-v1-testkey123"], model="google/gemma-4-31b")
+    provider = OpenRouterProvider(api_keys=["sk-or-v1-testkey123"], model="google/gemma-4-31b-it:free")
 
     mock_resp_data = {
         "choices": [
@@ -392,7 +392,7 @@ async def test_openrouter_provider_generate_response_success():
 
         assert resp.text == "Konnichiwa desu~! 🌸 How are you today?"
         assert resp.provider == "openrouter"
-        assert resp.model == "google/gemma-4-31b"
+        assert resp.model == "google/gemma-4-31b-it:free"
         assert resp.usage == {"total_tokens": 25}
 
         call_args = mock_post.call_args
@@ -400,7 +400,7 @@ async def test_openrouter_provider_generate_response_success():
         assert call_args[1]["headers"]["Authorization"] == "Bearer sk-or-v1-testkey123"
 
         payload = call_args[1]["json"]
-        assert payload["model"] == "google/gemma-4-31b"
+        assert payload["model"] == "google/gemma-4-31b-it:free"
         assert payload["messages"][0]["role"] == "system"
         assert payload["messages"][0]["content"] == YUKI_PERSONA
         assert payload["messages"][1]["role"] == "user"
@@ -409,7 +409,7 @@ async def test_openrouter_provider_generate_response_success():
 
 @pytest.mark.asyncio
 async def test_openrouter_provider_status_code_errors():
-    provider = OpenRouterProvider(api_keys=["sk-or-v1-key"], model="google/gemma-4-31b")
+    provider = OpenRouterProvider(api_keys=["sk-or-v1-key"], model="google/gemma-4-31b-it:free")
 
     for status_code in [400, 401, 403, 404, 429, 500, 502, 503, 504]:
         mock_response = MagicMock(spec=httpx.Response)
@@ -434,7 +434,7 @@ async def test_openrouter_provider_status_code_errors():
 @pytest.mark.asyncio
 async def test_openrouter_provider_error_masking_no_key_leak():
     secret_key = "sk-or-v1-SUPER_SECRET_TOKEN_9999"
-    provider = OpenRouterProvider(api_keys=[secret_key], model="google/gemma-4-31b")
+    provider = OpenRouterProvider(api_keys=[secret_key], model="google/gemma-4-31b-it:free")
 
     mock_response = MagicMock(spec=httpx.Response)
     mock_response.status_code = 401
@@ -464,7 +464,7 @@ async def test_openrouter_provider_error_masking_no_key_leak():
 
 @pytest.mark.asyncio
 async def test_openrouter_provider_timeouts():
-    provider = OpenRouterProvider(api_keys=["key1"], model="google/gemma-4-31b")
+    provider = OpenRouterProvider(api_keys=["key1"], model="google/gemma-4-31b-it:free")
     req_mock = MagicMock(spec=httpx.Request)
 
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
@@ -488,7 +488,7 @@ async def test_openrouter_provider_timeouts():
 
 @pytest.mark.asyncio
 async def test_openrouter_provider_invalid_json_and_empty_response():
-    provider = OpenRouterProvider(api_keys=["key1"], model="google/gemma-4-31b")
+    provider = OpenRouterProvider(api_keys=["key1"], model="google/gemma-4-31b-it:free")
 
     # Invalid JSON
     mock_response = MagicMock(spec=httpx.Response)
@@ -521,9 +521,9 @@ async def test_openrouter_provider_invalid_json_and_empty_response():
 
 @pytest.mark.asyncio
 async def test_openrouter_provider_custom_model_and_env(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_MODEL", "google/gemma-4-31b")
+    monkeypatch.setenv("OPENROUTER_MODEL", "google/gemma-4-31b-it:free")
     provider = OpenRouterProvider(api_keys=["k1"])
-    assert provider.model == "google/gemma-4-31b"
+    assert provider.model == "google/gemma-4-31b-it:free"
 
     provider_explicit = OpenRouterProvider(api_keys=["k1"], model="meta-llama/llama-3.1-8b-instruct:free")
     assert provider_explicit.model == "meta-llama/llama-3.1-8b-instruct:free"
