@@ -254,7 +254,7 @@ async def test_gemini_provider_generate_response_success():
     mock_response.status_code = 200
     mock_response.json.return_value = mock_resp_data
 
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
         mock_post.return_value = mock_response
 
         messages = [
@@ -286,7 +286,7 @@ async def test_gemini_provider_read_timeout_handled():
     provider = GeminiProvider(api_keys=["key1"], model="gemini-2.5-flash")
     req_mock = MagicMock(spec=httpx.Request)
 
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
         mock_post.side_effect = httpx.ReadTimeout("Read timeout", request=req_mock)
 
         with pytest.raises(httpx.ReadTimeout):
@@ -303,7 +303,7 @@ async def test_gemini_provider_connect_timeout_handled():
     provider = GeminiProvider(api_keys=["key1"], model="gemini-2.5-flash")
     req_mock = MagicMock(spec=httpx.Request)
 
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
         mock_post.side_effect = httpx.ConnectTimeout("Connect timeout", request=req_mock)
 
         with pytest.raises(httpx.ConnectTimeout):
@@ -342,7 +342,7 @@ async def test_gemini_provider_error_masking_no_key_leak():
     mock_request.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     mock_response.request = mock_request
 
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
         mock_post.return_value = mock_response
 
         with pytest.raises(httpx.HTTPStatusError) as exc_info:
@@ -378,7 +378,7 @@ async def test_openrouter_provider_generate_response_success():
     mock_response.status_code = 200
     mock_response.json.return_value = mock_resp_data
 
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
         mock_post.return_value = mock_response
 
         messages = [
@@ -401,10 +401,13 @@ async def test_openrouter_provider_generate_response_success():
 
         payload = call_args[1]["json"]
         assert payload["model"] == "google/gemma-4-31b-it:free"
+        assert payload["provider"] == {"allow_fallbacks": True}
         assert payload["messages"][0]["role"] == "system"
         assert payload["messages"][0]["content"] == YUKI_PERSONA
         assert payload["messages"][1]["role"] == "user"
         assert "[Bob]: Hello Yuki!" in payload["messages"][1]["content"]
+
+    await provider.close()
 
 
 @pytest.mark.asyncio
@@ -414,12 +417,13 @@ async def test_openrouter_provider_status_code_errors():
     for status_code in [400, 401, 403, 404, 429, 500, 502, 503, 504]:
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = status_code
+        mock_response.headers = {}
         mock_response.json.return_value = {"error": {"message": f"Error with status {status_code}"}}
         mock_response.text = f"Status {status_code} Error"
         req_mock = MagicMock(spec=httpx.Request)
         mock_response.request = req_mock
 
-        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
             mock_post.return_value = mock_response
 
             with pytest.raises(httpx.HTTPStatusError) as exc_info:
@@ -430,6 +434,8 @@ async def test_openrouter_provider_status_code_errors():
                 )
             assert f"Error Status {status_code}" in str(exc_info.value)
 
+    await provider.close()
+
 
 @pytest.mark.asyncio
 async def test_openrouter_provider_error_masking_no_key_leak():
@@ -438,6 +444,7 @@ async def test_openrouter_provider_error_masking_no_key_leak():
 
     mock_response = MagicMock(spec=httpx.Response)
     mock_response.status_code = 401
+    mock_response.headers = {}
     mock_response.json.return_value = {
         "error": {
             "message": f"Invalid key {secret_key} provided"
@@ -447,7 +454,7 @@ async def test_openrouter_provider_error_masking_no_key_leak():
     req_mock = MagicMock(spec=httpx.Request)
     mock_response.request = req_mock
 
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
         mock_post.return_value = mock_response
 
         with pytest.raises(httpx.HTTPStatusError) as exc_info:
@@ -461,13 +468,119 @@ async def test_openrouter_provider_error_masking_no_key_leak():
         assert secret_key not in err_str
         assert "[REDACTED]" in err_str or "401" in err_str
 
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_provider_429_diagnostic_logging_and_upstream_extraction():
+    secret_key = "sk-or-v1-SECRET_KEY_429"
+    provider = OpenRouterProvider(api_keys=[secret_key], model="google/gemma-4-31b-it:free")
+
+    mock_response = MagicMock(spec=httpx.Response)
+    mock_response.status_code = 429
+    mock_response.headers = {
+        "retry-after": "5.0",
+        "x-request-id": "req-12345-abc",
+        "x-ratelimit-remaining": "0",
+        "x-ratelimit-limit": "10"
+    }
+    mock_response.json.return_value = {
+        "error": {
+            "code": 429,
+            "message": "Provider returned error",
+            "metadata": {
+                "provider_name": "Google",
+                "raw": f"Rate limit exceeded on key {secret_key}"
+            }
+        }
+    }
+    req_mock = MagicMock(spec=httpx.Request)
+    mock_response.request = req_mock
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await provider.generate_response_with_key(
+                api_key=secret_key,
+                messages=[{"role": "user", "content": "test 429"}],
+                system_prompt=""
+            )
+
+        err_str = str(exc_info.value)
+        # Verify secret is redacted
+        assert secret_key not in err_str
+        # Verify diagnostic headers and metadata are extracted
+        assert "upstream_provider='Google'" in err_str
+        assert "request_id='req-12345-abc'" in err_str
+        assert "retry_after='5.0'" in err_str
+        assert "ratelimit_headers=" in err_str
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_provider_429_retry_after_backoff():
+    provider = OpenRouterProvider(api_keys=["key_retry"], model="google/gemma-4-31b-it:free")
+
+    resp_429 = MagicMock(spec=httpx.Response)
+    resp_429.status_code = 429
+    resp_429.headers = {"retry-after": "0.05"}
+    resp_429.json.return_value = {"error": {"message": "Provider returned error"}}
+
+    resp_200 = MagicMock(spec=httpx.Response)
+    resp_200.status_code = 200
+    resp_200.json.return_value = {
+        "choices": [{"message": {"role": "assistant", "content": "Retry success!"}}]
+    }
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.side_effect = [resp_429, resp_200]
+
+        resp = await provider.generate_response_with_key(
+            api_key="key_retry",
+            messages=[{"role": "user", "content": "hi"}],
+            system_prompt=""
+        )
+
+        assert resp.text == "Retry success!"
+        assert mock_post.call_count == 2
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_provider_client_reuse_and_close():
+    provider = OpenRouterProvider(api_keys=["key1"], model="google/gemma-4-31b-it:free")
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "choices": [{"message": {"role": "assistant", "content": "Hello"}}]
+    }
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+
+        await provider.generate_response_with_key(api_key="key1", messages=[{"role": "user", "content": "1"}], system_prompt="")
+        client1 = provider._client
+
+        await provider.generate_response_with_key(api_key="key1", messages=[{"role": "user", "content": "2"}], system_prompt="")
+        client2 = provider._client
+
+        assert client1 is not None
+        assert client1 is client2
+
+    await provider.close()
+    assert provider._client is None
+
 
 @pytest.mark.asyncio
 async def test_openrouter_provider_timeouts():
     provider = OpenRouterProvider(api_keys=["key1"], model="google/gemma-4-31b-it:free")
     req_mock = MagicMock(spec=httpx.Request)
 
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
         mock_post.side_effect = httpx.ReadTimeout("Read timeout", request=req_mock)
         with pytest.raises(httpx.ReadTimeout):
             await provider.generate_response_with_key(
@@ -476,7 +589,7 @@ async def test_openrouter_provider_timeouts():
                 system_prompt=""
             )
 
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
         mock_post.side_effect = httpx.ConnectTimeout("Connect timeout", request=req_mock)
         with pytest.raises(httpx.ConnectTimeout):
             await provider.generate_response_with_key(
@@ -484,6 +597,8 @@ async def test_openrouter_provider_timeouts():
                 messages=[{"role": "user", "content": "hello"}],
                 system_prompt=""
             )
+
+    await provider.close()
 
 
 @pytest.mark.asyncio
@@ -495,7 +610,7 @@ async def test_openrouter_provider_invalid_json_and_empty_response():
     mock_response.status_code = 200
     mock_response.json.side_effect = ValueError("Invalid JSON string")
 
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
         mock_post.return_value = mock_response
         with pytest.raises(ValueError, match="OpenRouter response is not valid JSON"):
             await provider.generate_response_with_key(
@@ -509,7 +624,7 @@ async def test_openrouter_provider_invalid_json_and_empty_response():
     mock_response_empty.status_code = 200
     mock_response_empty.json.return_value = {"choices": []}
 
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
         mock_post.return_value = mock_response_empty
         with pytest.raises(ValueError, match="invalid or empty content response structure"):
             await provider.generate_response_with_key(
@@ -517,6 +632,8 @@ async def test_openrouter_provider_invalid_json_and_empty_response():
                 messages=[{"role": "user", "content": "hello"}],
                 system_prompt=""
             )
+
+    await provider.close()
 
 
 @pytest.mark.asyncio
