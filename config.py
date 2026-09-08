@@ -28,8 +28,10 @@ AI_PROVIDER_ORDER = [x.strip().lower() for x in os.getenv('AI_PROVIDER_ORDER', '
 raw_gemini_keys = os.getenv('GEMINI_API_KEYS') or os.getenv('GEMINI_API_KEY') or ''
 GEMINI_API_KEYS = [x.strip() for x in raw_gemini_keys.split(',') if x.strip()]
 GROQ_API_KEYS = [x.strip() for x in os.getenv('GROQ_API_KEYS', '').split(',') if x.strip()]
-OPENROUTER_API_KEYS = [x.strip() for x in os.getenv('OPENROUTER_API_KEYS', '').split(',') if x.strip()]
+raw_openrouter_keys = os.getenv('OPENROUTER_API_KEYS') or os.getenv('OPENROUTER_API_KEY') or ''
+OPENROUTER_API_KEYS = [x.strip() for x in raw_openrouter_keys.split(',') if x.strip()]
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash').strip() or 'gemini-2.5-flash'
+OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', 'google/gemma-4-31b').strip() or 'google/gemma-4-31b'
 
 AI_MAX_CONTEXT_MESSAGES = int(os.getenv('AI_MAX_CONTEXT_MESSAGES', '10') or 10)
 AI_MAX_OUTPUT_TOKENS = int(os.getenv('AI_MAX_OUTPUT_TOKENS', '150') or 150)

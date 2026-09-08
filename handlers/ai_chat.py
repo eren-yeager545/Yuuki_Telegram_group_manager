@@ -29,7 +29,8 @@ provider_manager = AIProviderManager(
     gemini_keys=config.GEMINI_API_KEYS,
     groq_keys=config.GROQ_API_KEYS,
     openrouter_keys=config.OPENROUTER_API_KEYS,
-    gemini_model=config.GEMINI_MODEL
+    gemini_model=config.GEMINI_MODEL,
+    openrouter_model=config.OPENROUTER_MODEL
 )
 
 
