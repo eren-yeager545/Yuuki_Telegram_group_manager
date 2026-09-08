@@ -1,5 +1,6 @@
 import asyncio
 import pytest
+import httpx
 from unittest.mock import AsyncMock, MagicMock, patch
 from telegram import Update, Message, User, Chat, MessageEntity
 import config
@@ -126,7 +127,6 @@ def test_should_trigger_yuki():
 
 @pytest.mark.asyncio
 async def test_provider_manager_rotation_and_failover():
-    # Setup mock manager with keys
     mgr = AIProviderManager(
         provider_order=["gemini", "groq", "openrouter"],
         gemini_keys=["gemini_k1", "gemini_k2"],
@@ -135,17 +135,42 @@ async def test_provider_manager_rotation_and_failover():
         key_cooldown_seconds=60.0
     )
 
-    # Mock gemini key 1 fail, gemini key 2 succeed
     async def mock_gemini_resp(api_key, **kwargs):
         if api_key == "gemini_k1":
             raise RuntimeError("Rate limit on key 1")
-        return AIResponse(text="Success from Gemini key 2!", provider="gemini", model="gemini-1.5-flash")
+        return AIResponse(text="Success from Gemini key 2!", provider="gemini", model="gemini-2.0-flash")
 
     mgr.providers["gemini"].generate_response_with_key = AsyncMock(side_effect=mock_gemini_resp)
 
     resp = await mgr.chat(messages=[{"role": "user", "content": "hi"}], system_prompt="test")
     assert resp.text == "Success from Gemini key 2!"
     assert resp.provider == "gemini"
+
+
+@pytest.mark.asyncio
+async def test_provider_manager_fallback_on_gemini_read_timeout():
+    mgr = AIProviderManager(
+        provider_order=["gemini", "groq"],
+        gemini_keys=["gemini_k1"],
+        groq_keys=["groq_k1"],
+        openrouter_keys=[],
+        key_cooldown_seconds=60.0
+    )
+
+    # Gemini fails with ReadTimeout
+    request_mock = MagicMock(spec=httpx.Request)
+    mgr.providers["gemini"].generate_response_with_key = AsyncMock(
+        side_effect=httpx.ReadTimeout("ReadTimeout after 10s", request=request_mock)
+    )
+
+    # Groq succeeds
+    mgr.providers["groq"].generate_response_with_key = AsyncMock(
+        return_value=AIResponse(text="Success from Groq fallback!", provider="groq", model="llama-3.3-70b-versatile")
+    )
+
+    resp = await mgr.chat(messages=[{"role": "user", "content": "hello"}], system_prompt="test")
+    assert resp.text == "Success from Groq fallback!"
+    assert resp.provider == "groq"
 
 
 @pytest.mark.asyncio
@@ -165,13 +190,11 @@ async def test_provider_manager_all_fail_fallback():
 
 
 def test_game_independence():
-    # Verify game modules do NOT import AI and function normally when AI_ENABLED=False
     import tictactoe
     assert not hasattr(tictactoe, "ai_manager")
     assert not hasattr(tictactoe, "handle_ai_chat")
-
-    # Test calculate_winner directly in Tic-Tac-Toe
     assert tictactoe.check_winner(["X", "X", "X", " ", " ", " ", " ", " ", " "]) == "X"
+
 
 @pytest.mark.asyncio
 async def test_provider_manager_no_keys_configured():
@@ -187,11 +210,10 @@ async def test_provider_manager_no_keys_configured():
     assert resp.provider == "fallback"
     assert resp.model == "none"
 
-import httpx
 
 @pytest.mark.asyncio
 async def test_gemini_provider_generate_response_success():
-    provider = GeminiProvider(api_keys=["test_key_123"], model="gemini-2.5-flash")
+    provider = GeminiProvider(api_keys=["test_key_123"], model="gemini-2.0-flash")
 
     mock_resp_data = {
         "candidates": [
@@ -224,11 +246,10 @@ async def test_gemini_provider_generate_response_success():
 
         assert resp.text == "Hello desu~! 🌸"
         assert resp.provider == "gemini"
-        assert resp.model == "gemini-2.5-flash"
+        assert resp.model == "gemini-2.0-flash"
 
-        # Verify URL and Payload passed to httpx.AsyncClient.post
         call_args = mock_post.call_args
-        assert "v1beta/models/gemini-2.5-flash:generateContent" in call_args[0][0]
+        assert "v1beta/models/gemini-2.0-flash:generateContent" in call_args[0][0]
         assert call_args[1]["params"]["key"] == "test_key_123"
 
         payload = call_args[1]["json"]
@@ -238,31 +259,48 @@ async def test_gemini_provider_generate_response_success():
 
 
 @pytest.mark.asyncio
+async def test_gemini_provider_read_timeout_handled():
+    provider = GeminiProvider(api_keys=["key1"], model="gemini-2.0-flash")
+    req_mock = MagicMock(spec=httpx.Request)
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.side_effect = httpx.ReadTimeout("Read timeout", request=req_mock)
+
+        with pytest.raises(httpx.ReadTimeout):
+            await provider.generate_response_with_key(
+                api_key="key1",
+                messages=[{"role": "user", "content": "hello"}],
+                system_prompt="system",
+                timeout=20.0
+            )
+
+
+@pytest.mark.asyncio
 async def test_gemini_provider_custom_model_and_env(monkeypatch):
     monkeypatch.setenv("GEMINI_MODEL", "gemini-2.0-flash")
     provider = GeminiProvider(api_keys=["k1"])
     assert provider.model == "gemini-2.0-flash"
 
-    provider_explicit = GeminiProvider(api_keys=["k1"], model="gemini-2.5-flash")
-    assert provider_explicit.model == "gemini-2.5-flash"
+    provider_explicit = GeminiProvider(api_keys=["k1"], model="gemini-1.5-flash")
+    assert provider_explicit.model == "gemini-1.5-flash"
 
 
 @pytest.mark.asyncio
 async def test_gemini_provider_error_masking_no_key_leak():
     secret_key = "AIzaSySECRET_KEY_12345"
-    provider = GeminiProvider(api_keys=[secret_key], model="gemini-2.5-flash")
+    provider = GeminiProvider(api_keys=[secret_key], model="gemini-2.0-flash")
 
     mock_response = MagicMock(spec=httpx.Response)
     mock_response.status_code = 404
     mock_response.json.return_value = {
         "error": {
             "code": 404,
-            "message": f"models/gemini-2.5-flash is not found for key {secret_key}"
+            "message": f"models/gemini-2.0-flash is not found for key {secret_key}"
         }
     }
     mock_response.text = f"Error with key {secret_key}"
     mock_request = MagicMock(spec=httpx.Request)
-    mock_request.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={secret_key}"
+    mock_request.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={secret_key}"
     mock_response.request = mock_request
 
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:

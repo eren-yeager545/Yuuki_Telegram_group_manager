@@ -12,7 +12,7 @@ class GeminiProvider(AIProvider):
 
     def __init__(self, api_keys: List[str], model: Optional[str] = None):
         super().__init__(api_keys)
-        self.model = model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+        self.model = model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip() or "gemini-2.0-flash"
 
     async def generate_response_with_key(
         self,
@@ -61,11 +61,24 @@ class GeminiProvider(AIProvider):
             "temperature": 0.7
         }
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        connect_timeout = min(5.0, float(timeout))
+        read_timeout = max(3.0, min(10.0, float(timeout) - 2.0))
+        http_timeout = httpx.Timeout(
+            timeout=float(timeout),
+            connect=connect_timeout,
+            read=read_timeout,
+            write=5.0,
+            pool=5.0
+        )
+
+        async with httpx.AsyncClient(timeout=http_timeout) as client:
             try:
                 resp = await client.post(url, params={"key": api_key}, json=payload)
+            except httpx.ReadTimeout as rt:
+                logger.warning(f"Gemini API read timeout after {read_timeout}s for model '{self.model}'")
+                raise rt
             except httpx.TimeoutException as te:
-                logger.warning(f"Gemini API timeout after {timeout}s for model '{self.model}'")
+                logger.warning(f"Gemini API timeout for model '{self.model}': {type(te).__name__}")
                 raise te
             except httpx.RequestError as re:
                 logger.warning(f"Gemini API request error for model '{self.model}': {type(re).__name__}")
