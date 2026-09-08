@@ -197,18 +197,28 @@ Try choosing a regular member instead! 🌸""")
 
 
 async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await admin_only(update, context):
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or chat.type not in ('group', 'supergroup'):
+        await update.message.reply_text("🌸 /unban command can only be used in group chats desu~ 💕")
         return
-    if not context.args:
-        await update.message.reply_text('Usage: /unban user_id')
+
+    if not await is_admin(update, context):
+        await update.message.reply_text("Gomen ne~ 🌸 /unban command is only for admins desu!")
         return
+
+    target = await resolve_target_user(update, context)
+    if not target:
+        await update.message.reply_text("🌸 Please reply to a message, or specify a valid user ID/username to unban desu~")
+        return
+
     try:
-        uid = int(context.args[0])
-        await context.bot.unban_chat_member(update.effective_chat.id, uid, only_if_banned=True)
-        log_admin_action(update.effective_chat.id, update.effective_user.id, 'unban', uid)
-        await update.message.reply_text(f'Unbanned {uid}.')
+        await context.bot.unban_chat_member(chat.id, target.id, only_if_banned=True)
+        log_admin_action(chat.id, user.id, 'unban', target.id)
+        tag = format_user_tag(target.id, getattr(target, 'first_name', 'User'), getattr(target, 'username', None))
+        await update.message.reply_html(f'Unbanned {tag}.')
     except Exception:
-        await update.message.reply_text('Failed to unban that user id.')
+        await safe_reply_error(update.effective_message, "🌷 Aww, Telegram won't let me perform that action or unban this member.")
 
 
 async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1570,3 +1580,49 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines_out.append("")
 
     await update.message.reply_html("\n".join(lines_out), disable_web_page_preview=True)
+
+
+async def addpack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /addpack command handler.
+    Allows authorized owners/sudos/admins to save an entire sticker pack by replying to a sticker.
+    """
+    if not await is_admin(update, context):
+        await update.message.reply_text("Gomen ne~ 🌸 /addpack is only for admins desu!")
+        return
+
+    msg = update.effective_message
+    if not msg:
+        return
+
+    reply_msg = msg.reply_to_message
+    if not reply_msg or not reply_msg.sticker:
+        await update.message.reply_text("🌸 Please reply to a sticker with /addpack to save the sticker pack!")
+        return
+
+    sticker = reply_msg.sticker
+    set_name = sticker.set_name
+    if not set_name:
+        await update.message.reply_text("🌸 This sticker does not belong to a valid sticker pack desu~")
+        return
+
+    try:
+        sticker_set = await context.bot.get_sticker_set(set_name)
+    except Exception as e:
+        await update.message.reply_text("🌸 Could not retrieve sticker pack details from Telegram desu~")
+        return
+
+    stickers_data = []
+    for s in sticker_set.stickers:
+        stickers_data.append({
+            'file_id': s.file_id,
+            'file_unique_id': getattr(s, 'file_unique_id', ''),
+            'emoji': getattr(s, 'emoji', ''),
+            'type': getattr(s, 'type', 'regular')
+        })
+
+    from store import save_sticker_pack
+    save_sticker_pack(set_name, sticker_set.title, stickers_data)
+    log_admin_action(update.effective_chat.id, update.effective_user.id, 'addpack', details=set_name)
+
+    await update.message.reply_text(f"Done~ 🌸 Added the whole sticker pack '{sticker_set.title}' ({len(stickers_data)} stickers)!")

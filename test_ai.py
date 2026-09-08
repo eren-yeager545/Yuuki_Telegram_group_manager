@@ -333,3 +333,92 @@ async def test_gemini_provider_error_masking_no_key_leak():
         err_str = str(exc_info.value)
         assert secret_key not in err_str
         assert "[REDACTED]" in err_str or "404" in err_str
+
+
+
+@pytest.mark.asyncio
+async def test_addpack_cmd():
+    from store import init_db
+    init_db()
+    from admin import addpack_cmd
+
+    msg = AsyncMock(spec=Message)
+    chat = Chat(id=-1001, type="supergroup")
+    user = User(id=123, first_name="User", is_bot=False)
+    upd = MagicMock(spec=Update)
+    upd.effective_message = msg
+    upd.message = msg
+    upd.effective_chat = chat
+    upd.effective_user = user
+    ctx = MagicMock()
+
+    # 1. Non-admin check
+    with patch("admin.is_admin", new_callable=AsyncMock) as mock_is_admin:
+        mock_is_admin.return_value = False
+        await addpack_cmd(upd, ctx)
+        msg.reply_text.assert_called_with("Gomen ne~ 🌸 /addpack is only for admins desu!")
+
+    # 2. Admin success replying to sticker
+    sticker = MagicMock()
+    sticker.set_name = "test_pack_set"
+    reply_msg = MagicMock(spec=Message)
+    reply_msg.sticker = sticker
+    msg.reply_to_message = reply_msg
+
+    s1 = MagicMock()
+    s1.file_id = "stk_1"
+    s1.file_unique_id = "uniq_1"
+    s1.emoji = "🌸"
+    s1.type = "regular"
+
+    sticker_set = MagicMock()
+    sticker_set.title = "Test Pack Title"
+    sticker_set.stickers = [s1]
+
+    ctx.bot.get_sticker_set = AsyncMock(return_value=sticker_set)
+
+    with patch("admin.is_admin", new_callable=AsyncMock) as mock_is_admin:
+        mock_is_admin.return_value = True
+        await addpack_cmd(upd, ctx)
+        ctx.bot.get_sticker_set.assert_called_with("test_pack_set")
+        msg.reply_text.assert_called()
+
+    # Check database
+    from store import get_sticker_pack
+    pack = get_sticker_pack("test_pack_set")
+    assert pack is not None
+    assert pack['title'] == "Test Pack Title"
+    assert len(pack['stickers']) == 1
+    assert pack['stickers'][0]['file_id'] == "stk_1"
+
+
+@pytest.mark.asyncio
+async def test_unban_cmd_enhanced():
+    from admin import unban_cmd
+
+    chat = Chat(id=-1001, type="supergroup")
+    user = User(id=1, first_name="Admin", is_bot=False)
+    msg = AsyncMock(spec=Message)
+    upd = MagicMock(spec=Update)
+    upd.effective_chat = chat
+    upd.effective_user = user
+    upd.effective_message = msg
+    upd.message = msg
+    ctx = MagicMock()
+
+    # Admin check failure
+    with patch("admin.is_admin", new_callable=AsyncMock) as mock_is_admin:
+        mock_is_admin.return_value = False
+        await unban_cmd(upd, ctx)
+        msg.reply_text.assert_called_with("Gomen ne~ 🌸 /unban command is only for admins desu!")
+
+    # Success with reply target
+    target_user = User(id=888, first_name="BannedUser", is_bot=False, username="banned_user")
+    with patch("admin.is_admin", new_callable=AsyncMock) as mock_is_admin,          patch("admin.resolve_target_user", new_callable=AsyncMock) as mock_target:
+        mock_is_admin.return_value = True
+        mock_target.return_value = target_user
+        ctx.bot.unban_chat_member = AsyncMock()
+
+        await unban_cmd(upd, ctx)
+        ctx.bot.unban_chat_member.assert_called_with(-1001, 888, only_if_banned=True)
+        msg.reply_html.assert_called()
