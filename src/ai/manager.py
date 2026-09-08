@@ -60,6 +60,10 @@ class AIProviderManager:
         start_time = time.time()
         logger.info("AI Request Started: Attempting generation across configured providers")
 
+        has_configured_keys = any(bool(p.api_keys) for p in self.providers.values())
+        if not has_configured_keys:
+            logger.warning("AI Request Warning: No API keys are configured for any provider")
+
         for provider_name in self.provider_order:
             provider = self.providers.get(provider_name)
             if not provider or not provider.api_keys:
@@ -83,7 +87,7 @@ class AIProviderManager:
                     return response
 
                 except Exception as e:
-                    logger.warning(f"Provider Failure: Provider '{provider_name}' (key index {key_idx}) failed: {type(e).__name__}")
+                    logger.warning(f"Provider Failure: Provider '{provider_name}' (key index {key_idx}) failed: {type(e).__name__}: {e}")
                     self._mark_key_cooldown(provider_name, key_idx)
                     logger.info(f"Provider Fallback: Rotating to next available key/provider")
 

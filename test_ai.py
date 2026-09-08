@@ -172,3 +172,17 @@ def test_game_independence():
 
     # Test calculate_winner directly in Tic-Tac-Toe
     assert tictactoe.check_winner(["X", "X", "X", " ", " ", " ", " ", " ", " "]) == "X"
+
+@pytest.mark.asyncio
+async def test_provider_manager_no_keys_configured():
+    mgr = AIProviderManager(
+        provider_order=["gemini", "groq", "openrouter"],
+        gemini_keys=[],
+        groq_keys=[],
+        openrouter_keys=[]
+    )
+
+    resp = await mgr.chat(messages=[{"role": "user", "content": "hello"}], system_prompt="test")
+    assert resp.text == FALLBACK_YUKI_RESPONSE
+    assert resp.provider == "fallback"
+    assert resp.model == "none"
