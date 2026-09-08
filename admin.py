@@ -13,7 +13,7 @@ from store import (
     list_notes, list_quizzes, list_warned_users, log_admin_action, remove_blacklist,
     reset_warns, save_buttons, save_filter, save_note, set_chat_federation, set_setting,
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
-    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message
+    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed
 )
 from helpers import is_admin, is_owner_or_sudo, safe_reply_error
 
@@ -1626,3 +1626,73 @@ async def addpack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_admin_action(update.effective_chat.id, update.effective_user.id, 'addpack', details=set_name)
 
     await update.message.reply_text(f"Done~ 🌸 Added the whole sticker pack '{sticker_set.title}' ({len(stickers_data)} stickers)!")
+
+
+async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not is_owner_or_sudo(user.id):
+        await update.message.reply_text('🌸 Only my owner or sudo users can view the user list desu~!')
+        return
+
+    users = get_all_users()
+    if not users:
+        await update.message.reply_text('🌸 No registered users found yet!')
+        return
+
+    lines = [f'👥 <b>Total Users:</b> {len(users)}\n']
+    for idx_u, u in enumerate(users, 1):
+        uid = u['user_id']
+        name = html.escape(u.get('full_name') or 'User')
+        un = f"@{u['username']}" if u.get('username') else 'None'
+        profile_link = f'<a href="tg://user?id={uid}">tap to open profile</a>'
+        lines.append(f'{idx_u}. <b>{name}</b> (ID: <code>{uid}</code>) | {un} | {profile_link}')
+
+    out_text = '\n'.join(lines)
+    if len(out_text) > 4000:
+        for i in range(0, len(out_text), 4000):
+            await update.message.reply_text(out_text[i:i+4000], parse_mode='HTML', disable_web_page_preview=True)
+    else:
+        await update.message.reply_text(out_text, parse_mode='HTML', disable_web_page_preview=True)
+
+
+async def grouplist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not is_owner_or_sudo(user.id):
+        await update.message.reply_text('🌸 Only my owner or sudo users can view the group list desu~!')
+        return
+
+    groups = get_all_active_groups_detailed()
+    if not groups:
+        await update.message.reply_text('🌸 No connected active groups found yet!')
+        return
+
+    lines = [f'👥 <b>Connected Groups List:</b> {len(groups)}\n']
+    for idx_g, g in enumerate(groups, 1):
+        gid = g['chat_id']
+        title = html.escape(g.get('title') or str(gid))
+        members = g.get('member_count') if g.get('member_count') is not None else 'Unknown'
+        added_by_id = g.get('added_by_user_id')
+
+        added_by_str = 'Unknown'
+        if added_by_id:
+            adder = get_user_by_id(added_by_id)
+            if adder:
+                adder_name = html.escape(adder[1] or 'User')
+                adder_link = f'<a href="tg://user?id={added_by_id}">tap to open profile</a>'
+                added_by_str = f'{adder_name} (<code>{added_by_id}</code> - {adder_link})'
+            else:
+                adder_link = f'<a href="tg://user?id={added_by_id}">tap to open profile</a>'
+                added_by_str = f'ID: <code>{added_by_id}</code> ({adder_link})'
+
+        lines.append(
+            f'{idx_g}. <b>{title}</b> (ID: <code>{gid}</code>)\n'
+            f'   • 👥 Total Members: {members}\n'
+            f'   • 👤 Added By: {added_by_str}'
+        )
+
+    out_text = '\n\n'.join(lines)
+    if len(out_text) > 4000:
+        for i in range(0, len(out_text), 4000):
+            await update.message.reply_text(out_text[i:i+4000], parse_mode='HTML', disable_web_page_preview=True)
+    else:
+        await update.message.reply_text(out_text, parse_mode='HTML', disable_web_page_preview=True)

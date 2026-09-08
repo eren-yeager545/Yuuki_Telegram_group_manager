@@ -1349,3 +1349,92 @@ def get_all_stickers():
                 {'set_name': r[0], 'file_id': r[1], 'file_unique_id': r[2], 'emoji': r[3], 'sticker_type': r[4]}
                 for r in s_rows
             ]
+
+
+def delete_group_data(chat_id):
+    if is_mongo():
+        db = get_mongo_db()
+        db['filters'].delete_many({'chat_id': chat_id})
+        db['notes'].delete_many({'chat_id': chat_id})
+        db['blacklists'].delete_many({'chat_id': chat_id})
+        db['warns'].delete_many({'chat_id': chat_id})
+        db['settings'].delete_many({'chat_id': chat_id})
+        db['welcome_buttons'].delete_many({'chat_id': chat_id})
+        db['rules_buttons'].delete_many({'chat_id': chat_id})
+        db['reports'].delete_many({'chat_id': chat_id})
+        db['audit_logs'].delete_many({'chat_id': chat_id})
+        db['action_events'].delete_many({'chat_id': chat_id})
+        db['temp_actions'].delete_many({'chat_id': chat_id})
+        db['federation_chats'].delete_many({'chat_id': chat_id})
+        db['user_messages'].delete_many({'chat_id': chat_id})
+        db['group_members'].delete_many({'chat_id': chat_id})
+        db['groups'].delete_many({'chat_id': chat_id})
+        return
+
+    with get_conn() as c:
+        c.execute('DELETE FROM filters WHERE chat_id=?', (chat_id,))
+        c.execute('DELETE FROM notes WHERE chat_id=?', (chat_id,))
+        c.execute('DELETE FROM blacklists WHERE chat_id=?', (chat_id,))
+        c.execute('DELETE FROM warns WHERE chat_id=?', (chat_id,))
+        c.execute('DELETE FROM settings WHERE chat_id=?', (chat_id,))
+        c.execute('DELETE FROM welcome_buttons WHERE chat_id=?', (chat_id,))
+        c.execute('DELETE FROM rules_buttons WHERE chat_id=?', (chat_id,))
+        c.execute('DELETE FROM reports WHERE chat_id=?', (chat_id,))
+        c.execute('DELETE FROM audit_logs WHERE chat_id=?', (chat_id,))
+        c.execute('DELETE FROM action_events WHERE chat_id=?', (chat_id,))
+        c.execute('DELETE FROM temp_actions WHERE chat_id=?', (chat_id,))
+        c.execute('DELETE FROM federation_chats WHERE chat_id=?', (chat_id,))
+        c.execute('DELETE FROM user_messages WHERE chat_id=?', (chat_id,))
+        c.execute('DELETE FROM group_members WHERE chat_id=?', (chat_id,))
+        c.execute('DELETE FROM groups WHERE chat_id=?', (chat_id,))
+        c.commit()
+
+
+def get_all_users():
+    if is_mongo():
+        db = get_mongo_db()
+        docs = db['users'].find({})
+        return [{
+            'user_id': d['user_id'],
+            'full_name': d.get('full_name'),
+            'username': d.get('username'),
+            'added_at': d.get('added_at'),
+            'last_seen_at': d.get('last_seen_at')
+        } for d in docs if 'user_id' in d]
+
+    with closing(conn()) as c:
+        rows = c.execute('SELECT user_id, full_name, username, added_at, last_seen_at FROM users').fetchall()
+        return [{
+            'user_id': r[0],
+            'full_name': r[1],
+            'username': r[2],
+            'added_at': r[3],
+            'last_seen_at': r[4]
+        } for r in rows]
+
+
+def get_all_active_groups_detailed():
+    if is_mongo():
+        db = get_mongo_db()
+        docs = db['groups'].find({'is_active': {'$ne': 0}})
+        return [{
+            'chat_id': d['chat_id'],
+            'title': d.get('title') or str(d['chat_id']),
+            'username': d.get('username'),
+            'group_link': d.get('group_link'),
+            'member_count': d.get('member_count'),
+            'added_by_user_id': d.get('added_by_user_id'),
+            'added_at': d.get('added_at')
+        } for d in docs if 'chat_id' in d]
+
+    with closing(conn()) as c:
+        rows = c.execute('SELECT chat_id, title, username, group_link, member_count, added_by_user_id, added_at FROM groups WHERE is_active IS NULL OR is_active = 1').fetchall()
+        return [{
+            'chat_id': r[0],
+            'title': r[1] or str(r[0]),
+            'username': r[2],
+            'group_link': r[3],
+            'member_count': r[4],
+            'added_by_user_id': r[5],
+            'added_at': r[6]
+        } for r in rows]

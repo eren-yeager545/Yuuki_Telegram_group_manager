@@ -357,8 +357,7 @@ def test_logger_formatting_and_events(monkeypatch, tmp_path):
 
     # Verify DB marked group inactive
     updated_group_db = store.get_group_by_id(-100456)
-    assert updated_group_db['is_active'] == 0
-    assert updated_group_db['current_bot_status'] == "kicked"
+    assert updated_group_db is None
     assert store.get_active_group_count() == 1
 
 
@@ -952,3 +951,77 @@ def test_health_check_endpoint():
         server.stop()
 
     asyncio.run(run_test())
+
+
+def test_users_and_grouplist_cmds(monkeypatch, tmp_path):
+    import store
+    import admin
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import User, Chat, Message, Update
+
+    db_file = str(tmp_path / "test_users_group.db")
+    monkeypatch.setattr(store, "DB_PATH", db_file)
+    store.init_db()
+
+    owner_id = 99999
+    monkeypatch.setattr(admin, "OWNER_IDS", [owner_id])
+    monkeypatch.setattr(admin, "is_owner_or_sudo", lambda uid, **kw: uid == owner_id)
+
+    # Insert sample users and group
+    store.upsert_user(101, "Alice Wonderland", "alice")
+    store.upsert_user(102, "Bob Marley", None)
+    store.upsert_group(
+        chat_id=-100111,
+        title="Test Anime Group",
+        username="testanime",
+        member_count=42,
+        added_by_user_id=101,
+        current_bot_status="member",
+        is_active=1
+    )
+
+    context = MagicMock()
+
+    # 1. Non-owner /users rejection
+    normal_user = User(id=123, first_name="Normal", is_bot=False)
+    msg1 = MagicMock(spec=Message)
+    msg1.reply_text = AsyncMock()
+    up1 = MagicMock(spec=Update)
+    up1.effective_user = normal_user
+    up1.message = msg1
+
+    asyncio.run(admin.users_cmd(up1, context))
+    msg1.reply_text.assert_called_once()
+    assert "Only my owner or sudo users" in msg1.reply_text.call_args[0][0]
+
+    # 2. Owner /users success
+    owner_user = User(id=owner_id, first_name="Owner", is_bot=False)
+    msg2 = MagicMock(spec=Message)
+    msg2.reply_text = AsyncMock()
+    up2 = MagicMock(spec=Update)
+    up2.effective_user = owner_user
+    up2.message = msg2
+
+    asyncio.run(admin.users_cmd(up2, context))
+    msg2.reply_text.assert_called_once()
+    users_resp = msg2.reply_text.call_args[0][0]
+    assert "Total Users:" in users_resp
+    assert "Alice Wonderland" in users_resp
+    assert "tg://user?id=101" in users_resp
+    assert "tap to open profile" in users_resp
+
+    # 3. Owner /grouplist success
+    msg3 = MagicMock(spec=Message)
+    msg3.reply_text = AsyncMock()
+    up3 = MagicMock(spec=Update)
+    up3.effective_user = owner_user
+    up3.message = msg3
+
+    asyncio.run(admin.grouplist_cmd(up3, context))
+    msg3.reply_text.assert_called_once()
+    grouplist_resp = msg3.reply_text.call_args[0][0]
+    assert "Connected Groups List:" in grouplist_resp
+    assert "Test Anime Group" in grouplist_resp
+    assert "Total Members: 42" in grouplist_resp
+    assert "Alice Wonderland" in grouplist_resp
+    assert "tg://user?id=101" in grouplist_resp

@@ -612,6 +612,8 @@ def main():
         ('addsupport', addsupport_cmd, 'Owner Commands', 'Set support group button link', '/addsupport https://t.me/your_support_group'),
         ('addchannel', addchannel_cmd, 'Owner Commands', 'Set update channel button link', '/addchannel https://t.me/your_update_channel'),
         ('addlogger', addlogger_cmd, 'Owner Commands', 'Save logger link reference for owner setup', '/addlogger https://t.me/your_logger_channel'),
+        ('users', users_cmd, 'Owner Commands', 'See all users profile list', '/users'),
+        ('grouplist', grouplist_cmd, 'Owner Commands', 'See connected active group list', '/grouplist'),
         ('report', report_cmd, 'Users Commands', 'Report a replied message to admins', '/report spam'),
         ('id', id_cmd, 'Users Commands', 'Show your id or replied user id', '/id'),
         ('info', info_cmd, 'Users Commands', 'Show info about a user', '/info'),
