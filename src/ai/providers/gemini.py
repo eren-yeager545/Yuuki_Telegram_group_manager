@@ -1,4 +1,5 @@
 import logging
+import os
 import httpx
 from typing import List, Dict, Optional, Any
 from .base import AIProvider, AIResponse
@@ -9,9 +10,9 @@ logger = logging.getLogger(__name__)
 class GeminiProvider(AIProvider):
     name: str = "gemini"
 
-    def __init__(self, api_keys: List[str], model: str = "gemini-1.5-flash"):
+    def __init__(self, api_keys: List[str], model: Optional[str] = None):
         super().__init__(api_keys)
-        self.model = model
+        self.model = model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
 
     async def generate_response_with_key(
         self,
@@ -22,53 +23,106 @@ class GeminiProvider(AIProvider):
         timeout: float = 20.0,
         **kwargs
     ) -> AIResponse:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+
+        payload: Dict[str, Any] = {}
+
+        if system_prompt:
+            payload["systemInstruction"] = {
+                "parts": [{"text": system_prompt}]
+            }
 
         contents = []
-        if system_prompt:
-            contents.append({
-                "role": "user",
-                "parts": [{"text": f"System Directive: {system_prompt}"}]
-            })
-            contents.append({
-                "role": "model",
-                "parts": [{"text": "Understood desu~ 🌸"}]
-            })
-
         for msg in messages:
             role = "model" if msg.get("role") in ("assistant", "model", "bot") else "user"
-            content_text = msg.get("content", "")
+            content_text = (msg.get("content") or "").strip()
+            if not content_text:
+                continue
             if msg.get("name") and role == "user":
                 content_text = f"[{msg['name']}]: {content_text}"
-            contents.append({
-                "role": role,
-                "parts": [{"text": content_text}]
-            })
 
-        payload = {
-            "contents": contents,
-            "generationConfig": {
-                "maxOutputTokens": max_tokens,
-                "temperature": 0.7
-            }
+            if contents and contents[-1]["role"] == role:
+                contents[-1]["parts"][0]["text"] += f"\n{content_text}"
+            else:
+                contents.append({
+                    "role": role,
+                    "parts": [{"text": content_text}]
+                })
+
+        while contents and contents[0]["role"] == "model":
+            contents.pop(0)
+
+        if not contents:
+            raise ValueError("Gemini request requires at least one non-empty message")
+
+        payload["contents"] = contents
+        payload["generationConfig"] = {
+            "maxOutputTokens": max_tokens,
+            "temperature": 0.7
         }
 
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, json=payload)
+            try:
+                resp = await client.post(url, params={"key": api_key}, json=payload)
+            except httpx.TimeoutException as te:
+                logger.warning(f"Gemini API timeout after {timeout}s for model '{self.model}'")
+                raise te
+            except httpx.RequestError as re:
+                logger.warning(f"Gemini API request error for model '{self.model}': {type(re).__name__}")
+                raise re
+
             if resp.status_code == 200:
                 data = resp.json()
                 candidates = data.get("candidates", [])
-                if candidates and "content" in candidates[0]:
-                    parts = candidates[0]["content"].get("parts", [])
-                    if parts and "text" in parts[0]:
-                        text = parts[0]["text"].strip()
+                if candidates:
+                    candidate = candidates[0]
+                    finish_reason = candidate.get("finishReason")
+                    if finish_reason in ("SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "OTHER"):
+                        logger.warning(f"Gemini API generation blocked due to finishReason: {finish_reason}")
+                        raise ValueError(f"Gemini response content blocked due to finishReason '{finish_reason}'")
+
+                    content = candidate.get("content", {})
+                    parts = content.get("parts", [])
+                    text_parts = [p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p]
+                    full_text = "".join(text_parts).strip()
+                    if full_text:
                         usage = data.get("usageMetadata")
-                        return AIResponse(text=text, provider=self.name, model=self.model, usage=usage)
+                        return AIResponse(
+                            text=full_text,
+                            provider=self.name,
+                            model=self.model,
+                            usage=usage
+                        )
                 raise ValueError("Gemini returned invalid or empty content response structure")
+
+            err_detail = ""
+            try:
+                err_json = resp.json()
+                err_detail = err_json.get("error", {}).get("message", "")
+            except Exception:
+                err_detail = resp.text[:200]
+
+            if api_key and api_key in err_detail:
+                err_detail = err_detail.replace(api_key, "[REDACTED]")
+
+            status = resp.status_code
+            if status == 400:
+                log_msg = f"Gemini API 400 Bad Request (model='{self.model}'): {err_detail}"
+            elif status in (401, 403):
+                log_msg = f"Gemini API {status} Authentication Error: {err_detail}"
+            elif status == 404:
+                log_msg = f"Gemini API 404 Model/Endpoint Not Found (model='{self.model}'): {err_detail}"
+            elif status == 429:
+                log_msg = f"Gemini API 429 Rate Limit Exceeded: {err_detail}"
+            elif status >= 500:
+                log_msg = f"Gemini API {status} Temporary Server Error: {err_detail}"
             else:
-                error_body = resp.text[:200]
-                raise httpx.HTTPStatusError(
-                    f"Gemini API Error Status {resp.status_code}: {error_body}",
-                    request=resp.request,
-                    response=resp
-                )
+                log_msg = f"Gemini API {status} Error: {err_detail}"
+
+            logger.warning(log_msg)
+
+            raise httpx.HTTPStatusError(
+                f"Gemini API Error Status {status}: {err_detail or log_msg}",
+                request=resp.request,
+                response=resp
+            )
