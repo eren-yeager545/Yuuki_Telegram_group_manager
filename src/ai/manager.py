@@ -23,14 +23,15 @@ class AIProviderManager:
         gemini_keys: List[str],
         groq_keys: List[str],
         openrouter_keys: List[str],
-        key_cooldown_seconds: float = 300.0
+        key_cooldown_seconds: float = 300.0,
+        gemini_model: Optional[str] = None
     ):
         self.provider_order = provider_order
         self.key_cooldown_seconds = key_cooldown_seconds
         self.providers = {}
 
         if gemini_keys:
-            self.providers["gemini"] = GeminiProvider(gemini_keys)
+            self.providers["gemini"] = GeminiProvider(gemini_keys, model=gemini_model)
         if groq_keys:
             self.providers["groq"] = GroqProvider(groq_keys)
         if openrouter_keys:
@@ -87,9 +88,14 @@ class AIProviderManager:
                     return response
 
                 except Exception as e:
-                    logger.warning(f"Provider Failure: Provider '{provider_name}' (key index {key_idx}) failed: {type(e).__name__}: {e}")
+                    err_msg = str(e)
+                    for p in self.providers.values():
+                        for k in p.api_keys:
+                            if k and k in err_msg:
+                                err_msg = err_msg.replace(k, "[REDACTED]")
+                    logger.warning(f"Provider Failure: Provider '{provider_name}' (key index {key_idx}) failed: {type(e).__name__}: {err_msg}")
                     self._mark_key_cooldown(provider_name, key_idx)
-                    logger.info(f"Provider Fallback: Rotating to next available key/provider")
+                    logger.info("Provider Fallback: Rotating to next available key/provider")
 
         duration = round(time.time() - start_time, 3)
         logger.error(f"AI Request Failed: All configured AI providers/keys failed after {duration}s")

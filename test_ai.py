@@ -186,3 +186,95 @@ async def test_provider_manager_no_keys_configured():
     assert resp.text == FALLBACK_YUKI_RESPONSE
     assert resp.provider == "fallback"
     assert resp.model == "none"
+
+import httpx
+
+@pytest.mark.asyncio
+async def test_gemini_provider_generate_response_success():
+    provider = GeminiProvider(api_keys=["test_key_123"], model="gemini-2.5-flash")
+
+    mock_resp_data = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [{"text": "Hello desu~! 🌸"}],
+                    "role": "model"
+                },
+                "finishReason": "STOP"
+            }
+        ],
+        "usageMetadata": {"totalTokenCount": 15}
+    }
+
+    mock_response = MagicMock(spec=httpx.Response)
+    mock_response.status_code = 200
+    mock_response.json.return_value = mock_resp_data
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+
+        messages = [
+            {"role": "user", "content": "Hi Yuki!", "name": "Alice"}
+        ]
+        resp = await provider.generate_response_with_key(
+            api_key="test_key_123",
+            messages=messages,
+            system_prompt="You are Yuki"
+        )
+
+        assert resp.text == "Hello desu~! 🌸"
+        assert resp.provider == "gemini"
+        assert resp.model == "gemini-2.5-flash"
+
+        # Verify URL and Payload passed to httpx.AsyncClient.post
+        call_args = mock_post.call_args
+        assert "v1beta/models/gemini-2.5-flash:generateContent" in call_args[0][0]
+        assert call_args[1]["params"]["key"] == "test_key_123"
+
+        payload = call_args[1]["json"]
+        assert payload["systemInstruction"]["parts"][0]["text"] == "You are Yuki"
+        assert payload["contents"][0]["role"] == "user"
+        assert "[Alice]: Hi Yuki!" in payload["contents"][0]["parts"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_provider_custom_model_and_env(monkeypatch):
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.0-flash")
+    provider = GeminiProvider(api_keys=["k1"])
+    assert provider.model == "gemini-2.0-flash"
+
+    provider_explicit = GeminiProvider(api_keys=["k1"], model="gemini-2.5-flash")
+    assert provider_explicit.model == "gemini-2.5-flash"
+
+
+@pytest.mark.asyncio
+async def test_gemini_provider_error_masking_no_key_leak():
+    secret_key = "AIzaSySECRET_KEY_12345"
+    provider = GeminiProvider(api_keys=[secret_key], model="gemini-2.5-flash")
+
+    mock_response = MagicMock(spec=httpx.Response)
+    mock_response.status_code = 404
+    mock_response.json.return_value = {
+        "error": {
+            "code": 404,
+            "message": f"models/gemini-2.5-flash is not found for key {secret_key}"
+        }
+    }
+    mock_response.text = f"Error with key {secret_key}"
+    mock_request = MagicMock(spec=httpx.Request)
+    mock_request.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={secret_key}"
+    mock_response.request = mock_request
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await provider.generate_response_with_key(
+                api_key=secret_key,
+                messages=[{"role": "user", "content": "hello"}],
+                system_prompt=""
+            )
+
+        err_str = str(exc_info.value)
+        assert secret_key not in err_str
+        assert "[REDACTED]" in err_str or "404" in err_str
