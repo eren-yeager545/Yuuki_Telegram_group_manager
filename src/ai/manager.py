@@ -24,7 +24,8 @@ class AIProviderManager:
         groq_keys: List[str],
         openrouter_keys: List[str],
         key_cooldown_seconds: float = 300.0,
-        gemini_model: Optional[str] = None
+        gemini_model: Optional[str] = None,
+        openrouter_model: Optional[str] = None
     ):
         self.provider_order = provider_order
         self.key_cooldown_seconds = key_cooldown_seconds
@@ -35,7 +36,7 @@ class AIProviderManager:
         if groq_keys:
             self.providers["groq"] = GroqProvider(groq_keys)
         if openrouter_keys:
-            self.providers["openrouter"] = OpenRouterProvider(openrouter_keys)
+            self.providers["openrouter"] = OpenRouterProvider(openrouter_keys, model=openrouter_model)
 
         # Key cooldown tracking: (provider_name, key_index) -> cooldown_until_timestamp
         self._key_cooldowns: Dict[Tuple[str, int], float] = {}
