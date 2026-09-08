@@ -21,3 +21,17 @@ WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', '')
 
 MONGO_URI = os.getenv('MONGO_URI') or os.getenv('MONGO_URL') or os.getenv('MONGODB_URI') or ''
 MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'yuuki_bot')
+
+# AI Configuration
+AI_ENABLED = os.getenv('AI_ENABLED', 'true').lower() in ('true', '1', 'yes')
+AI_PROVIDER_ORDER = [x.strip().lower() for x in os.getenv('AI_PROVIDER_ORDER', 'gemini,groq,openrouter').split(',') if x.strip()]
+GEMINI_API_KEYS = [x.strip() for x in os.getenv('GEMINI_API_KEYS', '').split(',') if x.strip()]
+GROQ_API_KEYS = [x.strip() for x in os.getenv('GROQ_API_KEYS', '').split(',') if x.strip()]
+OPENROUTER_API_KEYS = [x.strip() for x in os.getenv('OPENROUTER_API_KEYS', '').split(',') if x.strip()]
+
+AI_MAX_CONTEXT_MESSAGES = int(os.getenv('AI_MAX_CONTEXT_MESSAGES', '10') or 10)
+AI_MAX_OUTPUT_TOKENS = int(os.getenv('AI_MAX_OUTPUT_TOKENS', '150') or 150)
+AI_REQUEST_TIMEOUT = float(os.getenv('AI_REQUEST_TIMEOUT', '20') or 20)
+AI_USER_COOLDOWN = float(os.getenv('AI_USER_COOLDOWN', '5') or 5)
+AI_CHAT_COOLDOWN = float(os.getenv('AI_CHAT_COOLDOWN', '2') or 2)
+AI_MAX_CONCURRENT_REQUESTS = int(os.getenv('AI_MAX_CONCURRENT_REQUESTS', '10') or 10)

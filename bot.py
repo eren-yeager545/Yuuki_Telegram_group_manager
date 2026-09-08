@@ -21,6 +21,7 @@ from broadcast import broadcast_cmd, broadcast_callback_handler, handle_broadcas
 from tictactoe import ttt_cmd, ttt_callback_handler
 from admin import *
 from common import ai_cmd
+from handlers.ai_chat import handle_ai_chat, should_trigger_yuki
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -165,7 +166,14 @@ def render_template(text, user, chat):
     full = user.full_name or fn
     un = f"@{user.username}" if getattr(user, 'username', None) else full
 
-    return (text or '')         .replace('{user}', u_tag)         .replace('{group}', c_title)         .replace('{first}', fn)         .replace('{last}', ln)         .replace('{fullname}', full)         .replace('{username}', un)         .replace('{chatname}', c_title)
+    return (text or '') \
+        .replace('{user}', u_tag) \
+        .replace('{group}', c_title) \
+        .replace('{first}', fn) \
+        .replace('{last}', ln) \
+        .replace('{fullname}', full) \
+        .replace('{username}', un) \
+        .replace('{chatname}', c_title)
 
 
 async def expire_quiz(context: ContextTypes.DEFAULT_TYPE):
@@ -495,6 +503,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Filters matching logic (triggers ONLY when the message matches the trigger separately)
         clean_text = txt.strip().lower()
         filters_list = get_filters(chat.id)
+        filter_triggered = False
         for keyword, reply, f_type in filters_list:
             kw_clean = keyword.strip().lower()
             matched = False
@@ -510,6 +519,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 matched = True
 
             if matched:
+                filter_triggered = True
                 if f_type == 'sticker':
                     try:
                         await msg.reply_sticker(reply)
@@ -532,6 +542,16 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     await msg.reply_text(reply)
                 break
+
+        if filter_triggered:
+            return
+
+    # Yuki AI Chatbot Trigger Check
+    bot_username = getattr(context.bot, "username", None)
+    bot_id = getattr(context.bot, "id", None)
+    triggered, prompt = should_trigger_yuki(update, bot_username=bot_username, bot_id=bot_id)
+    if triggered:
+        await handle_ai_chat(update, context, prompt_override=prompt)
 
 
 async def post_init(app: Application):
