@@ -112,6 +112,8 @@ def init_db():
         db['welcome_buttons'].create_index([('chat_id', 1), ('label', 1), ('url', 1)], unique=True)
         db['rules_buttons'].create_index([('chat_id', 1), ('label', 1), ('url', 1)], unique=True)
         db['user_messages'].create_index([('chat_id', 1), ('user_id', 1), ('message_id', 1)], unique=True)
+        db['sticker_packs'].create_index('set_name', unique=True)
+        db['stickers'].create_index('set_name')
         return
 
     with closing(conn()) as c:
@@ -148,6 +150,8 @@ def init_db():
         cur.execute('CREATE TABLE IF NOT EXISTS welcome_buttons (chat_id INTEGER, label TEXT, url TEXT, sort_order INTEGER DEFAULT 0, PRIMARY KEY(chat_id, label, url))')
         cur.execute('CREATE TABLE IF NOT EXISTS rules_buttons (chat_id INTEGER, label TEXT, url TEXT, sort_order INTEGER DEFAULT 0, PRIMARY KEY(chat_id, label, url))')
         cur.execute('CREATE TABLE IF NOT EXISTS user_messages (chat_id INTEGER, user_id INTEGER, message_id INTEGER, created_at INTEGER, PRIMARY KEY(chat_id, user_id, message_id))')
+        cur.execute('CREATE TABLE IF NOT EXISTS sticker_packs (set_name TEXT PRIMARY KEY, title TEXT, count INTEGER, updated_at INTEGER)')
+        cur.execute('CREATE TABLE IF NOT EXISTS stickers (id INTEGER PRIMARY KEY AUTOINCREMENT, set_name TEXT, file_id TEXT, file_unique_id TEXT, emoji TEXT, sticker_type TEXT)')
 
         # Schema migrations for existing SQLite databases
         cur.execute("PRAGMA table_info(filters)")
@@ -1248,3 +1252,100 @@ def clear_user_messages(chat_id, user_id):
             c.execute('DELETE FROM user_messages WHERE chat_id=? AND user_id=?', (chat_id, user_id))
             c.commit()
     return msg_ids
+
+
+# ============================================================================
+# STICKER PACK MANAGEMENT
+# ============================================================================
+
+def save_sticker_pack(set_name: str, title: str, stickers_data: list):
+    """
+    Saves a sticker pack and its stickers to storage.
+    stickers_data is a list of dicts: [{'file_id': ..., 'file_unique_id': ..., 'emoji': ..., 'type': ...}]
+    """
+    now = _now()
+    if is_mongo():
+        db = get_mongo_db()
+        db['sticker_packs'].update_one(
+            {'set_name': set_name},
+            {'$set': {'set_name': set_name, 'title': title, 'count': len(stickers_data), 'updated_at': now}},
+            upsert=True
+        )
+        db['stickers'].delete_many({'set_name': set_name})
+        if stickers_data:
+            docs = [
+                {
+                    'set_name': set_name,
+                    'file_id': s.get('file_id'),
+                    'file_unique_id': s.get('file_unique_id', ''),
+                    'emoji': s.get('emoji', ''),
+                    'sticker_type': s.get('type', 'regular')
+                }
+                for s in stickers_data
+            ]
+            db['stickers'].insert_many(docs)
+    else:
+        with closing(conn()) as c:
+            c.execute(
+                'INSERT OR REPLACE INTO sticker_packs(set_name, title, count, updated_at) VALUES(?,?,?,?)',
+                (set_name, title, len(stickers_data), now)
+            )
+            c.execute('DELETE FROM stickers WHERE set_name=?', (set_name,))
+            for s in stickers_data:
+                c.execute(
+                    'INSERT INTO stickers(set_name, file_id, file_unique_id, emoji, sticker_type) VALUES(?,?,?,?,?)',
+                    (
+                        set_name,
+                        s.get('file_id'),
+                        s.get('file_unique_id', ''),
+                        s.get('emoji', ''),
+                        s.get('type', 'regular')
+                    )
+                )
+            c.commit()
+
+
+def get_sticker_pack(set_name: str):
+    """Retrieves metadata and stickers for a specific pack set_name."""
+    if is_mongo():
+        db = get_mongo_db()
+        pack = db['sticker_packs'].find_one({'set_name': set_name})
+        if not pack:
+            return None
+        stickers = list(db['stickers'].find({'set_name': set_name}))
+        return {
+            'set_name': pack['set_name'],
+            'title': pack.get('title', ''),
+            'count': pack.get('count', len(stickers)),
+            'stickers': stickers
+        }
+    else:
+        with closing(conn()) as c:
+            row = c.execute('SELECT set_name, title, count FROM sticker_packs WHERE set_name=?', (set_name,)).fetchone()
+            if not row:
+                return None
+            s_rows = c.execute('SELECT file_id, file_unique_id, emoji, sticker_type FROM stickers WHERE set_name=?', (set_name,)).fetchall()
+            stickers = [
+                {'file_id': r[0], 'file_unique_id': r[1], 'emoji': r[2], 'sticker_type': r[3]}
+                for r in s_rows
+            ]
+            return {
+                'set_name': row[0],
+                'title': row[1],
+                'count': row[2],
+                'stickers': stickers
+            }
+
+
+def get_all_stickers():
+    """Retrieves all saved stickers across all packs."""
+    if is_mongo():
+        db = get_mongo_db()
+        return list(db['stickers'].find({}))
+    else:
+        with closing(conn()) as c:
+            s_rows = c.execute('SELECT set_name, file_id, file_unique_id, emoji, sticker_type FROM stickers').fetchall()
+            return [
+                {'set_name': r[0], 'file_id': r[1], 'file_unique_id': r[2], 'emoji': r[3], 'sticker_type': r[4]}
+                for r in s_rows
+            ]

@@ -631,6 +631,7 @@ def main():
         ('unban', unban_cmd, 'Group Management Commands', 'Unban by user id', '/unban 1234'),
         ('kick', kick_cmd, 'Group Management Commands', 'Reply-kick a user', '/kick'),
         ('del', del_cmd, 'Group Management Commands', 'Delete replied message', '/del'),
+        ('addpack', addpack_cmd, 'Group Management Commands', 'Add sticker pack by reply to a sticker', '/addpack'),
         ('dban', dban_cmd, 'Group Management Commands', 'Ban user and purge all their messages', '/dban'),
         ('pin', pin_cmd, 'Group Management Commands', 'Pin replied message', '/pin'),
         ('unpin', unpin_cmd, 'Group Management Commands', 'Clear all pins', '/unpin'),

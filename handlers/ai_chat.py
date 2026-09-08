@@ -1,9 +1,11 @@
 import logging
+import random
 import re
 from typing import Optional, Tuple
 from telegram import Update, Message, User
 from telegram.ext import ContextTypes
 import config
+from store import get_all_stickers
 from src.ai import (
     YUKI_PERSONA,
     ContextManager,
@@ -40,24 +42,42 @@ def should_trigger_yuki(update: Update, bot_username: Optional[str] = None, bot_
     1. Private chat message
     2. Directly mentioned via Telegram entity or @Username
     3. Reply to a message previously sent by Yuki
+    4. Sticker sent directly to Yuki (in PM or reply to Yuki in group)
     """
     msg: Optional[Message] = update.effective_message
     if not msg:
         return False, ""
 
     txt = (msg.text or msg.caption or "").strip()
-    if not txt:
-        return False, ""
-
     chat = update.effective_chat
     if not chat:
+        return False, ""
+
+    clean_bot_username = (bot_username or "").lstrip("@").lower()
+
+    # Handle Sticker Trigger
+    sticker_obj = msg.__dict__.get("sticker") if hasattr(msg, "__dict__") else getattr(msg, "sticker", None)
+    if sticker_obj is None and hasattr(msg, "_spec_class") and not getattr(msg, "text", None):
+        sticker_obj = getattr(msg, "sticker", None)
+
+    if sticker_obj and type(sticker_obj).__name__ != "MagicMock":
+        emoji = getattr(sticker_obj, "emoji", None) or "sticker"
+        if chat.type == "private":
+            return True, f"[User sent sticker: {emoji}]"
+        if msg.reply_to_message and msg.reply_to_message.from_user:
+            replied_user: User = msg.reply_to_message.from_user
+            if bot_id and replied_user.id == bot_id:
+                return True, f"[User sent sticker: {emoji}]"
+            if clean_bot_username and replied_user.username and replied_user.username.lower() == clean_bot_username:
+                return True, f"[User sent sticker: {emoji}]"
+        return False, ""
+
+    if not txt:
         return False, ""
 
     # 1. Private Chat
     if chat.type == "private":
         return True, txt
-
-    clean_bot_username = (bot_username or "").lstrip("@").lower()
 
     # 2. Telegram Mention / Entities Check
     if msg.entities:
@@ -65,7 +85,6 @@ def should_trigger_yuki(update: Update, bot_username: Optional[str] = None, bot_
             if entity.type == "mention":
                 mention_text = txt[entity.offset:entity.offset + entity.length].lstrip("@").lower()
                 if clean_bot_username and mention_text == clean_bot_username:
-                    # Strip out bot mention from prompt
                     prompt = re.sub(rf'@{clean_bot_username}\b', '', txt, flags=re.IGNORECASE).strip()
                     return True, prompt if prompt else txt
             elif entity.type == "text_mention" and entity.user:
@@ -87,6 +106,24 @@ def should_trigger_yuki(update: Update, bot_username: Optional[str] = None, bot_
             return True, txt
 
     return False, ""
+
+
+def find_matching_sticker(user_emoji: Optional[str]) -> Optional[str]:
+    """
+    Finds a sticker file_id from saved packs matching the user's sticker emoji/emotion if available.
+    """
+    stickers = get_all_stickers()
+    if not stickers:
+        return None
+
+    if user_emoji:
+        # Exact emoji match
+        matching = [s for s in stickers if s.get('emoji') and user_emoji in s.get('emoji')]
+        if matching:
+            return random.choice(matching).get('file_id')
+
+    # Random sticker from saved packs as fallback
+    return random.choice(stickers).get('file_id')
 
 
 async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt_override: Optional[str] = None):
@@ -127,7 +164,19 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
 
     # Acquire concurrency semaphore
     async with rate_limiter.semaphore:
-        # Send typing action
+        # If user sent a sticker, try replying with a sticker from saved packs
+        sticker_obj = getattr(msg, "sticker", None)
+        if sticker_obj and type(sticker_obj).__name__ != "MagicMock":
+            user_emoji = getattr(sticker_obj, "emoji", None)
+            saved_sticker_file_id = find_matching_sticker(user_emoji)
+            if saved_sticker_file_id:
+                try:
+                    await msg.reply_sticker(sticker=saved_sticker_file_id)
+                    return
+                except Exception as e:
+                    logger.warning(f"Failed to reply with sticker: {e}")
+
+        # Send typing action for text AI response
         try:
             await context.bot.send_chat_action(chat_id=chat.id, action="typing")
         except Exception:
