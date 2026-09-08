@@ -12,7 +12,7 @@ class GeminiProvider(AIProvider):
 
     def __init__(self, api_keys: List[str], model: Optional[str] = None):
         super().__init__(api_keys)
-        self.model = model or os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip() or "gemini-2.0-flash"
+        self.model = model or os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip() or "gemini-3.6-flash"
 
     async def generate_response_with_key(
         self,
