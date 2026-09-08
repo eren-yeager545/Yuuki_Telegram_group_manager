@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import httpx
@@ -7,12 +8,32 @@ from .base import AIProvider, AIResponse
 logger = logging.getLogger(__name__)
 
 
+def _redact_secrets(text: str, secret: str) -> str:
+    """Safely redact secret string from log/error output."""
+    if not secret or not text:
+        return text
+    return text.replace(secret, "[REDACTED]")
+
+
 class OpenRouterProvider(AIProvider):
     name: str = "openrouter"
 
     def __init__(self, api_keys: List[str], model: Optional[str] = None):
         super().__init__(api_keys)
         self.model = (model or os.getenv("OPENROUTER_MODEL", "google/gemma-4-31b-it:free")).strip() or "google/gemma-4-31b-it:free"
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def _get_client(self, timeout: httpx.Timeout) -> httpx.AsyncClient:
+        """Reuse or create an async HTTP client session."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=timeout)
+        return self._client
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client if open."""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
 
     async def generate_response_with_key(
         self,
@@ -45,7 +66,10 @@ class OpenRouterProvider(AIProvider):
             "model": self.model,
             "messages": formatted_messages,
             "max_tokens": max_tokens,
-            "temperature": 0.7
+            "temperature": 0.7,
+            "provider": {
+                "allow_fallbacks": True
+            }
         }
 
         headers = {
@@ -62,9 +86,14 @@ class OpenRouterProvider(AIProvider):
             pool=10.0
         ) if not isinstance(timeout, httpx.Timeout) else timeout
 
-        async with httpx.AsyncClient(timeout=http_timeout) as client:
+        client = await self._get_client(http_timeout)
+
+        retry_count = 0
+        max_retries = 1
+
+        while True:
             try:
-                resp = await client.post(url, headers=headers, json=payload)
+                resp = await client.post(url, headers=headers, json=payload, timeout=http_timeout)
             except httpx.ReadTimeout as rt:
                 logger.warning(f"OpenRouter API read timeout for model '{self.model}'")
                 raise rt
@@ -102,24 +131,82 @@ class OpenRouterProvider(AIProvider):
                                 )
                 raise ValueError("OpenRouter returned invalid or empty content response structure")
 
-            err_detail = ""
-            try:
-                err_json = resp.json()
-                if isinstance(err_json, dict):
-                    err_obj = err_json.get("error")
-                    if isinstance(err_obj, dict):
-                        err_detail = err_obj.get("message", "") or str(err_obj)
-                    elif isinstance(err_obj, str):
-                        err_detail = err_obj
-                    else:
-                        err_detail = str(err_json)
-            except Exception:
-                err_detail = resp.text[:200]
+            # Extract headers safely
+            retry_after_hdr = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
+            request_id = resp.headers.get("x-request-id") or resp.headers.get("X-Request-ID")
+            ratelimit_headers = {
+                k: v for k, v in resp.headers.items()
+                if k.lower().startswith("x-ratelimit-")
+            }
 
-            if api_key and api_key in err_detail:
-                err_detail = err_detail.replace(api_key, "[REDACTED]")
+            retry_after_sec = None
+            if retry_after_hdr:
+                try:
+                    retry_after_sec = float(retry_after_hdr)
+                except (ValueError, TypeError):
+                    retry_after_sec = None
+
+            # Handle 429 limited retry if Retry-After is specified and small
+            if resp.status_code == 429 and retry_count < max_retries and retry_after_sec is not None and retry_after_sec <= 3.0:
+                retry_count += 1
+                logger.info(
+                    f"OpenRouter 429 received with Retry-After={retry_after_sec}s. Backing off before retry {retry_count}/{max_retries}..."
+                )
+                await asyncio.sleep(retry_after_sec)
+                continue
+
+            # Parse full error response
+            err_json: Dict[str, Any] = {}
+            err_message = ""
+            err_code = None
+            metadata: Dict[str, Any] = {}
+            provider_name = None
+            raw_err = None
+
+            try:
+                parsed_body = resp.json()
+                if isinstance(parsed_body, dict):
+                    err_json = parsed_body
+                    err_obj = parsed_body.get("error")
+                    if isinstance(err_obj, dict):
+                        err_message = err_obj.get("message", "") or str(err_obj)
+                        err_code = err_obj.get("code")
+                        if isinstance(err_obj.get("metadata"), dict):
+                            metadata = err_obj.get("metadata", {})
+                            provider_name = metadata.get("provider_name")
+                            raw_err = metadata.get("raw")
+                    elif isinstance(err_obj, str):
+                        err_message = err_obj
+                    else:
+                        err_message = str(parsed_body)
+            except Exception:
+                err_message = resp.text[:200]
 
             status = resp.status_code
+            is_upstream_429 = False
+            if status == 429:
+                # Distinguish upstream provider 429 vs account/key 429
+                if provider_name or raw_err or "provider" in err_message.lower():
+                    is_upstream_429 = True
+
+            # Format descriptive error detail
+            detail_components = []
+            if err_message:
+                detail_components.append(err_message)
+            if provider_name:
+                detail_components.append(f"upstream_provider='{provider_name}'")
+            if metadata:
+                detail_components.append(f"metadata={metadata}")
+            if request_id:
+                detail_components.append(f"request_id='{request_id}'")
+            if retry_after_hdr:
+                detail_components.append(f"retry_after='{retry_after_hdr}'")
+            if ratelimit_headers:
+                detail_components.append(f"ratelimit_headers={ratelimit_headers}")
+
+            err_detail = " | ".join(detail_components) if detail_components else f"Status {status}"
+            err_detail = _redact_secrets(err_detail, api_key)
+
             if status == 400:
                 log_msg = f"OpenRouter API 400 Bad Request (model='{self.model}'): {err_detail}"
             elif status in (401, 403):
@@ -127,16 +214,26 @@ class OpenRouterProvider(AIProvider):
             elif status == 404:
                 log_msg = f"OpenRouter API 404 Model/Endpoint Not Found (model='{self.model}'): {err_detail}"
             elif status == 429:
-                log_msg = f"OpenRouter API 429 Rate Limit Exceeded: {err_detail}"
+                if is_upstream_429:
+                    log_msg = (
+                        f"OpenRouter API 429 Rate Limit Exceeded (Upstream Provider Error for model='{self.model}'): "
+                        f"{err_detail} | full_json={err_json}"
+                    )
+                else:
+                    log_msg = (
+                        f"OpenRouter API 429 Rate Limit Exceeded (Account/Key Limit for model='{self.model}'): "
+                        f"{err_detail} | full_json={err_json}"
+                    )
             elif status in (500, 502, 503, 504):
                 log_msg = f"OpenRouter API {status} Temporary Server Error: {err_detail}"
             else:
                 log_msg = f"OpenRouter API {status} Error: {err_detail}"
 
+            log_msg = _redact_secrets(log_msg, api_key)
             logger.warning(log_msg)
 
             raise httpx.HTTPStatusError(
-                f"OpenRouter API Error Status {status}: {err_detail or log_msg}",
+                f"OpenRouter API Error Status {status}: {err_detail}",
                 request=resp.request,
                 response=resp
             )

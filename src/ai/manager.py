@@ -49,6 +49,15 @@ class AIProviderManager:
         self._key_cooldowns[(provider_name, key_idx)] = time.time() + self.key_cooldown_seconds
         logger.info(f"AI Key Cooldown: Provider '{provider_name}' key index {key_idx} placed on temporary cooldown for {self.key_cooldown_seconds}s")
 
+    async def close(self) -> None:
+        """Close HTTP clients across all managed providers."""
+        for provider in self.providers.values():
+            if hasattr(provider, "close") and callable(provider.close):
+                try:
+                    await provider.close()
+                except Exception as ce:
+                    logger.warning(f"Error closing provider '{provider.name}': {ce}")
+
     async def chat(
         self,
         messages: List[Dict[str, str]],
