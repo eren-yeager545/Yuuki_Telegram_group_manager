@@ -23,6 +23,26 @@ from admin import *
 from common import ai_cmd
 from handlers.ai_chat import handle_ai_chat, should_trigger_yuki
 
+import tornado.web
+from telegram.ext._utils.webhookhandler import WebhookAppClass
+
+
+class HealthCheckHandler(tornado.web.RequestHandler):
+    def get(self):
+        self.set_header('Content-Type', 'application/json')
+        self.write({'service': 'telegram-bot', 'status': 'ok'})
+
+
+_orig_webhook_app_init = WebhookAppClass.__init__
+
+
+def _patched_webhook_app_init(self, webhook_path, bot, update_queue, secret_token=None):
+    _orig_webhook_app_init(self, webhook_path, bot, update_queue, secret_token)
+    self.add_handlers(r'.*', [(r'/?$', HealthCheckHandler)])
+
+
+WebhookAppClass.__init__ = _patched_webhook_app_init
+
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 message_cache = defaultdict(lambda: deque())
