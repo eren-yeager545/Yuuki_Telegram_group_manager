@@ -965,7 +965,7 @@ def test_users_and_grouplist_cmds(monkeypatch, tmp_path):
 
     owner_id = 99999
     monkeypatch.setattr(admin, "OWNER_IDS", [owner_id])
-    monkeypatch.setattr(admin, "is_owner_or_sudo", lambda uid, **kw: uid == owner_id)
+    monkeypatch.setattr(admin, "is_owner", lambda uid, *a, **kw: uid == owner_id)
 
     # Insert sample users and group
     store.upsert_user(101, "Alice Wonderland", "alice")
@@ -1170,3 +1170,68 @@ def test_ban_and_unban_comprehensive(monkeypatch, tmp_path):
     asyncio.run(admin.unban_cmd(update, context))
     bot.unban_chat_member.assert_not_called()
     assert "free as a bird" in msg.reply_html.call_args[0][0]
+
+
+def test_mybot_and_owner_commands_non_owner_restrictions(monkeypatch):
+    import common
+    import admin
+    import bot as bot_module
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import User, Chat, Message, Update
+
+    owner_id = 99999
+    normal_id = 12345
+    import helpers
+    monkeypatch.setattr(helpers, "OWNER_IDS", [owner_id])
+    monkeypatch.setattr(common, "OWNER_IDS", [owner_id])
+    monkeypatch.setattr(admin, "OWNER_IDS", [owner_id])
+
+    bot = AsyncMock()
+    bot.restrict_chat_member = AsyncMock()
+    context = MagicMock()
+    context.bot = bot
+
+    normal_user = User(id=normal_id, first_name="Normal", is_bot=False)
+    group_chat = Chat(id=-1001, type="supergroup")
+    private_chat = Chat(id=normal_id, type="private")
+
+    # 1. Non-owner /mybot in group chat -> restrict member
+    group_msg = MagicMock(spec=Message)
+    group_msg.reply_text = AsyncMock()
+    group_up = MagicMock(spec=Update)
+    group_up.effective_user = normal_user
+    group_up.effective_chat = group_chat
+    group_up.effective_message = group_msg
+
+    asyncio.run(common.mybot_cmd(group_up, context))
+
+    bot.restrict_chat_member.assert_called_once()
+    assert bot.restrict_chat_member.call_args[0][0] == -1001
+    assert bot.restrict_chat_member.call_args[0][1] == normal_id
+    group_msg.reply_text.assert_called_once()
+    assert "restricted for attempting to use an owner command" in group_msg.reply_text.call_args[0][0]
+
+    # 2. Non-owner /mybot in DM -> deny without restriction API call
+    bot.restrict_chat_member.reset_mock()
+    dm_msg = MagicMock(spec=Message)
+    dm_msg.reply_text = AsyncMock()
+    dm_up = MagicMock(spec=Update)
+    dm_up.effective_user = normal_user
+    dm_up.effective_chat = private_chat
+    dm_up.effective_message = dm_msg
+
+    asyncio.run(common.mybot_cmd(dm_up, context))
+
+    bot.restrict_chat_member.assert_not_called()
+    dm_msg.reply_text.assert_called_once()
+    assert "strictly for my owner" in dm_msg.reply_text.call_args[0][0]
+
+    # 3. Non-owner broadcast command rejection
+    bcast_msg = MagicMock(spec=Message)
+    bcast_msg.reply_text = AsyncMock()
+    bcast_up = MagicMock(spec=Update)
+    bcast_up.effective_user = normal_user
+    bcast_up.message = bcast_msg
+
+    asyncio.run(common.broadcast_cmd(bcast_up, context))
+    assert "Only owner" in bcast_msg.reply_text.call_args[0][0] or "Owner" in bcast_msg.reply_text.call_args[0][0]

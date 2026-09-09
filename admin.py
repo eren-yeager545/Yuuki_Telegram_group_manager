@@ -15,7 +15,7 @@ from store import (
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
     get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed
 )
-from helpers import is_admin, is_owner_or_sudo, safe_reply_error
+from helpers import is_admin, is_owner, is_owner_or_sudo, safe_reply_error
 
 
 async def is_target_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -1091,7 +1091,7 @@ async def blacklists_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def newfed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner_or_sudo(update.effective_user.id if update.effective_user else 0):
+    if not is_owner(update.effective_user.id if update.effective_user else 0, OWNER_IDS):
         await update.message.reply_text('Trusted users only.')
         return
     if not context.args:
@@ -1215,7 +1215,7 @@ async def fedstat_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def addquiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS):
+    if not is_owner(user.id, OWNER_IDS):
         await update.message.reply_text('Only my owner or sudo users can add quizzes.')
         return
     payload = (update.message.text or '').partition(' ')[2].strip()
@@ -1236,7 +1236,7 @@ async def addquiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def showquiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS):
+    if not is_owner(user.id, OWNER_IDS):
         await update.message.reply_text('Only my owner or sudo users can see saved quizzes.')
         return
     rows = list_quizzes()
@@ -1254,7 +1254,7 @@ async def showquiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def delquiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS):
+    if not is_owner(user.id, OWNER_IDS):
         await update.message.reply_text('Only my owner or sudo users can delete quizzes.')
         return
     if not context.args or not context.args[0].isdigit():
@@ -1706,7 +1706,7 @@ async def addpack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not is_owner_or_sudo(user.id):
+    if not user or not is_owner(user.id, OWNER_IDS):
         await update.message.reply_text('🌸 Only my owner or sudo users can view the user list desu~!')
         return
 
@@ -1733,7 +1733,7 @@ async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def grouplist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not is_owner_or_sudo(user.id):
+    if not user or not is_owner(user.id, OWNER_IDS):
         await update.message.reply_text('🌸 Only my owner or sudo users can view the group list desu~!')
         return
 
