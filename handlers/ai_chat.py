@@ -34,6 +34,23 @@ provider_manager = AIProviderManager(
 )
 
 
+async def send_owner_ai_alert(message_text: str, context: Optional[ContextTypes.DEFAULT_TYPE] = None):
+    """
+    Sends sanitized AI health notification alerts to the configured bot owner(s).
+    """
+    owner_ids = getattr(config, 'OWNER_IDS', [])
+    if not owner_ids and getattr(config, 'OWNER_ID', None):
+        owner_ids = [config.OWNER_ID]
+
+    if context and hasattr(context, "bot") and context.bot:
+        for oid in owner_ids:
+            if oid:
+                try:
+                    await context.bot.send_message(chat_id=oid, text=message_text, disable_web_page_preview=True)
+                except Exception as e:
+                    logger.warning("Failed sending owner AI notification to %s: %s", oid, type(e).__name__)
+
+
 def should_trigger_yuki(update: Update, bot_username: Optional[str] = None, bot_id: Optional[int] = None) -> Tuple[bool, str]:
     """
     Determines if Yuki should respond to the incoming message.
@@ -141,6 +158,9 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
     if not msg or not chat or not user:
         return
 
+    # Wire owner alert callback with current context
+    provider_manager.set_owner_notifier(lambda text: send_owner_ai_alert(text, context))
+
     bot_username = getattr(context.bot, "username", None)
     bot_id = getattr(context.bot, "id", None)
 
@@ -195,12 +215,15 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
             timeout=config.AI_REQUEST_TIMEOUT
         )
 
-        # Format/shorten response if casual chatting
-        is_detailed_req = any(kw in prompt.lower() for kw in ["explain in detail", "detailed explanation", "essay", "full guide", "step by step"])
-        final_text = ai_resp.text if is_detailed_req else format_short_response(ai_resp.text, max_words=50)
+        if ai_resp.provider == "fallback":
+            final_text = "🤖 AI is temporarily unavailable. Please try again later."
+        else:
+            # Format/shorten response if casual chatting
+            is_detailed_req = any(kw in prompt.lower() for kw in ["explain in detail", "detailed explanation", "essay", "full guide", "step by step"])
+            final_text = ai_resp.text if is_detailed_req else format_short_response(ai_resp.text, max_words=50)
 
-        if not final_text:
-            final_text = FALLBACK_YUKI_RESPONSE
+            if not final_text:
+                final_text = FALLBACK_YUKI_RESPONSE
 
         context_manager.add_message(chat.id, role="assistant", content=final_text)
 

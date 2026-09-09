@@ -328,19 +328,25 @@ async def mybot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger_status = get_setting(0, 'logger_status', 'on').upper()
     logger_chan = get_global_link('logger_channel_id', '') or get_global_link('logger_link', '') or 'None'
 
-    text = (
-        "🤖 <b>My Bot Status & Control Panel</b> 🌸\n\n"
-        f"• <b>Bot Name:</b> {getattr(context.bot, 'first_name', 'Yuki')} desu~ 💕\n"
-        f"• <b>Logger Status:</b> {logger_status}\n"
-        f"• <b>Logger Channel/Group:</b> <code>{logger_chan}</code>\n"
-    )
+    text_parts = [
+        "🤖 <b>My Bot Status & Control Panel</b> 🌸\n",
+        f"• <b>Bot Name:</b> {getattr(context.bot, 'first_name', 'Yuki')} desu~ 💕",
+        f"• <b>Logger Status:</b> {logger_status}",
+        f"• <b>Logger Channel/Group:</b> <code>{logger_chan}</code>"
+    ]
 
     if is_owner:
-        text += "\n<i>Use the buttons below to manage logger settings desu~ ✨</i>"
+        from handlers.ai_chat import provider_manager
+        from src.ai.sanitizer import sanitize_text
+        ai_summary = provider_manager.get_health_summary()
+        text_parts.append("\n" + ai_summary)
+        text_parts.append("\n<i>Use the buttons below to manage logger settings desu~ ✨</i>")
+        text = sanitize_text("\n".join(text_parts))
         await msg.reply_text(text, parse_mode='HTML', reply_markup=build_mybot_keyboard())
     else:
+        from src.ai.sanitizer import sanitize_text
+        text = sanitize_text("\n".join(text_parts))
         await msg.reply_text(text, parse_mode='HTML')
-
 
 async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from handlers.ai_chat import handle_ai_chat
