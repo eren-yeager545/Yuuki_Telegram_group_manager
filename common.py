@@ -1,12 +1,12 @@
 import time
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import ContextTypes
 from config import OWNER_IDS, SUDO_USERS, SUPPORT_GROUP_URL, UPDATE_CHANNEL_URL
 from store import (
     get_global_link, set_global_link, get_active_group_count, get_user_count,
     is_mongo, conn, get_setting
 )
-from helpers import is_owner_or_sudo
+from helpers import is_owner, is_owner_or_sudo
 
 BOT_START_TIME = time.time()
 
@@ -187,7 +187,7 @@ async def privacy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS):
+    if not user or not is_owner(user.id, OWNER_IDS):
         await update.message.reply_text('Only owner or sudo can use broadcast.')
         return
 
@@ -216,7 +216,7 @@ def _valid_public_link(value: str) -> bool:
 
 async def addsupport_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS):
+    if not user or not is_owner(user.id, OWNER_IDS):
         await update.message.reply_text('Owner only command.')
         return
     link = update.message.text.partition(' ')[2].strip()
@@ -229,7 +229,7 @@ async def addsupport_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def addchannel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS):
+    if not user or not is_owner(user.id, OWNER_IDS):
         await update.message.reply_text('Owner only command.')
         return
     link = update.message.text.partition(' ')[2].strip()
@@ -242,7 +242,7 @@ async def addchannel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def addlogger_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS):
+    if not user or not is_owner(user.id, OWNER_IDS):
         await update.message.reply_text('Owner only command.')
         return
     arg = update.message.text.partition(' ')[2].strip()
@@ -321,10 +321,21 @@ def build_mybot_keyboard():
 async def mybot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     msg = update.effective_message
+    chat = update.effective_chat
     if not user or not msg:
         return
 
-    is_owner = is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS)
+    if not is_owner(user.id, OWNER_IDS):
+        if chat and chat.type in ('group', 'supergroup'):
+            try:
+                await context.bot.restrict_chat_member(chat.id, user.id, permissions=ChatPermissions(can_send_messages=False))
+                await msg.reply_text("Gomen ne~ 🌸 /mybot is an owner-only command! You have been restricted for attempting to use an owner command desu~ (⁠◕⁠‿⁠◕⁠✿⁠)")
+            except Exception:
+                await msg.reply_text("Gomen ne~ 🌸 /mybot is strictly for my owner desu! (⁠◕⁠‿⁠◕⁠✿⁠)")
+        else:
+            await msg.reply_text("Gomen ne~ 🌸 /mybot is strictly for my owner desu! (⁠◕⁠‿⁠◕⁠✿⁠)")
+        return
+
     logger_status = get_setting(0, 'logger_status', 'on').upper()
     logger_chan = get_global_link('logger_channel_id', '') or get_global_link('logger_link', '') or 'None'
 
@@ -335,18 +346,13 @@ async def mybot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• <b>Logger Channel/Group:</b> <code>{logger_chan}</code>"
     ]
 
-    if is_owner:
-        from handlers.ai_chat import provider_manager
-        from src.ai.sanitizer import sanitize_text
-        ai_summary = provider_manager.get_health_summary()
-        text_parts.append("\n" + ai_summary)
-        text_parts.append("\n<i>Use the buttons below to manage logger settings desu~ ✨</i>")
-        text = sanitize_text("\n".join(text_parts))
-        await msg.reply_text(text, parse_mode='HTML', reply_markup=build_mybot_keyboard())
-    else:
-        from src.ai.sanitizer import sanitize_text
-        text = sanitize_text("\n".join(text_parts))
-        await msg.reply_text(text, parse_mode='HTML')
+    from handlers.ai_chat import provider_manager
+    from src.ai.sanitizer import sanitize_text
+    ai_summary = provider_manager.get_health_summary()
+    text_parts.append("\n" + ai_summary)
+    text_parts.append("\n<i>Use the buttons below to manage logger settings desu~ ✨</i>")
+    text = sanitize_text("\n".join(text_parts))
+    await msg.reply_text(text, parse_mode='HTML', reply_markup=build_mybot_keyboard())
 
 async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from handlers.ai_chat import handle_ai_chat

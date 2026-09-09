@@ -1,3 +1,4 @@
+from helpers import is_owner, is_owner_or_sudo
 import asyncio
 import logging
 import random
@@ -86,7 +87,7 @@ async def homepage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data or ''
     if data.startswith('mybot:'):
         user = update.effective_user
-        if not user or not is_owner_or_sudo(user.id):
+        if not user or not is_owner(user.id, OWNER_IDS):
             await query.answer('Owner only action desu~', show_alert=True)
             return
         if data == 'mybot:toggle_logger':
@@ -137,7 +138,7 @@ async def homepage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def datadel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_user or not is_owner_or_sudo(update.effective_user.id):
+    if not update.effective_user or not is_owner(update.effective_user.id, OWNER_IDS):
         await update.message.reply_text('Owner only command.')
         return
     if not context.args:
