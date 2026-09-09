@@ -1,7 +1,7 @@
 import logging
 import time
 from typing import List, Dict, Tuple, Optional
-from .providers.base import AIResponse
+from .providers.base import AIResponse, AIProviderError, ProviderErrorCode
 from .providers.gemini import GeminiProvider
 from .providers.groq import GroqProvider
 from .providers.openrouter import OpenRouterProvider
@@ -14,7 +14,7 @@ FALLBACK_YUKI_RESPONSE = "U-umâ€¦ my brain connection is taking a little breakâ€
 class AIProviderManager:
     """
     Manages multiple AI providers and API keys with rotation, health cooldowns,
-    failover, and secure operational logging.
+    intelligent error handling, fast failover, and secure operational logging.
     """
 
     def __init__(
@@ -28,7 +28,7 @@ class AIProviderManager:
         openrouter_model: Optional[str] = None
     ):
         self.provider_order = provider_order
-        self.key_cooldown_seconds = key_cooldown_seconds
+        self.default_cooldown_seconds = key_cooldown_seconds
         self.providers = {}
 
         if gemini_keys:
@@ -45,9 +45,24 @@ class AIProviderManager:
         cooldown_until = self._key_cooldowns.get((provider_name, key_idx), 0.0)
         return time.time() >= cooldown_until
 
-    def _mark_key_cooldown(self, provider_name: str, key_idx: int) -> None:
-        self._key_cooldowns[(provider_name, key_idx)] = time.time() + self.key_cooldown_seconds
-        logger.info(f"AI Key Cooldown: Provider '{provider_name}' key index {key_idx} placed on temporary cooldown for {self.key_cooldown_seconds}s")
+    def _mark_key_cooldown(self, provider_name: str, key_idx: int, cooldown_seconds: Optional[float] = None) -> None:
+        duration = cooldown_seconds if cooldown_seconds is not None else self.default_cooldown_seconds
+        if duration <= 0.0:
+            return
+        self._key_cooldowns[(provider_name, key_idx)] = time.time() + duration
+        logger.info(
+            f"AI Key Cooldown: Provider '{provider_name}' key index {key_idx} placed on temporary cooldown for {round(duration, 1)}s"
+        )
+
+    def _redact_all_keys(self, text: str) -> str:
+        if not text:
+            return text
+        redacted = text
+        for provider in self.providers.values():
+            for k in provider.api_keys:
+                if k and k in redacted:
+                    redacted = redacted.replace(k, "[REDACTED]")
+        return redacted
 
     async def close(self) -> None:
         """Close HTTP clients across all managed providers."""
@@ -97,14 +112,22 @@ class AIProviderManager:
                     logger.info(f"AI Response Completed: Provider '{provider_name}' succeeded in {duration}s")
                     return response
 
+                except AIProviderError as pe:
+                    err_msg = self._redact_all_keys(str(pe))
+                    logger.warning(
+                        f"Provider Failure: Provider '{provider_name}' (key index {key_idx}) failed "
+                        f"[{pe.error_code.value if pe.error_code else 'unknown'}]: {err_msg}"
+                    )
+                    cooldown = pe.suggested_cooldown
+                    if pe.retry_after and pe.retry_after > 0:
+                        cooldown = pe.retry_after
+                    self._mark_key_cooldown(provider_name, key_idx, cooldown)
+                    logger.info("Provider Fallback: Rotating to next available key/provider")
+
                 except Exception as e:
-                    err_msg = str(e)
-                    for p in self.providers.values():
-                        for k in p.api_keys:
-                            if k and k in err_msg:
-                                err_msg = err_msg.replace(k, "[REDACTED]")
+                    err_msg = self._redact_all_keys(str(e))
                     logger.warning(f"Provider Failure: Provider '{provider_name}' (key index {key_idx}) failed: {type(e).__name__}: {err_msg}")
-                    self._mark_key_cooldown(provider_name, key_idx)
+                    self._mark_key_cooldown(provider_name, key_idx, self.default_cooldown_seconds)
                     logger.info("Provider Fallback: Rotating to next available key/provider")
 
         duration = round(time.time() - start_time, 3)
