@@ -735,6 +735,7 @@ async def test_unban_cmd_enhanced():
         mock_is_admin.return_value = True
         mock_target.return_value = target_user
         ctx.bot.unban_chat_member = AsyncMock()
+        ctx.bot.get_chat_member = AsyncMock(return_value=MagicMock(status='kicked'))
 
         await unban_cmd(upd, ctx)
         ctx.bot.unban_chat_member.assert_called_with(-1001, 888, only_if_banned=True)
