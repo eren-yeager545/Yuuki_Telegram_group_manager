@@ -3,7 +3,18 @@ import logging
 import os
 import httpx
 from typing import List, Dict, Optional, Any
-from .base import AIProvider, AIResponse, AIProviderError, ProviderErrorCode
+from .base import (
+    AIProvider,
+    AIResponse,
+    AIProviderError,
+    ProviderErrorCode,
+    DEFAULT_QUOTA_COOLDOWN,
+    DEFAULT_RATE_LIMIT_COOLDOWN,
+    DEFAULT_AUTH_ERROR_COOLDOWN,
+    DEFAULT_SERVER_ERROR_COOLDOWN,
+    DEFAULT_MODEL_UNAVAILABLE_COOLDOWN,
+    DEFAULT_TIMEOUT_COOLDOWN,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +24,44 @@ def _redact_secrets(text: str, secret: str) -> str:
     if not secret or not text:
         return text
     return text.replace(secret, "[REDACTED]")
+
+
+def _classify_openrouter_error(status: int, err_message: str, is_upstream: bool) -> tuple[ProviderErrorCode, float]:
+    """Classifies OpenRouter API and upstream provider errors."""
+    msg_lower = err_message.lower()
+
+    quota_keywords = [
+        "quota exceeded",
+        "resource_exhausted",
+        "out of credits",
+        "insufficient_quota",
+        "free_tier",
+        "daily limit"
+    ]
+    if any(kw in msg_lower for kw in quota_keywords):
+        return ProviderErrorCode.QUOTA_EXCEEDED, DEFAULT_QUOTA_COOLDOWN
+
+    if "model" in msg_lower and ("not found" in msg_lower or "unavailable" in msg_lower or "disabled" in msg_lower or "unknown" in msg_lower):
+        return ProviderErrorCode.MODEL_UNAVAILABLE, DEFAULT_MODEL_UNAVAILABLE_COOLDOWN
+
+    if status == 429:
+        if is_upstream:
+            return ProviderErrorCode.RATE_LIMIT, DEFAULT_RATE_LIMIT_COOLDOWN
+        return ProviderErrorCode.RATE_LIMIT, DEFAULT_RATE_LIMIT_COOLDOWN
+
+    if status == 400:
+        return ProviderErrorCode.INVALID_REQUEST, 0.0
+
+    if status in (401, 403):
+        return ProviderErrorCode.AUTHENTICATION_ERROR, DEFAULT_AUTH_ERROR_COOLDOWN
+
+    if status == 404:
+        return ProviderErrorCode.MODEL_UNAVAILABLE, DEFAULT_MODEL_UNAVAILABLE_COOLDOWN
+
+    if status in (500, 502, 503, 504):
+        return ProviderErrorCode.SERVER_ERROR, DEFAULT_SERVER_ERROR_COOLDOWN
+
+    return ProviderErrorCode.UNKNOWN, 60.0
 
 
 class OpenRouterProvider(AIProvider):
@@ -62,7 +111,7 @@ class OpenRouterProvider(AIProvider):
         if not formatted_messages or (len(formatted_messages) == 1 and formatted_messages[0].get("role") == "system"):
             raise AIProviderError(
                 message="OpenRouter request requires at least one non-empty message",
-                error_code=ProviderErrorCode.BAD_REQUEST,
+                error_code=ProviderErrorCode.INVALID_REQUEST,
                 suggested_cooldown=0.0
             )
 
@@ -101,60 +150,29 @@ class OpenRouterProvider(AIProvider):
                 resp = await client.post(url, headers=headers, json=payload, timeout=http_timeout)
             except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException) as te:
                 err_msg = f"OpenRouter API timeout for model '{self.model}': {type(te).__name__}"
-                logger.warning(err_msg)
+                logger.warning(_redact_secrets(err_msg, api_key))
                 raise AIProviderError(
                     message=err_msg,
                     error_code=ProviderErrorCode.TIMEOUT,
-                    suggested_cooldown=30.0,
+                    suggested_cooldown=DEFAULT_TIMEOUT_COOLDOWN,
                     raw_error=te
                 ) from te
             except httpx.RequestError as re:
                 err_msg = f"OpenRouter API network error for model '{self.model}': {type(re).__name__}"
-                logger.warning(err_msg)
+                logger.warning(_redact_secrets(err_msg, api_key))
                 raise AIProviderError(
                     message=err_msg,
                     error_code=ProviderErrorCode.NETWORK_ERROR,
-                    suggested_cooldown=30.0,
+                    suggested_cooldown=DEFAULT_TIMEOUT_COOLDOWN,
                     raw_error=re
                 ) from re
 
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                except Exception as je:
-                    logger.warning(f"OpenRouter API returned invalid JSON response for model '{self.model}'")
-                    raise AIProviderError(
-                        message=f"OpenRouter response is not valid JSON: {je}",
-                        error_code=ProviderErrorCode.SERVER_ERROR,
-                        suggested_cooldown=30.0
-                    ) from je
-
-                if isinstance(data, dict):
-                    choices = data.get("choices", [])
-                    if choices and isinstance(choices, list) and isinstance(choices[0], dict):
-                        choice = choices[0]
-                        message_obj = choice.get("message")
-                        if isinstance(message_obj, dict):
-                            content_text = (message_obj.get("content") or "").strip()
-                            if content_text:
-                                usage = data.get("usage")
-                                return AIResponse(
-                                    text=content_text,
-                                    provider=self.name,
-                                    model=self.model,
-                                    usage=usage
-                                )
-                raise AIProviderError(
-                    message="OpenRouter returned invalid or empty content response structure",
-                    error_code=ProviderErrorCode.SERVER_ERROR,
-                    suggested_cooldown=30.0
-                )
-
             # Extract headers safely
-            retry_after_hdr = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
-            request_id = resp.headers.get("x-request-id") or resp.headers.get("X-Request-ID")
+            resp_headers = getattr(resp, "headers", None) or {}
+            retry_after_hdr = resp_headers.get("retry-after") or resp_headers.get("Retry-After")
+            request_id = resp_headers.get("x-request-id") or resp_headers.get("X-Request-ID")
             ratelimit_headers = {
-                k: v for k, v in resp.headers.items()
+                k: v for k, v in resp_headers.items()
                 if k.lower().startswith("x-ratelimit-")
             }
 
@@ -174,7 +192,92 @@ class OpenRouterProvider(AIProvider):
                 await asyncio.sleep(retry_after_sec)
                 continue
 
-            # Parse full error response
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                except Exception as je:
+                    raw_text = getattr(resp, "text", "") or ""
+                    preview = _redact_secrets(raw_text[:200], api_key)
+                    logger.warning(
+                        f"OpenRouter empty/invalid response: status={resp.status_code} upstream=none response_preview={preview}"
+                    )
+                    raise AIProviderError(
+                        message=f"OpenRouter response is not valid JSON: {je}",
+                        error_code=ProviderErrorCode.SERVER_ERROR,
+                        suggested_cooldown=DEFAULT_SERVER_ERROR_COOLDOWN
+                    ) from je
+
+                if isinstance(data, dict):
+                    # Check if status 200 payload contains an error object instead of choices
+                    if "error" in data and data["error"]:
+                        err_obj = data["error"]
+                        err_msg = ""
+                        err_code_val = None
+                        provider_name = None
+
+                        if isinstance(err_obj, dict):
+                            err_msg = err_obj.get("message", "") or str(err_obj)
+                            err_code_val = err_obj.get("code")
+                            meta = err_obj.get("metadata", {})
+                            if isinstance(meta, dict):
+                                provider_name = meta.get("provider_name")
+                        elif isinstance(err_obj, str):
+                            err_msg = err_obj
+                        else:
+                            err_msg = str(err_obj)
+
+                        err_msg = _redact_secrets(err_msg, api_key)
+                        status_for_class = int(err_code_val) if isinstance(err_code_val, int) and err_code_val >= 400 else 400
+                        is_upstream = bool(provider_name or "provider" in err_msg.lower())
+                        code, cooldown = _classify_openrouter_error(status_for_class, err_msg, is_upstream)
+
+                        logger.warning(
+                            f"OpenRouter JSON Error in 200 Response: provider={provider_name} code={code.value} msg={err_msg}"
+                        )
+
+                        raise AIProviderError(
+                            message=f"OpenRouter Provider Error: {err_msg}",
+                            status_code=status_for_class,
+                            error_code=code,
+                            suggested_cooldown=cooldown,
+                            is_upstream_error=is_upstream,
+                            upstream_provider=provider_name,
+                            raw_error=data
+                        )
+
+                    # Inspect choices safely
+                    choices = data.get("choices")
+                    if isinstance(choices, list) and len(choices) > 0:
+                        first_choice = choices[0]
+                        if isinstance(first_choice, dict):
+                            message_obj = first_choice.get("message")
+                            if isinstance(message_obj, dict):
+                                content_val = message_obj.get("content")
+                                if content_val is not None:
+                                    content_text = str(content_val).strip()
+                                    if content_text:
+                                        usage = data.get("usage")
+                                        return AIResponse(
+                                            text=content_text,
+                                            provider=self.name,
+                                            model=self.model,
+                                            usage=usage
+                                        )
+
+                raw_text = getattr(resp, "text", "") or ""
+                preview = _redact_secrets(raw_text[:200], api_key)
+                logger.warning(
+                    f"OpenRouter empty/invalid response: status={resp.status_code} upstream=none response_preview={preview}"
+                )
+                raise AIProviderError(
+                    message="OpenRouter returned invalid or empty content response structure",
+                    status_code=200,
+                    error_code=ProviderErrorCode.EMPTY_RESPONSE,
+                    suggested_cooldown=DEFAULT_SERVER_ERROR_COOLDOWN,
+                    raw_error=data if 'data' in locals() and isinstance(data, dict) else None
+                )
+
+            # Parse full non-200 error response
             err_json: Dict[str, Any] = {}
             err_message = ""
             err_code = None
@@ -199,13 +302,11 @@ class OpenRouterProvider(AIProvider):
                     else:
                         err_message = str(parsed_body)
             except Exception:
-                err_message = resp.text[:200]
+                raw_text = getattr(resp, "text", "") or ""
+                err_message = raw_text[:200]
 
             status = resp.status_code
-            is_upstream_429 = False
-            if status == 429:
-                if provider_name or raw_err or "provider" in err_message.lower():
-                    is_upstream_429 = True
+            is_upstream_err = bool(provider_name or raw_err or "provider" in err_message.lower())
 
             detail_components = []
             if err_message:
@@ -224,42 +325,12 @@ class OpenRouterProvider(AIProvider):
             err_detail = " | ".join(detail_components) if detail_components else f"Status {status}"
             err_detail = _redact_secrets(err_detail, api_key)
 
-            if status == 400:
-                code = ProviderErrorCode.BAD_REQUEST
-                cooldown = 0.0
-                log_msg = f"OpenRouter API 400 Bad Request (model='{self.model}'): {err_detail}"
-            elif status in (401, 403):
-                code = ProviderErrorCode.AUTH_ERROR
-                cooldown = 3600.0
-                log_msg = f"OpenRouter API {status} Authentication Error: {err_detail}"
-            elif status == 404:
-                code = ProviderErrorCode.NOT_FOUND
-                cooldown = 3600.0
-                log_msg = f"OpenRouter API 404 Model/Endpoint Not Found (model='{self.model}'): {err_detail}"
-            elif status == 429:
-                code = ProviderErrorCode.RATE_LIMIT
-                cooldown = 120.0
-                if is_upstream_429:
-                    log_msg = (
-                        f"OpenRouter API 429 Rate Limit Exceeded (Upstream Provider Error for model='{self.model}'): "
-                        f"{err_detail} | full_json={err_json}"
-                    )
-                else:
-                    log_msg = (
-                        f"OpenRouter API 429 Rate Limit Exceeded (Account/Key Limit for model='{self.model}'): "
-                        f"{err_detail} | full_json={err_json}"
-                    )
-            elif status in (500, 502, 503, 504):
-                code = ProviderErrorCode.SERVER_ERROR
-                cooldown = 30.0
-                log_msg = f"OpenRouter API {status} Temporary Server Error: {err_detail}"
-            else:
-                code = ProviderErrorCode.UNKNOWN
-                cooldown = 60.0
-                log_msg = f"OpenRouter API {status} Error: {err_detail}"
+            code, cooldown = _classify_openrouter_error(status, err_message or err_detail, is_upstream_err)
 
-            log_msg = _redact_secrets(log_msg, api_key)
-            logger.warning(log_msg)
+            log_msg = (
+                f"OpenRouter API Error Status {status} ({code.value}, model='{self.model}'): {err_detail}"
+            )
+            logger.warning(_redact_secrets(log_msg, api_key))
 
             raise AIProviderError(
                 message=f"OpenRouter API Error Status {status}: {err_detail}",
@@ -267,7 +338,7 @@ class OpenRouterProvider(AIProvider):
                 error_code=code,
                 suggested_cooldown=cooldown,
                 retry_after=retry_after_sec,
-                is_upstream_error=is_upstream_429,
+                is_upstream_error=is_upstream_err,
                 upstream_provider=provider_name,
                 raw_error=err_json
             )
