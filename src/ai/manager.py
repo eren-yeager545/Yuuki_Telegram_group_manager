@@ -95,6 +95,8 @@ class AIProviderManager:
             if not provider or not provider.api_keys:
                 continue
 
+            model_name = getattr(provider, "model", "unknown")
+
             for key_idx, api_key in enumerate(provider.api_keys):
                 if not self._is_key_healthy(provider_name, key_idx):
                     continue
@@ -114,9 +116,9 @@ class AIProviderManager:
 
                 except AIProviderError as pe:
                     err_msg = self._redact_all_keys(str(pe))
+                    err_type = pe.error_code.value if pe.error_code else "unknown"
                     logger.warning(
-                        f"Provider Failure: Provider '{provider_name}' (key index {key_idx}) failed "
-                        f"[{pe.error_code.value if pe.error_code else 'unknown'}]: {err_msg}"
+                        f"Provider Failure: provider={provider_name} key_index={key_idx} model={model_name} type={err_type}: {err_msg}"
                     )
                     cooldown = pe.suggested_cooldown
                     if pe.retry_after and pe.retry_after > 0:
@@ -126,7 +128,9 @@ class AIProviderManager:
 
                 except Exception as e:
                     err_msg = self._redact_all_keys(str(e))
-                    logger.warning(f"Provider Failure: Provider '{provider_name}' (key index {key_idx}) failed: {type(e).__name__}: {err_msg}")
+                    logger.warning(
+                        f"Provider Failure: provider={provider_name} key_index={key_idx} model={model_name} type=server_error: {type(e).__name__}: {err_msg}"
+                    )
                     self._mark_key_cooldown(provider_name, key_idx, self.default_cooldown_seconds)
                     logger.info("Provider Fallback: Rotating to next available key/provider")
 

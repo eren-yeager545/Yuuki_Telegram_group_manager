@@ -1,7 +1,18 @@
 import logging
 import httpx
 from typing import List, Dict, Optional, Any
-from .base import AIProvider, AIResponse, AIProviderError, ProviderErrorCode
+from .base import (
+    AIProvider,
+    AIResponse,
+    AIProviderError,
+    ProviderErrorCode,
+    DEFAULT_QUOTA_COOLDOWN,
+    DEFAULT_RATE_LIMIT_COOLDOWN,
+    DEFAULT_AUTH_ERROR_COOLDOWN,
+    DEFAULT_SERVER_ERROR_COOLDOWN,
+    DEFAULT_MODEL_UNAVAILABLE_COOLDOWN,
+    DEFAULT_TIMEOUT_COOLDOWN,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -10,6 +21,30 @@ def _redact_key(text: str, secret: str) -> str:
     if not secret or not text:
         return text
     return text.replace(secret, "[REDACTED]")
+
+
+def _classify_groq_error(status: int, err_detail: str) -> tuple[ProviderErrorCode, float]:
+    detail_lower = err_detail.lower()
+
+    if "quota" in detail_lower or "resource_exhausted" in detail_lower or "rate limit" in detail_lower and "daily" in detail_lower:
+        return ProviderErrorCode.QUOTA_EXCEEDED, DEFAULT_QUOTA_COOLDOWN
+
+    if status == 429:
+        return ProviderErrorCode.RATE_LIMIT, DEFAULT_RATE_LIMIT_COOLDOWN
+
+    if status == 400:
+        return ProviderErrorCode.INVALID_REQUEST, 0.0
+
+    if status in (401, 403):
+        return ProviderErrorCode.AUTHENTICATION_ERROR, DEFAULT_AUTH_ERROR_COOLDOWN
+
+    if status == 404:
+        return ProviderErrorCode.MODEL_UNAVAILABLE, DEFAULT_MODEL_UNAVAILABLE_COOLDOWN
+
+    if status >= 500:
+        return ProviderErrorCode.SERVER_ERROR, DEFAULT_SERVER_ERROR_COOLDOWN
+
+    return ProviderErrorCode.UNKNOWN, 60.0
 
 
 class GroqProvider(AIProvider):
@@ -46,7 +81,7 @@ class GroqProvider(AIProvider):
         if not formatted_messages or (len(formatted_messages) == 1 and formatted_messages[0].get("role") == "system"):
             raise AIProviderError(
                 message="Groq request requires at least one non-empty message",
-                error_code=ProviderErrorCode.BAD_REQUEST,
+                error_code=ProviderErrorCode.INVALID_REQUEST,
                 suggested_cooldown=0.0
             )
 
@@ -75,20 +110,20 @@ class GroqProvider(AIProvider):
                 resp = await client.post(url, json=payload, headers=headers)
             except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException) as te:
                 err_msg = f"Groq API timeout for model '{self.model}': {type(te).__name__}"
-                logger.warning(err_msg)
+                logger.warning(_redact_key(err_msg, api_key))
                 raise AIProviderError(
                     message=err_msg,
                     error_code=ProviderErrorCode.TIMEOUT,
-                    suggested_cooldown=30.0,
+                    suggested_cooldown=DEFAULT_TIMEOUT_COOLDOWN,
                     raw_error=te
                 ) from te
             except httpx.RequestError as re:
                 err_msg = f"Groq API network error for model '{self.model}': {type(re).__name__}"
-                logger.warning(err_msg)
+                logger.warning(_redact_key(err_msg, api_key))
                 raise AIProviderError(
                     message=err_msg,
                     error_code=ProviderErrorCode.NETWORK_ERROR,
-                    suggested_cooldown=30.0,
+                    suggested_cooldown=DEFAULT_TIMEOUT_COOLDOWN,
                     raw_error=re
                 ) from re
 
@@ -99,51 +134,37 @@ class GroqProvider(AIProvider):
                     raise AIProviderError(
                         message=f"Groq response is not valid JSON: {je}",
                         error_code=ProviderErrorCode.SERVER_ERROR,
-                        suggested_cooldown=30.0
+                        suggested_cooldown=DEFAULT_SERVER_ERROR_COOLDOWN
                     ) from je
 
-                choices = data.get("choices", [])
-                if choices and isinstance(choices, list) and isinstance(choices[0], dict) and "message" in choices[0]:
-                    text = choices[0]["message"].get("content", "").strip()
-                    if text:
-                        usage = data.get("usage")
-                        return AIResponse(text=text, provider=self.name, model=self.model, usage=usage)
+                if isinstance(data, dict):
+                    choices = data.get("choices")
+                    if isinstance(choices, list) and len(choices) > 0:
+                        first_choice = choices[0]
+                        if isinstance(first_choice, dict):
+                            message_obj = first_choice.get("message")
+                            if isinstance(message_obj, dict):
+                                content_val = message_obj.get("content")
+                                if content_val is not None:
+                                    text = str(content_val).strip()
+                                    if text:
+                                        usage = data.get("usage")
+                                        return AIResponse(text=text, provider=self.name, model=self.model, usage=usage)
+
                 raise AIProviderError(
                     message="Groq returned invalid or empty content response structure",
-                    error_code=ProviderErrorCode.SERVER_ERROR,
-                    suggested_cooldown=30.0
+                    error_code=ProviderErrorCode.EMPTY_RESPONSE,
+                    suggested_cooldown=DEFAULT_SERVER_ERROR_COOLDOWN
                 )
 
-            err_body = resp.text[:200]
+            err_body = getattr(resp, "text", "") or ""
+            err_body = err_body[:200]
             err_body = _redact_key(err_body, api_key)
             status = resp.status_code
 
-            if status == 400:
-                code = ProviderErrorCode.BAD_REQUEST
-                cooldown = 0.0
-                log_msg = f"Groq API 400 Bad Request (model='{self.model}'): {err_body}"
-            elif status in (401, 403):
-                code = ProviderErrorCode.AUTH_ERROR
-                cooldown = 3600.0
-                log_msg = f"Groq API {status} Authentication Error: {err_body}"
-            elif status == 404:
-                code = ProviderErrorCode.NOT_FOUND
-                cooldown = 3600.0
-                log_msg = f"Groq API 404 Model/Endpoint Not Found (model='{self.model}'): {err_body}"
-            elif status == 429:
-                code = ProviderErrorCode.RATE_LIMIT
-                cooldown = 120.0
-                log_msg = f"Groq API 429 Rate Limit Exceeded: {err_body}"
-            elif status >= 500:
-                code = ProviderErrorCode.SERVER_ERROR
-                cooldown = 30.0
-                log_msg = f"Groq API {status} Temporary Server Error: {err_body}"
-            else:
-                code = ProviderErrorCode.UNKNOWN
-                cooldown = 60.0
-                log_msg = f"Groq API {status} Error: {err_body}"
-
-            logger.warning(log_msg)
+            code, cooldown = _classify_groq_error(status, err_body)
+            log_msg = f"Groq API Error Status {status} ({code.value}, model='{self.model}'): {err_body}"
+            logger.warning(_redact_key(log_msg, api_key))
 
             raise AIProviderError(
                 message=f"Groq API Error Status {status}: {err_body}",

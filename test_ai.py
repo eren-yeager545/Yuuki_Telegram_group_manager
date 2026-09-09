@@ -7,7 +7,7 @@ import config
 from src.ai.context import ContextManager, format_short_response
 from src.ai.rate_limit import AIRateLimiter
 from src.ai.persona import YUKI_PERSONA
-from src.ai.providers.base import AIResponse, AIProviderError, ProviderErrorCode
+from src.ai.providers.base import AIResponse, AIProviderError, ProviderErrorCode, DEFAULT_QUOTA_COOLDOWN, DEFAULT_RATE_LIMIT_COOLDOWN
 from src.ai.providers.gemini import GeminiProvider
 from src.ai.providers.groq import GroqProvider
 from src.ai.providers.openrouter import OpenRouterProvider
@@ -740,3 +740,382 @@ async def test_unban_cmd_enhanced():
         await unban_cmd(upd, ctx)
         ctx.bot.unban_chat_member.assert_called_with(-1001, 888, only_if_banned=True)
         msg.reply_html.assert_called()
+
+
+# ==========================================
+# Comprehensive AI Provider Failover & Parsing Tests
+# ==========================================
+
+@pytest.mark.asyncio
+async def test_gemini_http_429_classification():
+    provider = GeminiProvider(api_keys=["gemini_key_1"], model="gemini-2.5-flash")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 429
+    mock_resp.json.return_value = {"error": {"message": "Rate limit exceeded. Please wait."}}
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("gemini_key_1", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.error_code == ProviderErrorCode.RATE_LIMIT
+        assert err.status_code == 429
+        assert err.suggested_cooldown == DEFAULT_RATE_LIMIT_COOLDOWN
+
+
+@pytest.mark.asyncio
+async def test_gemini_resource_exhausted_classification():
+    provider = GeminiProvider(api_keys=["gemini_key_1"], model="gemini-2.5-flash")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 429
+    mock_resp.json.return_value = {
+        "error": {
+            "code": 429,
+            "message": "RESOURCE_EXHAUSTED: Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests",
+            "status": "RESOURCE_EXHAUSTED"
+        }
+    }
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("gemini_key_1", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.error_code == ProviderErrorCode.QUOTA_EXCEEDED
+        assert err.status_code == 429
+        assert err.suggested_cooldown == DEFAULT_QUOTA_COOLDOWN
+
+
+@pytest.mark.asyncio
+async def test_gemini_free_tier_quota_exceeded():
+    provider = GeminiProvider(api_keys=["gemini_key_1"], model="gemini-2.5-flash")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 400
+    mock_resp.json.return_value = {
+        "error": {
+            "message": "Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash"
+        }
+    }
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("gemini_key_1", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.error_code == ProviderErrorCode.QUOTA_EXCEEDED
+
+
+@pytest.mark.asyncio
+async def test_openrouter_http_429():
+    provider = OpenRouterProvider(api_keys=["or_key_1"], model="openrouter/free")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 429
+    mock_resp.headers = {}
+    mock_resp.json.return_value = {"error": {"message": "Rate limit reached for account"}}
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("or_key_1", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.error_code == ProviderErrorCode.RATE_LIMIT
+        assert err.status_code == 429
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_upstream_provider_rate_limit():
+    provider = OpenRouterProvider(api_keys=["or_key_1"], model="openrouter/free")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 429
+    mock_resp.headers = {}
+    mock_resp.json.return_value = {
+        "error": {
+            "code": 429,
+            "message": "Provider returned error",
+            "metadata": {
+                "provider_name": "Together",
+                "raw": "Upstream rate limit exceeded"
+            }
+        }
+    }
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("or_key_1", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.is_upstream_error is True
+        assert err.upstream_provider == "Together"
+        assert err.error_code == ProviderErrorCode.RATE_LIMIT
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_model_unavailable():
+    provider = OpenRouterProvider(api_keys=["or_key_1"], model="invalid/model")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 404
+    mock_resp.headers = {}
+    mock_resp.json.return_value = {"error": {"message": "Model 'invalid/model' not found or disabled"}}
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("or_key_1", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.error_code == ProviderErrorCode.MODEL_UNAVAILABLE
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_json_error_response_in_200():
+    provider = OpenRouterProvider(api_keys=["or_key_1"], model="openrouter/free")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.json.return_value = {
+        "error": {
+            "message": "Provider returned error: rate limit",
+            "code": 429,
+            "metadata": {"provider_name": "Meta"}
+        }
+    }
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("or_key_1", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.error_code == ProviderErrorCode.RATE_LIMIT
+        assert err.is_upstream_error is True
+        assert err.upstream_provider == "Meta"
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_missing_choices():
+    provider = OpenRouterProvider(api_keys=["or_key_1"], model="openrouter/free")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.text = "{\"id\": \"gen-1\"}"
+    mock_resp.json.return_value = {"id": "gen-1"}
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("or_key_1", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.error_code == ProviderErrorCode.EMPTY_RESPONSE
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_empty_choices():
+    provider = OpenRouterProvider(api_keys=["or_key_1"], model="openrouter/free")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.text = "{\"choices\": []}"
+    mock_resp.json.return_value = {"choices": []}
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("or_key_1", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.error_code == ProviderErrorCode.EMPTY_RESPONSE
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_missing_message():
+    provider = OpenRouterProvider(api_keys=["or_key_1"], model="openrouter/free")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.text = "{\"choices\": [{}]}"
+    mock_resp.json.return_value = {"choices": [{}]}
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("or_key_1", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.error_code == ProviderErrorCode.EMPTY_RESPONSE
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_missing_content():
+    provider = OpenRouterProvider(api_keys=["or_key_1"], model="openrouter/free")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.text = "{\"choices\": [{\"message\": {}}]}"
+    mock_resp.json.return_value = {"choices": [{"message": {}}]}
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("or_key_1", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.error_code == ProviderErrorCode.EMPTY_RESPONSE
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_content_none():
+    provider = OpenRouterProvider(api_keys=["or_key_1"], model="openrouter/free")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.text = "{\"choices\": [{\"message\": {\"content\": null}}]}"
+    mock_resp.json.return_value = {"choices": [{"message": {"content": None}}]}
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("or_key_1", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.error_code == ProviderErrorCode.EMPTY_RESPONSE
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_empty_string_content():
+    provider = OpenRouterProvider(api_keys=["or_key_1"], model="openrouter/free")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.text = "{\"choices\": [{\"message\": {\"content\": \"   \"}}]}"
+    mock_resp.json.return_value = {"choices": [{"message": {"content": "   "}}]}
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("or_key_1", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.error_code == ProviderErrorCode.EMPTY_RESPONSE
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_valid_openrouter_response():
+    provider = OpenRouterProvider(api_keys=["or_key_1"], model="openrouter/free")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.json.return_value = {"choices": [{"message": {"content": "Hello world!"}}]}
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        res = await provider.generate_response_with_key("or_key_1", [{"role": "user", "content": "hi"}], "")
+        assert res.text == "Hello world!"
+        assert res.provider == "openrouter"
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_failover_gemini_quota_to_next_key_and_openrouter():
+    manager = AIProviderManager(
+        provider_order=["gemini", "openrouter"],
+        gemini_keys=["g_key1", "g_key2"],
+        groq_keys=[],
+        openrouter_keys=["or_key1"],
+        key_cooldown_seconds=10.0
+    )
+
+    # Both Gemini keys fail with Quota Exceeded, then OpenRouter succeeds
+    with patch.object(GeminiProvider, "generate_response_with_key", new_callable=AsyncMock) as mock_gemini, \
+         patch.object(OpenRouterProvider, "generate_response_with_key", new_callable=AsyncMock) as mock_openrouter:
+
+        mock_gemini.side_effect = [
+            AIProviderError("Quota exceeded on key 1", error_code=ProviderErrorCode.QUOTA_EXCEEDED),
+            AIProviderError("Quota exceeded on key 2", error_code=ProviderErrorCode.QUOTA_EXCEEDED),
+        ]
+        mock_openrouter.return_value = AIResponse(text="Success from OpenRouter!", provider="openrouter", model="openrouter/free")
+
+        resp = await manager.chat(messages=[{"role": "user", "content": "hello"}], system_prompt="")
+
+        assert resp.text == "Success from OpenRouter!"
+        assert resp.provider == "openrouter"
+        assert mock_gemini.call_count == 2
+        assert mock_openrouter.call_count == 1
+
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_failover_after_openrouter_failure():
+    manager = AIProviderManager(
+        provider_order=["openrouter", "groq"],
+        gemini_keys=[],
+        groq_keys=["groq_key1"],
+        openrouter_keys=["or_key1"],
+        key_cooldown_seconds=10.0
+    )
+
+    with patch.object(OpenRouterProvider, "generate_response_with_key", new_callable=AsyncMock) as mock_openrouter, \
+         patch.object(GroqProvider, "generate_response_with_key", new_callable=AsyncMock) as mock_groq:
+
+        mock_openrouter.side_effect = AIProviderError("Empty response", error_code=ProviderErrorCode.EMPTY_RESPONSE)
+        mock_groq.return_value = AIResponse(text="Groq response desu!", provider="groq", model="llama-3.3-70b-versatile")
+
+        resp = await manager.chat(messages=[{"role": "user", "content": "hello"}], system_prompt="")
+
+        assert resp.text == "Groq response desu!"
+        assert resp.provider == "groq"
+        assert mock_openrouter.call_count == 1
+        assert mock_groq.call_count == 1
+
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_all_providers_exhausted_fallback():
+    manager = AIProviderManager(
+        provider_order=["gemini", "openrouter"],
+        gemini_keys=["g_key1"],
+        groq_keys=[],
+        openrouter_keys=["or_key1"],
+        key_cooldown_seconds=10.0
+    )
+
+    with patch.object(GeminiProvider, "generate_response_with_key", new_callable=AsyncMock) as mock_gemini, \
+         patch.object(OpenRouterProvider, "generate_response_with_key", new_callable=AsyncMock) as mock_openrouter:
+
+        mock_gemini.side_effect = AIProviderError("Quota exceeded", error_code=ProviderErrorCode.QUOTA_EXCEEDED)
+        mock_openrouter.side_effect = AIProviderError("Rate limit", error_code=ProviderErrorCode.RATE_LIMIT)
+
+        resp = await manager.chat(messages=[{"role": "user", "content": "hello"}], system_prompt="")
+
+        assert resp.provider == "fallback"
+        assert "taking a little break" in resp.text
+
+    await manager.close()
