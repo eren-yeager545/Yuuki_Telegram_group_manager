@@ -96,44 +96,51 @@ def format_user_tag(user_id: int, name: str, username: str = None) -> str:
     return format_user_link(user_id, name)
 
 
+class ResolvedUser:
+    def __init__(self, uid, name, uname, is_bot=False):
+        self.id = uid
+        self.first_name = name or 'User'
+        self.full_name = name or 'User'
+        self.username = uname
+        self.is_bot = is_bot
+
+
 async def resolve_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message and update.message.reply_to_message and update.message.reply_to_message.from_user:
+    if not update or not update.message:
+        return None
+
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
         return update.message.reply_to_message.from_user
-    if context.args:
+
+    if update.message.entities:
+        for entity in update.message.entities:
+            if entity.type == 'text_mention' and getattr(entity, 'user', None):
+                return entity.user
+
+    if update.message.entities and update.message.text:
+        for entity in update.message.entities:
+            if entity.type == 'mention':
+                raw_uname = update.message.text[entity.offset:entity.offset + entity.length].strip()
+                u_info = get_user_by_username(raw_uname)
+                if u_info:
+                    return ResolvedUser(u_info[0], u_info[1], u_info[2])
+
+    if context and context.args:
         first_arg = context.args[0].strip()
         if first_arg.startswith('@'):
             u_info = get_user_by_username(first_arg)
             if u_info:
-                class ResolvedUser:
-                    def __init__(self, uid, name, uname):
-                        self.id = uid
-                        self.first_name = name or 'User'
-                        self.full_name = name or 'User'
-                        self.username = uname
-                        self.is_bot = False
-                return ResolvedUser(*u_info)
-        elif first_arg.isdigit():
+                return ResolvedUser(u_info[0], u_info[1], u_info[2])
+        elif first_arg.isdigit() or (first_arg.startswith('-') and first_arg[1:].isdigit()):
             uid = int(first_arg)
             u_info = get_user_by_id(uid)
             if u_info:
-                class ResolvedUser:
-                    def __init__(self, uid, name, uname):
-                        self.id = uid
-                        self.first_name = name or 'User'
-                        self.full_name = name or 'User'
-                        self.username = uname
-                        self.is_bot = False
-                return ResolvedUser(*u_info)
+                return ResolvedUser(u_info[0], u_info[1], u_info[2])
             else:
-                class SimpleUser:
-                    def __init__(self, uid):
-                        self.id = uid
-                        self.first_name = f'User {uid}'
-                        self.full_name = f'User {uid}'
-                        self.username = None
-                        self.is_bot = False
-                return SimpleUser(uid)
-    return update.effective_user
+                return ResolvedUser(uid, f'User {uid}', None)
+
+    return None
+
 
 
 async def apply_action(chat_id, target_id, action, context, duration_seconds=None):
@@ -177,23 +184,51 @@ async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     target = await resolve_target_user(update, context)
     if not target:
-        await update.message.reply_text("🌸 Please reply to or specify a valid group member to ban desu~")
+        await update.message.reply_text("🌸 Please reply to a message, tag (@username), or specify a valid user ID/username to ban desu~ 💕")
         return
 
-    if chat and chat.type in ('group', 'supergroup'):
-        if await is_target_admin(chat.id, target.id, context):
-            await update.message.reply_text(""" 🥺 Ehehe… I can't ban an admin!
-They're part of the team, silly~ 💕
-Try choosing a regular member instead! 🌸""")
-            return
+    commander_id = user.id
+    target_id = target.id
+
+    if target_id == commander_id:
+        await update.message.reply_text("😭 Nice try! You can't ban yourself. Pick another member, commander! 🫡")
+        return
+
+    bot_id = context.bot.id if hasattr(context, 'bot') and hasattr(context.bot, 'id') else None
+    if (bot_id and target_id == bot_id) or (getattr(target, 'is_bot', False) and bot_id and target_id == bot_id):
+        await update.message.reply_text("🥺 Aww, please don't ban me! I'm here to help you manage the group desu~ 💕")
+        return
 
     try:
-        await context.bot.ban_chat_member(chat.id, target.id)
-        log_admin_action(chat.id, user.id, 'ban', target.id)
-        tag = format_user_tag(target.id, getattr(target, 'first_name', 'User'), getattr(target, 'username', None))
-        await update.message.reply_html(f'Banned {tag}.')
+        target_member = await context.bot.get_chat_member(chat.id, target_id)
+        target_status = getattr(target_member, 'status', None)
     except Exception:
-        await safe_reply_error(update.effective_message, "🌷 Aww, Telegram won't let me perform that action on this member.")
+        target_status = None
+
+    if target_status in ('administrator', 'creator') or await is_target_admin(chat.id, target_id, context):
+        await update.message.reply_text("""🛡️ Hey! This user is a group admin.
+Please reply to, tag, or provide the user ID/username of the member you actually want to ban. 👀""")
+        return
+
+    if target_status in ('kicked', 'banned'):
+        await update.message.reply_text("🌸 This user is already banned from the group desu! ✨")
+        return
+
+    try:
+        await context.bot.ban_chat_member(chat.id, target_id)
+        log_admin_action(chat.id, commander_id, 'ban', target_id)
+
+        uname = getattr(target, 'username', None)
+        if uname:
+            target_disp = f"@{uname.lstrip('@')}"
+        else:
+            first_name = getattr(target, 'first_name', 'User')
+            target_disp = format_user_link(target_id, first_name)
+
+        confirm_msg = f"🔨 User banned successfully!\n👤 Target: {target_disp}\n🆔 ID: \"{target_id}\""
+        await update.message.reply_html(confirm_msg)
+    except Exception:
+        await safe_reply_error(update.effective_message, "🌷 Aww, Telegram won't let me perform that action or ban this member. Please check that I have administrator permissions to ban users!")
 
 
 async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -209,16 +244,39 @@ async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     target = await resolve_target_user(update, context)
     if not target:
-        await update.message.reply_text("🌸 Please reply to a message, or specify a valid user ID/username to unban desu~")
+        await update.message.reply_text("🌸 Please reply to a message, tag (@username), or specify a valid user ID/username to unban desu~ 💕")
         return
 
+    commander_id = user.id
+    target_id = target.id
+
+    uname = getattr(target, 'username', None)
+    if uname:
+        target_disp = f"@{uname.lstrip('@')}"
+    else:
+        first_name = getattr(target, 'first_name', 'User')
+        target_disp = format_user_link(target_id, first_name)
+
     try:
-        await context.bot.unban_chat_member(chat.id, target.id, only_if_banned=True)
-        log_admin_action(chat.id, user.id, 'unban', target.id)
-        tag = format_user_tag(target.id, getattr(target, 'first_name', 'User'), getattr(target, 'username', None))
-        await update.message.reply_html(f'Unbanned {tag}.')
+        target_member = await context.bot.get_chat_member(chat.id, target_id)
+        target_status = getattr(target_member, 'status', None)
     except Exception:
-        await safe_reply_error(update.effective_message, "🌷 Aww, Telegram won't let me perform that action or unban this member.")
+        target_status = None
+
+    is_banned = target_status in ('kicked', 'banned')
+
+    if is_banned:
+        try:
+            await context.bot.unban_chat_member(chat.id, target_id, only_if_banned=True)
+            log_admin_action(chat.id, commander_id, 'unban', target_id)
+            reply_text = f"🕊️ Welcome back!\n{target_disp} has been set free from the ban. ✨"
+            await update.message.reply_html(reply_text)
+        except Exception:
+            await safe_reply_error(update.effective_message, "🌷 Aww, Telegram won't let me perform that action or unban this member. Please check my admin permissions!")
+    else:
+        reply_text = f"🕊️ Looks like this one is already free as a bird! 😂✨\n{target_disp} isn't banned."
+        await update.message.reply_html(reply_text)
+
 
 
 async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -304,15 +362,31 @@ async def dban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Reply to a user or specify a username/ID to ban and purge their messages~ 🌸 (⁠⁠◕⁠‿⁠◕⁠✿⁠)")
         return
 
-    user_tag = format_user_tag(target.id, getattr(target, 'first_name', 'User'), getattr(target, 'username', None))
+    commander_id = update.effective_user.id
+    target_id = target.id
+
+    if target_id == commander_id:
+        await update.message.reply_text("😭 Nice try! You can't ban yourself. Pick another member, commander! 🫡")
+        return
+
+    if await is_target_admin(chat_id, target_id, context):
+        await update.message.reply_text("""🛡️ Hey! This user is a group admin.
+Please reply to, tag, or provide the user ID/username of the member you actually want to ban. 👀""")
+        return
+
+    uname = getattr(target, 'username', None)
+    if uname:
+        user_tag = f"@{uname.lstrip('@')}"
+    else:
+        user_tag = format_user_link(target_id, getattr(target, 'first_name', 'User'))
 
     try:
-        await context.bot.ban_chat_member(chat_id, target.id, revoke_messages=True)
+        await context.bot.ban_chat_member(chat_id, target_id, revoke_messages=True)
     except Exception as e:
         await safe_reply_error(update.effective_message, "🌷 Aww, Telegram won't let me perform that action on this member.")
         return
 
-    mids = clear_user_messages(chat_id, target.id)
+    mids = clear_user_messages(chat_id, target_id)
     for mid in mids:
         try:
             await context.bot.delete_message(chat_id, mid)
@@ -329,10 +403,12 @@ async def dban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    log_admin_action(chat_id, update.effective_user.id, 'dban', target.id)
+    log_admin_action(chat_id, commander_id, 'dban', target_id)
     await update.effective_chat.send_message(
-        f"Banned and swept clean! 🔨🧹 {user_tag} has been banned and all their messages were purged from the group! Stay safe everyone~ 🌸 (⁠≧⁠∇⁠≦⁠)/"
+        f"Banned and swept clean! 🔨🧹 {user_tag} has been banned and all their messages were purged from the group! Stay safe everyone~ 🌸 (⁠≧⁠∇⁠≦⁠)/",
+        parse_mode='HTML'
     )
+
 
 
 async def pin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

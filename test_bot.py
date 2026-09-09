@@ -748,7 +748,7 @@ def test_ban_admin_protection_and_guards(monkeypatch, tmp_path):
 
     msg.reply_text.reset_mock()
     asyncio.run(admin.ban_cmd(update, context))
-    assert "Ehehe… I can't ban an admin!" in msg.reply_text.call_args[0][0]
+    assert "This user is a group admin" in msg.reply_text.call_args[0][0]
 
     # 3. Test /kickme command
     msg.reply_text.reset_mock()
@@ -1025,3 +1025,148 @@ def test_users_and_grouplist_cmds(monkeypatch, tmp_path):
     assert "Total Members: 42" in grouplist_resp
     assert "Alice Wonderland" in grouplist_resp
     assert "tg://user?id=101" in grouplist_resp
+
+
+def test_ban_and_unban_comprehensive(monkeypatch, tmp_path):
+    import store
+    import admin
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import User, Chat, Message
+
+    db_file = str(tmp_path / "test_ban_unban_comp.db")
+    monkeypatch.setattr(store, "DB_PATH", db_file)
+    store.init_db()
+
+    store.upsert_user(555, "TestTarget", "testtarget")
+
+    bot = AsyncMock()
+    bot.id = 9999
+    bot.ban_chat_member = AsyncMock()
+    bot.unban_chat_member = AsyncMock()
+    bot.get_chat_member = AsyncMock()
+
+    context = MagicMock()
+    context.bot = bot
+    chat = Chat(id=-1001, type="supergroup")
+
+    normal_cmd_user = User(id=111, first_name="NormalUser", is_bot=False)
+    admin_cmd_user = User(id=222, first_name="AdminUser", is_bot=False)
+    target_user = User(id=555, first_name="TestTarget", username="testtarget", is_bot=False)
+
+    msg = MagicMock(spec=Message)
+    msg.reply_text = AsyncMock()
+    msg.reply_html = AsyncMock()
+
+    update = MagicMock()
+    update.effective_chat = chat
+    update.effective_user = normal_cmd_user
+    update.message = msg
+
+    # 1. /ban as normal member -> rejected
+    monkeypatch.setattr(admin, "is_admin", AsyncMock(return_value=False))
+    asyncio.run(admin.ban_cmd(update, context))
+    assert "/ban command is only for admins" in msg.reply_text.call_args[0][0]
+
+    # Switch to admin commander
+    update.effective_user = admin_cmd_user
+    monkeypatch.setattr(admin, "is_admin", AsyncMock(return_value=True))
+
+    # 2. Reply /ban -> bans replied user
+    replied_msg = MagicMock(spec=Message)
+    replied_msg.from_user = target_user
+    msg.reply_to_message = replied_msg
+    context.args = []
+    msg.entities = []
+
+    bot.get_chat_member.return_value = MagicMock(status='member')
+    bot.ban_chat_member.reset_mock()
+    msg.reply_html.reset_mock()
+
+    asyncio.run(admin.ban_cmd(update, context))
+    bot.ban_chat_member.assert_called_with(-1001, 555)
+    assert "User banned successfully!" in msg.reply_html.call_args[0][0]
+
+    # 3. /ban @username -> bans specified username target
+    msg.reply_to_message = None
+    context.args = ["@testtarget"]
+    bot.ban_chat_member.reset_mock()
+    msg.reply_html.reset_mock()
+
+    asyncio.run(admin.ban_cmd(update, context))
+    bot.ban_chat_member.assert_called_with(-1001, 555)
+
+    # 4. /ban 555 -> bans specified ID target
+    context.args = ["555"]
+    bot.ban_chat_member.reset_mock()
+    msg.reply_html.reset_mock()
+
+    asyncio.run(admin.ban_cmd(update, context))
+    bot.ban_chat_member.assert_called_with(-1001, 555)
+
+    # 5. /ban @admin -> don't ban admin
+    context.args = ["333"]
+    bot.get_chat_member.return_value = MagicMock(status='administrator')
+    msg.reply_text.reset_mock()
+
+    asyncio.run(admin.ban_cmd(update, context))
+    assert "This user is a group admin" in msg.reply_text.call_args[0][0]
+
+    # 6. /ban <own ID> -> self-ban protection
+    context.args = ["222"]
+    msg.reply_text.reset_mock()
+
+    asyncio.run(admin.ban_cmd(update, context))
+    assert "You can't ban yourself" in msg.reply_text.call_args[0][0]
+
+    # 7. /ban already banned target -> handle gracefully
+    context.args = ["555"]
+    bot.get_chat_member.return_value = MagicMock(status='kicked')
+    msg.reply_text.reset_mock()
+
+    asyncio.run(admin.ban_cmd(update, context))
+    assert "already banned" in msg.reply_text.call_args[0][0]
+
+    # 8. Bot lacks permission -> friendly error
+    context.args = ["555"]
+    bot.get_chat_member.return_value = MagicMock(status='member')
+    bot.ban_chat_member.side_effect = Exception("Telegram API Error")
+    monkeypatch.setattr(admin, "safe_reply_error", AsyncMock())
+
+    asyncio.run(admin.ban_cmd(update, context))
+    admin.safe_reply_error.assert_called()
+
+    # --- /UNBAN TESTS ---
+    bot.ban_chat_member.side_effect = None
+
+    # 9. /unban as normal member -> rejected
+    update.effective_user = normal_cmd_user
+    monkeypatch.setattr(admin, "is_admin", AsyncMock(return_value=False))
+    msg.reply_text.reset_mock()
+
+    asyncio.run(admin.unban_cmd(update, context))
+    assert "/unban command is only for admins" in msg.reply_text.call_args[0][0]
+
+    # Switch back to admin commander
+    update.effective_user = admin_cmd_user
+    monkeypatch.setattr(admin, "is_admin", AsyncMock(return_value=True))
+
+    # 10. /unban when target is banned -> unban target
+    context.args = ["555"]
+    bot.get_chat_member.return_value = MagicMock(status='kicked')
+    bot.unban_chat_member.reset_mock()
+    msg.reply_html.reset_mock()
+
+    asyncio.run(admin.unban_cmd(update, context))
+    bot.unban_chat_member.assert_called_with(-1001, 555, only_if_banned=True)
+    assert "set free from the ban" in msg.reply_html.call_args[0][0]
+
+    # 11. /unban when target is NOT banned -> "free as a bird" response
+    context.args = ["555"]
+    bot.get_chat_member.return_value = MagicMock(status='member')
+    bot.unban_chat_member.reset_mock()
+    msg.reply_html.reset_mock()
+
+    asyncio.run(admin.unban_cmd(update, context))
+    bot.unban_chat_member.assert_not_called()
+    assert "free as a bird" in msg.reply_html.call_args[0][0]
