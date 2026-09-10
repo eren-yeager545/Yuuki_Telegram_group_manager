@@ -1900,3 +1900,119 @@ async def tag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 👤 {giver_name}, some members could not be mentioned.""",
             parse_mode="HTML"
         )
+
+
+async def packs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not msg:
+        return
+
+    from store import get_all_sticker_packs
+    packs = get_all_sticker_packs()
+
+    if not packs:
+        await msg.reply_text("Aww~ I don't have any sticker packs saved yet! 🥺✨")
+        return
+
+    page = 0
+    await send_packs_page(update, context, packs, page=page)
+
+
+async def send_packs_page(update: Update, context: ContextTypes.DEFAULT_TYPE, packs: list, page: int = 0, is_callback: bool = False):
+    per_page = 5
+    total_packs = len(packs)
+    total_pages = (total_packs + per_page - 1) // per_page
+    page = max(0, min(page, total_pages - 1))
+
+    start_idx = page * per_page
+    page_packs = packs[start_idx:start_idx + per_page]
+
+    text_lines = ["<b>🌸 Stored Sticker Packs 🌸</b>", ""]
+    for p in page_packs:
+        title = p.get('title') or 'Untitled Pack'
+        set_name = p.get('set_name') or 'unknown'
+        count = p.get('count', 0)
+        text_lines.append(f"📦 <b>{title}</b>")
+        text_lines.append(f"🆔 <code>{set_name}</code>")
+        text_lines.append(f"🔢 {count} stickers")
+        text_lines.append("")
+
+    text_lines.append(f"<i>Page {page + 1} of {total_pages} (Total: {total_packs})</i>")
+    text = "\n".join(text_lines)
+
+    buttons = []
+    if total_pages > 1:
+        row = []
+        if page > 0:
+            row.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"packs_page:{page - 1}"))
+        if page < total_pages - 1:
+            row.append(InlineKeyboardButton("Next ➡️", callback_data=f"packs_page:{page + 1}"))
+        buttons.append(row)
+
+    reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
+
+    if is_callback and update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        except Exception:
+            pass
+    else:
+        msg = update.effective_message
+        if msg:
+            await msg.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
+
+
+async def packs_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith("packs_page:"):
+        return
+
+    await query.answer()
+    try:
+        page = int(query.data.split(":")[1])
+    except Exception:
+        page = 0
+
+    from store import get_all_sticker_packs
+    packs = get_all_sticker_packs()
+    if not packs:
+        await query.edit_message_text("Aww~ I don't have any sticker packs saved yet! 🥺✨")
+        return
+
+    await send_packs_page(update, context, packs, page=page, is_callback=True)
+
+
+async def delpack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_admin(update, context):
+        await update.message.reply_text("Gomen ne~ 🌸 /delpack is only for admins desu!")
+        return
+
+    msg = update.effective_message
+    if not msg:
+        return
+
+    args = context.args
+    if not args:
+        await msg.reply_text("🌸 Usage: <code>/delpack &lt;sticker_pack_id&gt;</code>", parse_mode="HTML")
+        return
+
+    target_id = args[0].strip()
+    if not target_id:
+        await msg.reply_text("🌸 Usage: <code>/delpack &lt;sticker_pack_id&gt;</code>", parse_mode="HTML")
+        return
+
+    from store import get_sticker_pack, delete_sticker_pack
+    pack_data = get_sticker_pack(target_id)
+    if not pack_data:
+        await msg.reply_text("Uwaa~ I couldn't find that sticker pack anywhere! 🥺🔍")
+        return
+
+    pack_name = pack_data.get('title') or target_id
+    success = delete_sticker_pack(target_id)
+
+    if success:
+        log_admin_action(update.effective_chat.id, update.effective_user.id, 'delpack', details=target_id)
+        msg_text = f"✨ Pack deleted successfully!\n🧸 Pack: {pack_name}\n🆔 ID: <code>{target_id}</code>"
+        await msg.reply_text(msg_text, parse_mode="HTML")
+    else:
+        await msg.reply_text("Uwaa~ I couldn't find that sticker pack anywhere! 🥺🔍")

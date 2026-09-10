@@ -128,22 +128,67 @@ def should_trigger_yuki(update: Update, bot_username: Optional[str] = None, bot_
     return False, ""
 
 
-def find_matching_sticker(user_emoji: Optional[str]) -> Optional[str]:
+CUTE_FALLBACK_RESPONSES = [
+    "E-ehh... my brain got a little sleepy just now 🥺💤",
+    "Uwaa... I lost my train of thought! Give me a tiny moment~ 🥹✨",
+    "Mmm... Yuki's brain is taking a little nap right now 😴🌸",
+    "Ehehe... I wanted to answer, but my thoughts got tangled! 🫣💭",
+    "Aahh~ my little brain connection wandered away again 🥺💫",
+    "Yuki is thinking really hard... but the words aren't coming out yet~ 😭🌸"
+]
+
+
+def get_cute_fallback_response() -> str:
+    """Returns a randomly selected cute fallback message when AI fails."""
+    return random.choice(CUTE_FALLBACK_RESPONSES)
+
+
+# In-memory LRU tracking for recent stickers sent per chat: chat_id -> list of file_ids
+_recent_chat_stickers = {}
+
+
+def get_random_sticker(user_emoji: Optional[str] = None, chat_id: Optional[int] = None) -> Optional[str]:
     """
-    Finds a sticker file_id from saved packs matching the user's sticker emoji/emotion if available.
+    Randomly selects a sticker from stored sticker packs.
+    If matching user_emoji is available in stored stickers, prioritizes those matching stickers.
+    Avoids recently sent stickers in the same chat if possible.
     """
     stickers = get_all_stickers()
     if not stickers:
         return None
 
+    candidates = stickers
     if user_emoji:
-        # Exact emoji match
         matching = [s for s in stickers if s.get('emoji') and user_emoji in s.get('emoji')]
         if matching:
-            return random.choice(matching).get('file_id')
+            candidates = matching
 
-    # Random sticker from saved packs as fallback
-    return random.choice(stickers).get('file_id')
+    file_ids = [s.get('file_id') for s in candidates if s.get('file_id')]
+    if not file_ids:
+        return None
+
+    if len(file_ids) == 1:
+        chosen = file_ids[0]
+    else:
+        recent = _recent_chat_stickers.get(chat_id, []) if chat_id else []
+        fresh = [fid for fid in file_ids if fid not in recent]
+        if fresh:
+            chosen = random.choice(fresh)
+        else:
+            chosen = random.choice(file_ids)
+
+    if chat_id:
+        if chat_id not in _recent_chat_stickers:
+            _recent_chat_stickers[chat_id] = []
+        _recent_chat_stickers[chat_id].append(chosen)
+        if len(_recent_chat_stickers[chat_id]) > 5:
+            _recent_chat_stickers[chat_id].pop(0)
+
+    return chosen
+
+
+def find_matching_sticker(user_emoji: Optional[str], chat_id: Optional[int] = None) -> Optional[str]:
+    return get_random_sticker(user_emoji=user_emoji, chat_id=chat_id)
 
 
 async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt_override: Optional[str] = None):
@@ -207,7 +252,7 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
             sticker_obj = getattr(msg, "sticker", None)
             if sticker_obj and type(sticker_obj).__name__ != "MagicMock":
                 user_emoji = getattr(sticker_obj, "emoji", None)
-                saved_sticker_file_id = find_matching_sticker(user_emoji)
+                saved_sticker_file_id = get_random_sticker(user_emoji=user_emoji, chat_id=chat.id)
                 if saved_sticker_file_id:
                     try:
                         await msg.reply_sticker(sticker=saved_sticker_file_id)
@@ -236,7 +281,7 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
             )
 
             if ai_resp.provider == "fallback":
-                final_text = "🤖 AI is temporarily unavailable. Please try again later."
+                final_text = get_cute_fallback_response()
             else:
                 # Format/shorten response if casual chatting
                 is_detailed_req = any(kw in prompt.lower() for kw in ["explain in detail", "detailed explanation", "essay", "full guide", "step by step"])
@@ -251,3 +296,13 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
                 await msg.reply_text(final_text)
             except Exception as e:
                 logger.error(f"Error sending AI response: {type(e).__name__}")
+
+            # Optional randomized sticker response on Yuki interaction
+            sticker_chance = getattr(config, "YUKI_STICKER_CHANCE", 0.25)
+            if random.random() < sticker_chance:
+                stk_file_id = get_random_sticker(chat_id=chat.id)
+                if stk_file_id:
+                    try:
+                        await msg.reply_sticker(sticker=stk_file_id)
+                    except Exception as e:
+                        logger.warning(f"Failed to send random sticker: {e}")
