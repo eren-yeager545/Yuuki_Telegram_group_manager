@@ -132,7 +132,7 @@ def init_db():
             last_updated INTEGER,
             is_active INTEGER DEFAULT 1
         )''')
-        cur.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, full_name TEXT, username TEXT, added_at INTEGER, last_seen_at INTEGER)')
+        cur.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, full_name TEXT, username TEXT, added_at INTEGER, last_seen_at INTEGER, is_bot INTEGER DEFAULT 0)')
         cur.execute('CREATE TABLE IF NOT EXISTS group_members (chat_id INTEGER, user_id INTEGER, last_seen_at INTEGER, status TEXT DEFAULT "member", PRIMARY KEY(chat_id, user_id))')
         cur.execute('CREATE TABLE IF NOT EXISTS settings (chat_id INTEGER, key TEXT, value TEXT, PRIMARY KEY(chat_id, key))')
         cur.execute('CREATE TABLE IF NOT EXISTS warns (chat_id INTEGER, user_id INTEGER, count INTEGER DEFAULT 0, reasons TEXT DEFAULT "", PRIMARY KEY(chat_id, user_id))')
@@ -165,6 +165,11 @@ def init_db():
         cols = [row[1] for row in cur.fetchall()]
         if 'note_type' not in cols:
             cur.execute("ALTER TABLE notes ADD COLUMN note_type TEXT DEFAULT 'text'")
+
+        cur.execute("PRAGMA table_info(users)")
+        cols = [row[1] for row in cur.fetchall()]
+        if 'is_bot' not in cols:
+            cur.execute("ALTER TABLE users ADD COLUMN is_bot INTEGER DEFAULT 0")
 
         cur.execute("PRAGMA table_info(group_members)")
         cols = [row[1] for row in cur.fetchall()]
@@ -324,13 +329,14 @@ def get_group_by_id(chat_id):
         }
 
 
-def upsert_user(user_id, full_name, username, touch_seen=True):
+def upsert_user(user_id, full_name, username, touch_seen=True, is_bot=False):
     now = _now()
+    is_bot_val = bool(is_bot)
     if is_mongo():
         db = get_mongo_db()
         existing = db['users'].find_one({'user_id': user_id})
         if existing:
-            update_data = {'full_name': full_name, 'username': username}
+            update_data = {'full_name': full_name, 'username': username, 'is_bot': is_bot_val}
             if touch_seen:
                 update_data['last_seen_at'] = now
             db['users'].update_one({'user_id': user_id}, {'$set': update_data})
@@ -339,6 +345,7 @@ def upsert_user(user_id, full_name, username, touch_seen=True):
                 'user_id': user_id,
                 'full_name': full_name,
                 'username': username,
+                'is_bot': is_bot_val,
                 'added_at': now,
                 'last_seen_at': now
             })
@@ -346,7 +353,7 @@ def upsert_user(user_id, full_name, username, touch_seen=True):
 
     with closing(conn()) as c:
         cur = c.cursor()
-        cur.execute('INSERT INTO users(user_id,full_name,username,added_at,last_seen_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET full_name=excluded.full_name, username=excluded.username, last_seen_at=CASE WHEN ? THEN excluded.last_seen_at ELSE users.last_seen_at END', (user_id, full_name, username, now, now, 1 if touch_seen else 0))
+        cur.execute('INSERT INTO users(user_id,full_name,username,added_at,last_seen_at,is_bot) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET full_name=excluded.full_name, username=excluded.username, is_bot=excluded.is_bot, last_seen_at=CASE WHEN ? THEN excluded.last_seen_at ELSE users.last_seen_at END', (user_id, full_name, username, now, now, 1 if is_bot_val else 0, 1 if touch_seen else 0))
         c.commit()
 
 
@@ -413,6 +420,29 @@ def list_zombies(chat_id):
         rows = c.execute('SELECT m.user_id, u.full_name, u.username, m.status FROM group_members m LEFT JOIN users u ON m.user_id=u.user_id WHERE m.chat_id=? AND m.status IN ("left", "kicked", "banned")', (chat_id,)).fetchall()
         return [(r[0], r[1] or f"User {r[0]}", r[2], r[3]) for r in rows]
 
+
+
+
+def get_group_members(chat_id):
+    if is_mongo():
+        db = get_mongo_db()
+        docs = list(db['group_members'].find({'chat_id': chat_id, 'status': 'member'}))
+        res = []
+        for d in docs:
+            uid = d['user_id']
+            u_doc = db['users'].find_one({'user_id': uid})
+            full_name = u_doc.get('full_name') if u_doc else f"User {uid}"
+            username = u_doc.get('username') if u_doc else None
+            is_bot = bool(u_doc.get('is_bot', False)) if u_doc else False
+            res.append((uid, full_name, username, is_bot))
+        return res
+
+    with closing(conn()) as c:
+        rows = c.execute(
+            'SELECT m.user_id, u.full_name, u.username, COALESCE(u.is_bot, 0) FROM group_members m LEFT JOIN users u ON m.user_id=u.user_id WHERE m.chat_id=? AND (m.status IS NULL OR m.status = "member")',
+            (chat_id,)
+        ).fetchall()
+        return [(r[0], r[1] or f"User {r[0]}", r[2], bool(r[3])) for r in rows]
 
 def clean_zombies(chat_id):
     if is_mongo():
