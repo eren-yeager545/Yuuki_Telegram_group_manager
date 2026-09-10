@@ -23,6 +23,10 @@ from tictactoe import ttt_cmd, ttt_callback_handler
 from admin import *
 from common import ai_cmd
 from handlers.ai_chat import handle_ai_chat, should_trigger_yuki
+import store
+import html
+from handlers.afk import afk_cmd, format_afk_duration, extract_mentioned_afk_users
+from handlers.afk import afk_cmd, format_afk_duration, extract_mentioned_afk_users
 
 import tornado.web
 from telegram.ext._utils.webhookhandler import WebhookAppClass
@@ -406,6 +410,39 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_seen_cache[user.id] = now
         touch_member(chat.id, user.id, now, status='member')
         record_user_message(chat.id, user.id, msg.message_id)
+
+        # AFK Return Logic
+        txt = msg.text or msg.caption or ''
+        is_afk_command = bool(txt and txt.strip().startswith('/afk'))
+        if not is_afk_command:
+            try:
+                afk_record = store.get_afk(chat.id, user.id)
+                if afk_record:
+                    reason, afk_since = afk_record
+                    store.delete_afk(chat.id, user.id)
+                    duration_str = format_afk_duration(now - afk_since)
+                    user_disp = html.escape(user.first_name or 'User')
+                    await msg.reply_text(
+                        f"Welcome back, <b>{user_disp}</b>! 🌸 You were AFK for <b>{duration_str}</b>.\n💭 Reason: {html.escape(reason)}",
+                        parse_mode="HTML"
+                    )
+            except Exception as e:
+                logger.error(f"Error handling AFK return: {e}")
+
+        # AFK Mention/Reply Detection
+        try:
+            mentioned_afk_users = extract_mentioned_afk_users(update, chat.id)
+            for m_uid, m_first, m_uname, m_reason, m_since in mentioned_afk_users:
+                if m_uid == user.id:
+                    continue
+                disp_tag = format_user_tag(m_uid, m_first, m_uname)
+                dur_str = format_afk_duration(now - m_since)
+                await msg.reply_text(
+                    f"🌸 {disp_tag} is currently AFK!\n💭 Reason: {html.escape(m_reason)}\n⏰ Away for: {dur_str}",
+                    parse_mode="HTML"
+                )
+        except Exception as e:
+            logger.error(f"Error handling AFK mention notifications: {e}")
         fed = get_chat_federation(chat.id)
         if fed and get_fed_ban(fed[0], user.id):
             try:
@@ -626,6 +663,7 @@ def main():
         ('locks', locks_cmd, 'Users Commands', 'Show lock status', '/locks'),
         ('myfeds', myfeds_cmd, 'Users Commands', 'List your federations', '/myfeds'),
         ('ttt', ttt_cmd, 'Game Commands', 'Play Tic Tac Toe against bot or challenged user in reply', '/ttt'),
+        ('afk', afk_cmd, 'Users Commands', 'Set your status to AFK with an optional reason', '/afk studying'),
     ]
     admin_cmds = [
         ('promote', promote_cmd, 'Group Management Commands', 'Promote a member to admin', '/promote'),

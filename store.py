@@ -114,6 +114,7 @@ def init_db():
         db['user_messages'].create_index([('chat_id', 1), ('user_id', 1), ('message_id', 1)], unique=True)
         db['sticker_packs'].create_index('set_name', unique=True)
         db['stickers'].create_index('set_name')
+        db['afk'].create_index([('chat_id', 1), ('user_id', 1)], unique=True)
         return
 
     with closing(conn()) as c:
@@ -152,6 +153,7 @@ def init_db():
         cur.execute('CREATE TABLE IF NOT EXISTS user_messages (chat_id INTEGER, user_id INTEGER, message_id INTEGER, created_at INTEGER, PRIMARY KEY(chat_id, user_id, message_id))')
         cur.execute('CREATE TABLE IF NOT EXISTS sticker_packs (set_name TEXT PRIMARY KEY, title TEXT, count INTEGER, updated_at INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS stickers (id INTEGER PRIMARY KEY AUTOINCREMENT, set_name TEXT, file_id TEXT, file_unique_id TEXT, emoji TEXT, sticker_type TEXT)')
+        cur.execute('CREATE TABLE IF NOT EXISTS afk (chat_id INTEGER, user_id INTEGER, reason TEXT, afk_since INTEGER, PRIMARY KEY(chat_id, user_id))')
 
         # Schema migrations for existing SQLite databases
         cur.execute("PRAGMA table_info(filters)")
@@ -1201,6 +1203,7 @@ def delete_user_data(user_id):
         c.execute('DELETE FROM fed_bans WHERE user_id=?', (user_id,))
         c.execute('DELETE FROM fed_admins WHERE user_id=?', (user_id,))
         c.execute('DELETE FROM action_events WHERE actor_id=? OR target_id=?', (user_id, user_id))
+        c.execute('DELETE FROM afk WHERE user_id=?', (user_id,))
         c.commit()
 
 
@@ -1438,3 +1441,53 @@ def get_all_active_groups_detailed():
             'added_by_user_id': r[5],
             'added_at': r[6]
         } for r in rows]
+
+
+# --- AFK Data Layer ---
+
+def set_afk(chat_id: int, user_id: int, reason: str, afk_since: int = None) -> None:
+    if afk_since is None:
+        afk_since = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+    reason = clamp_text(reason, 1000)
+    if is_mongo():
+        db = get_mongo_db()
+        db['afk'].update_one(
+            {'chat_id': chat_id, 'user_id': user_id},
+            {'': {'reason': reason, 'afk_since': afk_since}},
+            upsert=True
+        )
+        return
+
+    with get_conn() as c:
+        c.execute(
+            'INSERT INTO afk (chat_id, user_id, reason, afk_since) VALUES (?, ?, ?, ?) '
+            'ON CONFLICT(chat_id, user_id) DO UPDATE SET reason=excluded.reason, afk_since=excluded.afk_since',
+            (chat_id, user_id, reason, afk_since)
+        )
+        c.commit()
+
+
+def get_afk(chat_id: int, user_id: int):
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['afk'].find_one({'chat_id': chat_id, 'user_id': user_id})
+        if doc:
+            return doc.get('reason', ''), doc.get('afk_since', 0)
+        return None
+
+    with get_conn() as c:
+        row = c.execute('SELECT reason, afk_since FROM afk WHERE chat_id=? AND user_id=?', (chat_id, user_id)).fetchone()
+        if row:
+            return row[0], row[1]
+        return None
+
+
+def delete_afk(chat_id: int, user_id: int) -> None:
+    if is_mongo():
+        db = get_mongo_db()
+        db['afk'].delete_one({'chat_id': chat_id, 'user_id': user_id})
+        return
+
+    with get_conn() as c:
+        c.execute('DELETE FROM afk WHERE chat_id=? AND user_id=?', (chat_id, user_id))
+        c.commit()
