@@ -11,6 +11,7 @@ from src.ai import (
     ContextManager,
     AIRateLimiter,
     AIProviderManager,
+    AIMessageDeduplicator,
     format_short_response,
     FALLBACK_YUKI_RESPONSE
 )
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize singletons for AI subsystems
 context_manager = ContextManager(max_messages=config.AI_MAX_CONTEXT_MESSAGES)
+deduplicator = AIMessageDeduplicator(ttl_seconds=300.0)
 rate_limiter = AIRateLimiter(
     user_cooldown=config.AI_USER_COOLDOWN,
     chat_cooldown=config.AI_CHAT_COOLDOWN,
@@ -158,11 +160,26 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
     if not msg or not chat or not user:
         return
 
+    # Check Message / Update Deduplication atomically
+    update_id = getattr(update, "update_id", None)
+    reserved = await deduplicator.try_reserve(chat.id, msg.message_id, update_id=update_id)
+    if not reserved:
+        logger.debug(
+            f"AI Message Deduplicated: Skipping duplicate processing for chat_id={chat.id} message_id={msg.message_id} update_id={update_id}"
+        )
+        return
+
     # Wire owner alert callback with current context
     provider_manager.set_owner_notifier(lambda text: send_owner_ai_alert(text, context))
 
-    bot_username = getattr(context.bot, "username", None)
-    bot_id = getattr(context.bot, "id", None)
+    bot_obj = getattr(context, "bot", None)
+    bot_username = getattr(bot_obj, "username", None)
+    if not isinstance(bot_username, str):
+        bot_username = "yuki_bot"
+
+    bot_id = getattr(bot_obj, "id", None)
+    if not isinstance(bot_id, int):
+        bot_id = 123456
 
     if prompt_override:
         prompt = prompt_override.strip()
@@ -171,8 +188,8 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
         if not triggered:
             return
 
-    # Check Rate Limiting
-    allowed, rejection_msg = rate_limiter.check_rate_limit(user.id, chat.id)
+    # Check Rate Limiting atomically
+    allowed, rejection_msg = await rate_limiter.try_acquire(user.id, chat.id)
     if not allowed:
         if rejection_msg:
             try:
@@ -181,53 +198,56 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
                 pass
         return
 
-    rate_limiter.update_rate_limit(user.id, chat.id)
-
     # Acquire concurrency semaphore
     async with rate_limiter.semaphore:
-        # If user sent a sticker, try replying with a sticker from saved packs
-        sticker_obj = getattr(msg, "sticker", None)
-        if sticker_obj and type(sticker_obj).__name__ != "MagicMock":
-            user_emoji = getattr(sticker_obj, "emoji", None)
-            saved_sticker_file_id = find_matching_sticker(user_emoji)
-            if saved_sticker_file_id:
-                try:
-                    await msg.reply_sticker(sticker=saved_sticker_file_id)
-                    return
-                except Exception as e:
-                    logger.warning(f"Failed to reply with sticker: {e}")
+        # Acquire per-chat lock to preserve context history order per chat
+        chat_lock = await context_manager.get_chat_lock(chat.id)
+        async with chat_lock:
+            # If user sent a sticker, try replying with a sticker from saved packs
+            sticker_obj = getattr(msg, "sticker", None)
+            if sticker_obj and type(sticker_obj).__name__ != "MagicMock":
+                user_emoji = getattr(sticker_obj, "emoji", None)
+                saved_sticker_file_id = find_matching_sticker(user_emoji)
+                if saved_sticker_file_id:
+                    try:
+                        await msg.reply_sticker(sticker=saved_sticker_file_id)
+                        return
+                    except Exception as e:
+                        logger.warning(f"Failed to reply with sticker: {e}")
 
-        # Send typing action for text AI response
-        try:
-            await context.bot.send_chat_action(chat_id=chat.id, action="typing")
-        except Exception:
-            pass
+            # Send typing action for text AI response
+            try:
+                await context.bot.send_chat_action(chat_id=chat.id, action="typing")
+            except Exception:
+                pass
 
-        user_display = user.first_name or "Friend"
-        context_manager.add_message(chat.id, role="user", content=prompt, user_name=user_display)
-        conversation_history = context_manager.get_context(chat.id)
+            user_display = user.first_name or "Friend"
+            context_manager.add_message(chat.id, role="user", content=prompt, user_name=user_display)
+            conversation_history = context_manager.get_context(chat.id)
 
-        # Call AI Provider Manager
-        ai_resp = await provider_manager.chat(
-            messages=conversation_history,
-            system_prompt=YUKI_PERSONA,
-            max_tokens=config.AI_MAX_OUTPUT_TOKENS,
-            timeout=config.AI_REQUEST_TIMEOUT
-        )
+            # Call AI Provider Manager
+            ai_resp = await provider_manager.chat(
+                messages=conversation_history,
+                system_prompt=YUKI_PERSONA,
+                max_tokens=config.AI_MAX_OUTPUT_TOKENS,
+                timeout=config.AI_REQUEST_TIMEOUT,
+                chat_id=chat.id,
+                message_id=msg.message_id
+            )
 
-        if ai_resp.provider == "fallback":
-            final_text = "🤖 AI is temporarily unavailable. Please try again later."
-        else:
-            # Format/shorten response if casual chatting
-            is_detailed_req = any(kw in prompt.lower() for kw in ["explain in detail", "detailed explanation", "essay", "full guide", "step by step"])
-            final_text = ai_resp.text if is_detailed_req else format_short_response(ai_resp.text, max_words=50)
+            if ai_resp.provider == "fallback":
+                final_text = "🤖 AI is temporarily unavailable. Please try again later."
+            else:
+                # Format/shorten response if casual chatting
+                is_detailed_req = any(kw in prompt.lower() for kw in ["explain in detail", "detailed explanation", "essay", "full guide", "step by step"])
+                final_text = ai_resp.text if is_detailed_req else format_short_response(ai_resp.text, max_words=50)
 
-            if not final_text:
-                final_text = FALLBACK_YUKI_RESPONSE
+                if not final_text:
+                    final_text = FALLBACK_YUKI_RESPONSE
 
-        context_manager.add_message(chat.id, role="assistant", content=final_text)
+            context_manager.add_message(chat.id, role="assistant", content=final_text)
 
-        try:
-            await msg.reply_text(final_text)
-        except Exception as e:
-            logger.error(f"Error sending AI response: {type(e).__name__}")
+            try:
+                await msg.reply_text(final_text)
+            except Exception as e:
+                logger.error(f"Error sending AI response: {type(e).__name__}")
