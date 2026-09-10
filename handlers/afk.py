@@ -82,6 +82,15 @@ def extract_mentioned_afk_users(update: Update, chat_id: int):
     afk_users = []
     seen_uids = set()
 
+    if msg and msg.from_user and hasattr(msg.from_user, 'id'):
+        uid = msg.from_user.id
+        if isinstance(uid, int):
+            seen_uids.add(uid)
+    if update and getattr(update, 'effective_user', None) and hasattr(update.effective_user, 'id'):
+        uid = update.effective_user.id
+        if isinstance(uid, int):
+            seen_uids.add(uid)
+
     # 1. Reply checking
     if msg.reply_to_message and msg.reply_to_message.from_user:
         replied_user = msg.reply_to_message.from_user
