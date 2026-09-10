@@ -1,17 +1,28 @@
+import asyncio
 import re
 from collections import defaultdict, deque
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 
 class ContextManager:
-    """Manages short-term conversation context for group and private chats."""
+    """Manages short-term conversation context for group and private chats with per-chat async locking."""
 
     def __init__(self, max_messages: int = 10):
         self.max_messages = max_messages
         # Key: chat_id -> deque of message dicts: [{"role": "user"/"assistant", "content": "...", "name": "..."}]
         self._history = defaultdict(lambda: deque(maxlen=self.max_messages))
+        self._chat_locks: Dict[int, asyncio.Lock] = {}
+        self._global_lock = asyncio.Lock()
 
-    def add_message(self, chat_id: int, role: str, content: str, user_name: str = None) -> None:
+    async def get_chat_lock(self, chat_id: int) -> asyncio.Lock:
+        """Retrieve or create a dedicated asyncio.Lock for a specific chat_id."""
+        if chat_id not in self._chat_locks:
+            async with self._global_lock:
+                if chat_id not in self._chat_locks:
+                    self._chat_locks[chat_id] = asyncio.Lock()
+        return self._chat_locks[chat_id]
+
+    def add_message(self, chat_id: int, role: str, content: str, user_name: Optional[str] = None) -> None:
         """Add a message to the chat history."""
         if not content or not content.strip():
             return

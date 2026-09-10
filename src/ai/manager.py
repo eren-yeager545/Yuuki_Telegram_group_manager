@@ -1,5 +1,6 @@
 import logging
 import time
+import uuid
 from typing import List, Dict, Tuple, Optional, Callable, Any
 from .providers.base import AIResponse, AIProviderError, ProviderErrorCode
 from .providers.gemini import GeminiProvider
@@ -106,17 +107,24 @@ class AIProviderManager:
         messages: List[Dict[str, str]],
         system_prompt: str,
         max_tokens: int = 150,
-        timeout: float = 20.0
+        timeout: float = 20.0,
+        chat_id: Optional[int] = None,
+        message_id: Optional[int] = None
     ) -> AIResponse:
         """
         Executes chat request with failover across active providers and key rotation.
+        Includes unique correlation ID and secure diagnostic logging.
         """
         start_time = time.time()
-        logger.info("AI Request Started: Attempting generation across configured providers")
+        corr_id = uuid.uuid4().hex[:8]
+
+        logger.info(
+            f"AI Request Started | correlation_id={corr_id} chat_id={chat_id or 'none'} message_id={message_id or 'none'}"
+        )
 
         has_configured_keys = any(bool(p.api_keys) for p in self.providers.values())
         if not has_configured_keys:
-            logger.warning("AI Request Warning: No API keys are configured for any provider")
+            logger.warning(f"AI Request Warning | correlation_id={corr_id}: No API keys configured for any provider")
 
         for provider_name in self.provider_order:
             provider = self.providers.get(provider_name)
@@ -130,7 +138,9 @@ class AIProviderManager:
                     continue
 
                 try:
-                    logger.info(f"AI Provider Selected: Trying provider '{provider_name}' (key index {key_idx})")
+                    logger.info(
+                        f"AI Provider Selected | provider={provider_name} key_index={key_idx} correlation_id={corr_id}"
+                    )
                     response = await provider.generate_response_with_key(
                         api_key=api_key,
                         messages=messages,
@@ -139,7 +149,9 @@ class AIProviderManager:
                         timeout=timeout
                     )
                     duration = round(time.time() - start_time, 3)
-                    logger.info(f"AI Response Completed: Provider '{provider_name}' succeeded in {duration}s")
+                    logger.info(
+                        f"AI Response Completed | provider={provider_name} key_index={key_idx} correlation_id={corr_id} duration={duration}s"
+                    )
                     self.health_tracker.record_success(provider_name, model_name)
                     return response
 
@@ -147,7 +159,7 @@ class AIProviderManager:
                     err_msg = self._redact_all_keys(str(pe))
                     err_type = pe.error_code.value if pe.error_code else "unknown"
                     logger.warning(
-                        f"Provider Failure: provider={provider_name} key_index={key_idx} model={model_name} type={err_type}: {err_msg}"
+                        f"AI Provider Failed | provider={provider_name} key_index={key_idx} correlation_id={corr_id} model={model_name} type={err_type}: {err_msg}"
                     )
                     cooldown = pe.suggested_cooldown
                     if pe.retry_after and pe.retry_after > 0:
@@ -162,12 +174,12 @@ class AIProviderManager:
                         cooldown_seconds=cooldown or self.default_cooldown_seconds,
                         active_failover_provider=failover_provider
                     )
-                    logger.info("Provider Fallback: Rotating to next available key/provider")
+                    logger.info(f"Provider Fallback | correlation_id={corr_id}: Rotating to next available key/provider")
 
                 except Exception as e:
                     err_msg = self._redact_all_keys(str(e))
                     logger.warning(
-                        f"Provider Failure: provider={provider_name} key_index={key_idx} model={model_name} type=server_error: {type(e).__name__}: {err_msg}"
+                        f"AI Provider Failed | provider={provider_name} key_index={key_idx} correlation_id={corr_id} model={model_name} type=server_error: {type(e).__name__}: {err_msg}"
                     )
                     self._mark_key_cooldown(provider_name, key_idx, self.default_cooldown_seconds)
 
@@ -179,10 +191,12 @@ class AIProviderManager:
                         cooldown_seconds=self.default_cooldown_seconds,
                         active_failover_provider=failover_provider
                     )
-                    logger.info("Provider Fallback: Rotating to next available key/provider")
+                    logger.info(f"Provider Fallback | correlation_id={corr_id}: Rotating to next available key/provider")
 
         duration = round(time.time() - start_time, 3)
-        logger.error(f"AI Request Failed: All configured AI providers/keys failed after {duration}s")
+        logger.error(
+            f"AI Request Failed | correlation_id={corr_id} chat_id={chat_id or 'none'} message_id={message_id or 'none'} duration={duration}s: All configured AI providers/keys failed"
+        )
         return AIResponse(
             text=FALLBACK_YUKI_RESPONSE,
             provider="fallback",
