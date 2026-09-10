@@ -307,7 +307,7 @@ async def service_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if bot_id and any(m.id == bot_id for m in msg.new_chat_members):
             await log_group_added_event(chat, msg.from_user, context)
         for member in msg.new_chat_members:
-            upsert_user(member.id, member.full_name, member.username)
+            upsert_user(member.id, member.full_name, member.username, is_bot=bool(member.is_bot))
             touch_member(chat.id, member.id, now, status='member')
             if not bot_id or member.id != bot_id:
                 try:
@@ -320,7 +320,7 @@ async def service_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if bot_id and left_m.id == bot_id:
             await log_group_removed_event(chat, msg.from_user, context, removal_status='left')
         else:
-            upsert_user(left_m.id, left_m.full_name, left_m.username)
+            upsert_user(left_m.id, left_m.full_name, left_m.username, is_bot=bool(left_m.is_bot))
             update_member_status(chat.id, left_m.id, 'left')
 
     if get_setting(chat.id, 'clean_service', 'off') == 'on':
@@ -405,11 +405,16 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if now - last_g >= SEEN_UPDATE_COOLDOWN_SECONDS:
             group_seen_cache[chat.id] = now
         last_u = user_seen_cache.get(user.id, 0)
-        upsert_user(user.id, user.full_name, user.username, touch_seen=(now - last_u >= SEEN_UPDATE_COOLDOWN_SECONDS))
+        upsert_user(user.id, user.full_name, user.username, touch_seen=(now - last_u >= SEEN_UPDATE_COOLDOWN_SECONDS), is_bot=bool(user.is_bot))
         if now - last_u >= SEEN_UPDATE_COOLDOWN_SECONDS:
             user_seen_cache[user.id] = now
         touch_member(chat.id, user.id, now, status='member')
         record_user_message(chat.id, user.id, msg.message_id)
+
+        txt_check = (msg.text or msg.caption or '').strip()
+        if txt_check and re.match(r'^@all(\s|$)', txt_check, re.IGNORECASE):
+            await tag_cmd(update, context)
+            return
 
         # AFK Return Logic
         txt = msg.text or msg.caption or ''
@@ -667,6 +672,8 @@ def main():
     ]
     admin_cmds = [
         ('promote', promote_cmd, 'Group Management Commands', 'Promote a member to admin', '/promote'),
+        ('tag', tag_cmd, 'Group Management Commands', 'Tag all eligible members in the group.', '/tag Good morning!'),
+        ('all', tag_cmd, 'Group Management Commands', 'Tag all eligible members in the group.', '/all Good morning!'),
         ('demote', demote_cmd, 'Group Management Commands', 'Demote an admin', '/demote'),
         ('ban', ban_cmd, 'Group Management Commands', 'Reply-ban a user', '/ban'),
         ('unban', unban_cmd, 'Group Management Commands', 'Unban by user id', '/unban 1234'),

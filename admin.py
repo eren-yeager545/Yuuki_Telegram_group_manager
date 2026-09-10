@@ -1,3 +1,6 @@
+import asyncio
+from telegram.error import RetryAfter
+import logging
 import html
 import re
 import time
@@ -13,9 +16,10 @@ from store import (
     list_notes, list_quizzes, list_warned_users, log_admin_action, remove_blacklist,
     reset_warns, save_buttons, save_filter, save_note, set_chat_federation, set_setting,
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
-    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed
+    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members
 )
 from helpers import is_admin, is_owner, is_owner_or_sudo, safe_reply_error
+logger = logging.getLogger(__name__)
 
 
 async def is_target_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -1772,3 +1776,127 @@ async def grouplist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(out_text[i:i+4000], parse_mode='HTML', disable_web_page_preview=True)
     else:
         await update.message.reply_text(out_text, parse_mode='HTML', disable_web_page_preview=True)
+
+
+async def tag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    msg = update.effective_message
+
+    if not chat or not user or not msg:
+        return
+
+    if chat.type not in ('group', 'supergroup'):
+        await msg.reply_text("🌸 This command can only be used inside a group.")
+        return
+
+    if not await is_admin(update, context):
+        await msg.reply_text("🌸 Gomen ne! Only group admins and the owner can use tag everyone desu~ ✨")
+        return
+
+    giver_name = html.escape(user.first_name or user.full_name or "Admin")
+
+    text_after_cmd = ""
+    raw_text = msg.text or msg.caption or ""
+
+    if raw_text.startswith('/tag') or raw_text.startswith('/all'):
+        parts = raw_text.split(maxsplit=1)
+        if len(parts) > 1:
+            text_after_cmd = parts[1].strip()
+    elif raw_text.lower().startswith('@all'):
+        parts = raw_text.split(maxsplit=1)
+        if len(parts) > 1:
+            text_after_cmd = parts[1].strip()
+
+    if not text_after_cmd and context.args:
+        text_after_cmd = " ".join(context.args).strip()
+
+    if not text_after_cmd and msg.reply_to_message:
+        replied = msg.reply_to_message
+        text_after_cmd = (replied.text or replied.caption or "").strip()
+
+    if not text_after_cmd:
+        custom_message = "Hey everyone! 👋"
+    else:
+        custom_message = html.escape(text_after_cmd)
+
+    try:
+        members = get_group_members(chat.id)
+    except Exception as e:
+        logger.error(f"Error retrieving group members for tag: {e}")
+        await safe_reply_error(msg)
+        return
+
+    bot_id = context.bot.id if context and context.bot else None
+
+    eligible_members = []
+    for uid, name, username, is_bot in members:
+        if is_bot or (bot_id and uid == bot_id):
+            continue
+        clean_name = (name or "").strip()
+        if not clean_name or clean_name.lower() in ("deleted account", "deleted"):
+            continue
+        eligible_members.append((uid, clean_name, username))
+
+    if not eligible_members:
+        await msg.reply_text("😅 I couldn't find any members to tag right now.")
+        return
+
+    CHUNK_SIZE = 10
+    total_eligible = len(eligible_members)
+    chunks = [eligible_members[i:i + CHUNK_SIZE] for i in range(0, total_eligible, CHUNK_SIZE)]
+
+    header = f"""📢 <b>Attention everyone!</b>
+
+👤 <b>Called by:</b> {giver_name}
+
+💬 {custom_message}
+
+"""
+
+    partial_failure = False
+
+    for idx, chunk in enumerate(chunks):
+        tags_str = " ".join([format_user_link(uid, name) for uid, name, username in chunk])
+        chunk_text = (header + tags_str) if idx == 0 else tags_str
+
+        try:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=chunk_text,
+                parse_mode="HTML",
+                reply_to_message_id=msg.message_id if idx == 0 else None
+            )
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+            try:
+                await context.bot.send_message(
+                    chat_id=chat.id,
+                    text=chunk_text,
+                    parse_mode="HTML",
+                    reply_to_message_id=msg.message_id if idx == 0 else None
+                )
+            except Exception as retry_err:
+                logger.error(f"Failed sending tag batch after retry: {retry_err}")
+                partial_failure = True
+        except Exception as err:
+            logger.error(f"Failed sending tag batch: {err}")
+            partial_failure = True
+
+        if idx < len(chunks) - 1:
+            await asyncio.sleep(0.5)
+
+    if not partial_failure:
+        await msg.reply_text(
+            f"""✅ <b>Tag completed successfully!</b>
+
+👤 {giver_name}, everyone has been notified. ✨""",
+            parse_mode="HTML"
+        )
+    else:
+        await msg.reply_text(
+            f"""⚠️ <b>Tag completed with some limitations.</b>
+
+👤 {giver_name}, some members could not be mentioned.""",
+            parse_mode="HTML"
+        )
