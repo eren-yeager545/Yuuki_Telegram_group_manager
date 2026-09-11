@@ -419,12 +419,13 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # AFK Return Logic
         txt = msg.text or msg.caption or ''
         is_afk_command = bool(txt and txt.strip().startswith('/afk'))
-        if not is_afk_command:
+        is_command = bool(txt and txt.strip().startswith('/'))
+        if not is_afk_command and not is_command:
             try:
-                afk_record = store.get_afk(chat.id, user.id)
+                afk_record = store.get_afk(user.id)
                 if afk_record:
                     reason, afk_since = afk_record
-                    store.delete_afk(chat.id, user.id)
+                    store.delete_afk(user.id)
                     duration_str = format_afk_duration(now - afk_since)
                     user_disp = html.escape(user.first_name or 'User')
                     await msg.reply_text(

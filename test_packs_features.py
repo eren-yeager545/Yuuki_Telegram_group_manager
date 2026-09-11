@@ -99,8 +99,10 @@ async def test_packs_cmd_empty():
     msg = AsyncMock(spec=Message)
     upd.effective_message = msg
 
-    await packs_cmd(upd, None)
-    msg.reply_text.assert_called_with("Aww~ I don't have any sticker packs saved yet! 🥺✨")
+    upd.effective_user.id = 99999
+    with patch("admin.is_owner", lambda uid, *a, **k: True):
+        await packs_cmd(upd, None)
+        msg.reply_text.assert_called_with("Aww~ I don't have any sticker packs saved yet! 🥺✨")
 
 
 @pytest.mark.asyncio
@@ -111,6 +113,7 @@ async def test_delpack_permissions():
     upd.effective_message = msg
     upd.message = msg
 
-    with patch("admin.is_admin", AsyncMock(return_value=False)):
+    upd.effective_user.id = 12345
+    with patch("admin.is_owner", lambda uid, *a, **k: False):
         await delpack_cmd(upd, None)
-        msg.reply_text.assert_called_with("Gomen ne~ 🌸 /delpack is only for admins desu!")
+        msg.reply_text.assert_called_with("Gomen ne~ 🌸 /delpack is strictly for my owner desu! (⁠◕⁠‿⁠◕⁠✿⁠)")

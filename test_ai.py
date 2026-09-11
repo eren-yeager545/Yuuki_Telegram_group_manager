@@ -670,10 +670,9 @@ async def test_addpack_cmd():
     ctx = MagicMock()
 
     # 1. Non-admin check
-    with patch("admin.is_admin", new_callable=AsyncMock) as mock_is_admin:
-        mock_is_admin.return_value = False
+    with patch("admin.is_owner", lambda uid, *a, **k: False):
         await addpack_cmd(upd, ctx)
-        msg.reply_text.assert_called_with("Gomen ne~ 🌸 /addpack is only for admins desu!")
+        msg.reply_text.assert_called_with("Gomen ne~ 🌸 /addpack is strictly for my owner desu! (⁠◕⁠‿⁠◕⁠✿⁠)")
 
     # 2. Admin success replying to sticker
     sticker = MagicMock()
@@ -694,8 +693,7 @@ async def test_addpack_cmd():
 
     ctx.bot.get_sticker_set = AsyncMock(return_value=sticker_set)
 
-    with patch("admin.is_admin", new_callable=AsyncMock) as mock_is_admin:
-        mock_is_admin.return_value = True
+    with patch("admin.is_owner", lambda uid, *a, **k: True):
         await addpack_cmd(upd, ctx)
         ctx.bot.get_sticker_set.assert_called_with("test_pack_set")
         msg.reply_text.assert_called()

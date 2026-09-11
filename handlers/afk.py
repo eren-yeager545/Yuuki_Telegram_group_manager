@@ -51,9 +51,7 @@ async def afk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Check if inside a group / supergroup
-    if chat.type not in ('group', 'supergroup'):
-        await msg.reply_text("The /afk command works in group chats desu~ 🌸")
-        return
+    # Work in both group chats and private chats
 
     # Determine reason
     reason = " ".join(context.args).strip() if context.args else ""
@@ -63,7 +61,7 @@ async def afk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now_utc = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
 
     try:
-        store.set_afk(chat.id, user.id, reason, now_utc)
+        store.set_afk(user.id, reason, now_utc)
     except Exception as e:
         logger.error(f"Failed to set AFK status in DB: {e}")
 

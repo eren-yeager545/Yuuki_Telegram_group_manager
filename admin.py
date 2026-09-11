@@ -1665,10 +1665,12 @@ async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def addpack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /addpack command handler.
-    Allows authorized owners/sudos/admins to save an entire sticker pack by replying to a sticker.
+    Allows authorized bot owners to save an entire sticker pack by replying to a sticker.
     """
-    if not await is_admin(update, context):
-        await update.message.reply_text("Gomen ne~ 🌸 /addpack is only for admins desu!")
+    user = update.effective_user
+    if not user or not is_owner(user.id, OWNER_IDS):
+        if update.effective_message:
+            await update.effective_message.reply_text("Gomen ne~ 🌸 /addpack is strictly for my owner desu! (⁠◕⁠‿⁠◕⁠✿⁠)")
         return
 
     msg = update.effective_message
@@ -1903,8 +1905,13 @@ async def tag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def packs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     msg = update.effective_message
     if not msg:
+        return
+
+    if not user or not is_owner(user.id, OWNER_IDS):
+        await msg.reply_text("Gomen ne~ 🌸 /packs is strictly for my owner desu! (⁠◕⁠‿⁠◕⁠✿⁠)")
         return
 
     from store import get_all_sticker_packs
@@ -1967,6 +1974,11 @@ async def packs_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     if not query or not query.data or not query.data.startswith("packs_page:"):
         return
 
+    user = update.effective_user
+    if not user or not is_owner(user.id, OWNER_IDS):
+        await query.answer("Gomen ne~ 🌸 /packs is strictly for my owner desu! (⁠◕⁠‿⁠◕⁠✿⁠)", show_alert=True)
+        return
+
     await query.answer()
     try:
         page = int(query.data.split(":")[1])
@@ -1983,8 +1995,13 @@ async def packs_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def delpack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_admin(update, context):
-        await update.message.reply_text("Gomen ne~ 🌸 /delpack is only for admins desu!")
+    user = update.effective_user
+    msg = update.effective_message
+    if not msg:
+        return
+
+    if not user or not is_owner(user.id, OWNER_IDS):
+        await msg.reply_text("Gomen ne~ 🌸 /delpack is strictly for my owner desu! (⁠◕⁠‿⁠◕⁠✿⁠)")
         return
 
     msg = update.effective_message
