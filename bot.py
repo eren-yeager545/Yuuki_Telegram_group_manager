@@ -8,7 +8,7 @@ import uuid
 from typing import Optional
 from collections import defaultdict, deque
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, ChatMemberHandler, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, ChatMemberHandler, TypeHandler, filters
 from logger_helper import log_user_started_event, log_group_added_event, log_group_removed_event, log_user_joined_group_event, send_logger_notification
 from config import BOT_TOKEN, LOG_CHANNEL_ID, QUIZ_INTERVAL_SECONDS, SEEN_UPDATE_COOLDOWN_SECONDS, PORT, WEBHOOK_URL, WEBHOOK_PATH, WEBHOOK_SECRET
 from store import (
@@ -370,6 +370,121 @@ async def maybe_delete(msg):
         return False
 
 
+
+def format_full_name(first_name: Optional[str], last_name: Optional[str] = None) -> str:
+    first = (first_name or "").strip()
+    last = (last_name or "").strip()
+    if last:
+        return f"{first} {last}".strip()
+    return first or "User"
+
+
+async def check_and_track_profile_change(chat_id: int, user, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not user or getattr(user, 'is_bot', False):
+        return False
+
+    user_id = user.id
+    curr_fn = (getattr(user, 'first_name', '') or '').strip()
+    curr_ln = (getattr(user, 'last_name', '') or '').strip()
+    curr_un = (getattr(user, 'username', '') or '').strip()
+
+    prev = store.get_profile_snapshot(chat_id, user_id)
+
+    if prev is None:
+        store.save_profile_snapshot(chat_id, user_id, curr_fn, curr_ln, curr_un)
+        return False
+
+    prev_fn = (prev.get('first_name') or '').strip()
+    prev_ln = (prev.get('last_name') or '').strip()
+    prev_un = (prev.get('username') or '').strip()
+
+    old_full_name = format_full_name(prev_fn, prev_ln)
+    new_full_name = format_full_name(curr_fn, curr_ln)
+    name_changed = (old_full_name != new_full_name)
+
+    old_clean_un = prev_un.lstrip('@').strip()
+    new_clean_un = curr_un.lstrip('@').strip()
+    username_changed = (old_clean_un.lower() != new_clean_un.lower())
+
+    if not name_changed and not username_changed:
+        return False
+
+    store.save_profile_snapshot(chat_id, user_id, curr_fn, curr_ln, curr_un)
+
+    user_mention = f'<a href="tg://user?id={user_id}">{html.escape(new_full_name)}</a>'
+
+    old_un_disp = f"@{old_clean_un}" if old_clean_un else "No username"
+    new_un_disp = f"@{new_clean_un}" if new_clean_un else "No username"
+
+    old_fn_disp = f'"{html.escape(old_full_name)}"'
+    new_fn_disp = f'"{html.escape(new_full_name)}"'
+    old_un_fmt = f'"{html.escape(old_un_disp)}"'
+    new_un_fmt = f'"{html.escape(new_un_disp)}"'
+
+    if name_changed and not username_changed:
+        msg_text = "\n".join([
+            "🔄 <b>Name Changed</b>",
+            "",
+            f"👤 <b>User:</b> {user_mention}",
+            f"▫️ <b>Old:</b> {old_fn_disp}",
+            f"▫️ <b>New:</b> {new_fn_disp}"
+        ])
+    elif username_changed and not name_changed:
+        msg_text = "\n".join([
+            "🔄 <b>Username Changed</b>",
+            "",
+            f"👤 <b>User:</b> {user_mention}",
+            f"▫️ <b>Old:</b> {old_un_fmt}",
+            f"▫️ <b>New:</b> {new_un_fmt}"
+        ])
+    else:
+        msg_text = "\n".join([
+            "🔄 <b>Profile Updated</b>",
+            "",
+            f"👤 <b>User:</b> {user_mention}",
+            "",
+            "<b>Name</b>",
+            f"▫️ <b>Old:</b> {old_fn_disp}",
+            f"▫️ <b>New:</b> {new_fn_disp}",
+            "",
+            "<b>Username</b>",
+            f"▫️ <b>Old:</b> {old_un_fmt}",
+            f"▫️ <b>New:</b> {new_un_fmt}"
+        ])
+
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=msg_text,
+            parse_mode="HTML"
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send profile change notification in chat {chat_id}: {e}")
+        return False
+
+
+async def track_profile_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not isinstance(update, Update):
+            return
+        chat = update.effective_chat
+        if not chat or chat.type not in ('group', 'supergroup'):
+            return
+
+        user = update.effective_user
+        if user and not getattr(user, 'is_bot', False):
+            await check_and_track_profile_change(chat.id, user, context)
+
+        msg = update.effective_message
+        if msg and getattr(msg, 'new_chat_members', None):
+            for member in msg.new_chat_members:
+                if member and not getattr(member, 'is_bot', False):
+                    await check_and_track_profile_change(chat.id, member, context)
+    except Exception as e:
+        logger.error(f"Error in track_profile_update_handler: {e}")
+
+
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     chat = update.effective_chat
@@ -710,7 +825,6 @@ def main():
         ('setrules', setrules_cmd, 'Moderation Commands', 'Set rules text', '/setrules no spam'),
         ('rulesbtn', rulesbtn_cmd, 'Moderation Commands', 'Set rules buttons', '/rulesbtn Rules - https://example.com'),
         ('modlog', modlog_cmd, 'Moderation Commands', 'Show recent moderation logs (admins only)', '/modlog'),
-        ('history', history_cmd, 'Users Commands', "Show user's past name history", '/history'),
         ('groupquota', groupquota_cmd, 'Help Sections', 'Show per-group quotas and retention caps', '/groupquota'),
         ('reports', reports_cmd, 'Moderation Commands', 'Enable or disable reports', '/reports on'),
         ('newfed', newfed_cmd, 'Federation Commands', 'Create federation', '/newfed myfed My Federation'),
@@ -728,6 +842,7 @@ def main():
         ('delquiz', delquiz_cmd, 'Quiz Commands', 'Delete saved quiz', '/delquiz 1'),
         ('broadcast', broadcast_cmd, 'Owner Commands', 'Broadcast to all groups', '/broadcast hello all'),
     ]
+    app.add_handler(TypeHandler(Update, track_profile_update_handler), group=-1)
     for spec in user_cmds + admin_cmds:
         add_registered_command(app, *spec)
     app.add_handler(CallbackQueryHandler(packs_callback_handler, pattern='^packs_page:'))

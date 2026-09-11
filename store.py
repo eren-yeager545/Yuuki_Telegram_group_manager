@@ -115,7 +115,7 @@ def init_db():
         db['sticker_packs'].create_index('set_name', unique=True)
         db['stickers'].create_index('set_name')
         db['afk'].create_index('user_id', unique=True)
-        db['user_name_history'].create_index([('user_id', 1), ('name', 1)], unique=True)
+        db['user_profile_snapshots'].create_index([('chat_id', 1), ('user_id', 1)], unique=True)
         return
 
     with closing(conn()) as c:
@@ -155,7 +155,7 @@ def init_db():
         cur.execute('CREATE TABLE IF NOT EXISTS sticker_packs (set_name TEXT PRIMARY KEY, title TEXT, count INTEGER, updated_at INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS stickers (id INTEGER PRIMARY KEY AUTOINCREMENT, set_name TEXT, file_id TEXT, file_unique_id TEXT, emoji TEXT, sticker_type TEXT)')
         cur.execute('CREATE TABLE IF NOT EXISTS afk (user_id INTEGER PRIMARY KEY, reason TEXT, afk_since INTEGER)')
-        cur.execute('CREATE TABLE IF NOT EXISTS user_name_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, name TEXT, recorded_at INTEGER, UNIQUE(user_id, name))')
+        cur.execute('CREATE TABLE IF NOT EXISTS user_profile_snapshots (chat_id INTEGER, user_id INTEGER, first_name TEXT, last_name TEXT, username TEXT, updated_at INTEGER, PRIMARY KEY(chat_id, user_id))')
 
         # Schema migrations for existing SQLite databases
         cur.execute("PRAGMA table_info(afk)")
@@ -359,16 +359,12 @@ def upsert_user(user_id, full_name, username, touch_seen=True, is_bot=False):
                 'added_at': now,
                 'last_seen_at': now
             })
-        if full_name:
-            record_user_name(user_id, full_name)
         return
 
     with closing(conn()) as c:
         cur = c.cursor()
         cur.execute('INSERT INTO users(user_id,full_name,username,added_at,last_seen_at,is_bot) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET full_name=excluded.full_name, username=excluded.username, is_bot=excluded.is_bot, last_seen_at=CASE WHEN ? THEN excluded.last_seen_at ELSE users.last_seen_at END', (user_id, full_name, username, now, now, 1 if is_bot_val else 0, 1 if touch_seen else 0))
         c.commit()
-    if full_name:
-        record_user_name(user_id, full_name)
 
 
 def get_user_by_username(username):
@@ -1600,46 +1596,69 @@ def delete_sticker_pack(set_name: str) -> bool:
 
 
 
-def record_user_name(user_id, name):
-    if not user_id or not name or not str(name).strip():
-        return
-    name = str(name).strip()
-    now = _now()
+def get_profile_snapshot(chat_id, user_id):
+    if not chat_id or not user_id:
+        return None
     if is_mongo():
         db = get_mongo_db()
-        try:
-            db['user_name_history'].insert_one({
+        doc = db['user_profile_snapshots'].find_one({'chat_id': chat_id, 'user_id': user_id})
+        if doc:
+            return {
+                'chat_id': doc.get('chat_id'),
+                'user_id': doc.get('user_id'),
+                'first_name': doc.get('first_name') or '',
+                'last_name': doc.get('last_name') or '',
+                'username': doc.get('username') or '',
+                'updated_at': doc.get('updated_at', 0)
+            }
+        return None
+
+    with closing(conn()) as c:
+        cur = c.cursor()
+        row = cur.execute(
+            'SELECT first_name, last_name, username, updated_at FROM user_profile_snapshots WHERE chat_id=? AND user_id=?',
+            (chat_id, user_id)
+        ).fetchone()
+        if row:
+            return {
+                'chat_id': chat_id,
                 'user_id': user_id,
-                'name': name,
-                'recorded_at': now
-            })
-        except Exception:
-            pass
+                'first_name': row[0] or '',
+                'last_name': row[1] or '',
+                'username': row[2] or '',
+                'updated_at': row[3] or 0
+            }
+        return None
+
+
+def save_profile_snapshot(chat_id, user_id, first_name, last_name, username):
+    if not chat_id or not user_id:
+        return
+    now = _now()
+    fn = first_name or ''
+    ln = last_name or ''
+    un = username or ''
+    if is_mongo():
+        db = get_mongo_db()
+        db['user_profile_snapshots'].update_one(
+            {'chat_id': chat_id, 'user_id': user_id},
+            {'': {
+                'first_name': fn,
+                'last_name': ln,
+                'username': un,
+                'updated_at': now
+            }},
+            upsert=True
+        )
         return
 
     with closing(conn()) as c:
         cur = c.cursor()
-        cur.execute('INSERT OR IGNORE INTO user_name_history (user_id, name, recorded_at) VALUES (?, ?, ?)', (user_id, name, now))
+        cur.execute(
+            'INSERT INTO user_profile_snapshots(chat_id, user_id, first_name, last_name, username, updated_at) '
+            'VALUES (?, ?, ?, ?, ?, ?) '
+            'ON CONFLICT(chat_id, user_id) DO UPDATE SET '
+            'first_name=excluded.first_name, last_name=excluded.last_name, username=excluded.username, updated_at=excluded.updated_at',
+            (chat_id, user_id, fn, ln, un, now)
+        )
         c.commit()
-
-
-def get_user_name_history(user_id):
-    if not user_id:
-        return []
-    if is_mongo():
-        db = get_mongo_db()
-        docs = db['user_name_history'].find({'user_id': user_id}).sort('recorded_at', 1)
-        res = []
-        for d in docs:
-            if d.get('name') and d['name'] not in res:
-                res.append(d['name'])
-        return res
-
-    with closing(conn()) as c:
-        cur = c.cursor()
-        rows = cur.execute('SELECT name FROM user_name_history WHERE user_id=? ORDER BY recorded_at ASC, id ASC', (user_id,)).fetchall()
-        res = []
-        for r in rows:
-            if r[0] and r[0] not in res:
-                res.append(r[0])
-        return res
