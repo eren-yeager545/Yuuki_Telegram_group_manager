@@ -115,6 +115,7 @@ def init_db():
         db['sticker_packs'].create_index('set_name', unique=True)
         db['stickers'].create_index('set_name')
         db['afk'].create_index('user_id', unique=True)
+        db['user_name_history'].create_index([('user_id', 1), ('name', 1)], unique=True)
         return
 
     with closing(conn()) as c:
@@ -154,6 +155,7 @@ def init_db():
         cur.execute('CREATE TABLE IF NOT EXISTS sticker_packs (set_name TEXT PRIMARY KEY, title TEXT, count INTEGER, updated_at INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS stickers (id INTEGER PRIMARY KEY AUTOINCREMENT, set_name TEXT, file_id TEXT, file_unique_id TEXT, emoji TEXT, sticker_type TEXT)')
         cur.execute('CREATE TABLE IF NOT EXISTS afk (user_id INTEGER PRIMARY KEY, reason TEXT, afk_since INTEGER)')
+        cur.execute('CREATE TABLE IF NOT EXISTS user_name_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, name TEXT, recorded_at INTEGER, UNIQUE(user_id, name))')
 
         # Schema migrations for existing SQLite databases
         cur.execute("PRAGMA table_info(afk)")
@@ -357,12 +359,16 @@ def upsert_user(user_id, full_name, username, touch_seen=True, is_bot=False):
                 'added_at': now,
                 'last_seen_at': now
             })
+        if full_name:
+            record_user_name(user_id, full_name)
         return
 
     with closing(conn()) as c:
         cur = c.cursor()
         cur.execute('INSERT INTO users(user_id,full_name,username,added_at,last_seen_at,is_bot) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET full_name=excluded.full_name, username=excluded.username, is_bot=excluded.is_bot, last_seen_at=CASE WHEN ? THEN excluded.last_seen_at ELSE users.last_seen_at END', (user_id, full_name, username, now, now, 1 if is_bot_val else 0, 1 if touch_seen else 0))
         c.commit()
+    if full_name:
+        record_user_name(user_id, full_name)
 
 
 def get_user_by_username(username):
@@ -1591,3 +1597,49 @@ def delete_sticker_pack(set_name: str) -> bool:
     except Exception as e:
         logger.error(f"Error deleting sticker pack '{set_name}': {e}")
         return False
+
+
+
+def record_user_name(user_id, name):
+    if not user_id or not name or not str(name).strip():
+        return
+    name = str(name).strip()
+    now = _now()
+    if is_mongo():
+        db = get_mongo_db()
+        try:
+            db['user_name_history'].insert_one({
+                'user_id': user_id,
+                'name': name,
+                'recorded_at': now
+            })
+        except Exception:
+            pass
+        return
+
+    with closing(conn()) as c:
+        cur = c.cursor()
+        cur.execute('INSERT OR IGNORE INTO user_name_history (user_id, name, recorded_at) VALUES (?, ?, ?)', (user_id, name, now))
+        c.commit()
+
+
+def get_user_name_history(user_id):
+    if not user_id:
+        return []
+    if is_mongo():
+        db = get_mongo_db()
+        docs = db['user_name_history'].find({'user_id': user_id}).sort('recorded_at', 1)
+        res = []
+        for d in docs:
+            if d.get('name') and d['name'] not in res:
+                res.append(d['name'])
+        return res
+
+    with closing(conn()) as c:
+        cur = c.cursor()
+        rows = cur.execute('SELECT name FROM user_name_history WHERE user_id=? ORDER BY recorded_at ASC, id ASC', (user_id,)).fetchall()
+        res = []
+        for r in rows:
+            if r[0] and r[0] not in res:
+                res.append(r[0])
+        return res

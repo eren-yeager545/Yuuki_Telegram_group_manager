@@ -16,7 +16,7 @@ from store import (
     list_notes, list_quizzes, list_warned_users, log_admin_action, remove_blacklist,
     reset_warns, save_buttons, save_filter, save_note, set_chat_federation, set_setting,
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
-    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members
+    get_user_by_username, get_user_by_id, record_user_name, get_user_name_history, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members
 )
 from helpers import is_admin, is_owner, is_owner_or_sudo, safe_reply_error
 logger = logging.getLogger(__name__)
@@ -1273,7 +1273,11 @@ async def delquiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = await resolve_target_user(update, context)
-    await update.message.reply_text(f'User ID: {target.id}\nChat ID: {update.effective_chat.id}')
+    if not target:
+        target = update.effective_user
+    user_id = target.id if target else (update.effective_user.id if update.effective_user else 0)
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    await update.message.reply_text(f'User ID: {user_id}\nChat ID: {chat_id}')
 
 
 async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1601,65 +1605,39 @@ Bye-bye, take care! 🌸""")
 
 
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    if not chat or chat.type not in ('group', 'supergroup'):
-        await update.message.reply_text("🌸 /history command can only be used in group chats desu~ 💕")
-        return
-    if not await is_admin(update, context):
-        await update.message.reply_text("Gomen ne~ 🌸 Only group admins can view moderation history desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)")
-        return
+    target = await resolve_target_user(update, context)
+    if not target:
+        target = update.effective_user
 
-    target = None
-    if context.args or (update.message and update.message.reply_to_message):
-        target = await resolve_target_user(update, context)
-
-    rows = get_recent_audit_logs(chat.id, 50)
-    if target:
-        rows = [r for r in rows if r[2] == target.id or r[0] == target.id]
-
-    if not rows:
-        await update.message.reply_text("📋 Moderation History\n\nNo recent moderation history found.")
+    if not target:
+        await update.message.reply_text("✨ No user found.")
         return
 
-    lines_out = ["📋 Moderation History", ""]
-    action_emojis = {
-        'ban': '🚫 BAN',
-        'unban': '✅ UNBAN',
-        'kick': '👞 KICK',
-        'mute': '🔇 MUTE',
-        'unmute': '🔊 UNMUTE',
-        'warn': '⚠️ WARN',
-        'clearwarns': '🧹 CLEAR WARNS',
-        'report': '🚨 REPORT',
-        'pin': '📌 PIN'
-    }
+    user_id = target.id
+    current_name = getattr(target, 'full_name', None) or getattr(target, 'first_name', None)
 
-    for actor_id, action, target_id, details, created_at in rows[:20]:
-        action_upper = action.split()[0].lower() if action else ''
-        header = action_emojis.get(action_upper, f"⚡ {action.upper()}")
+    if current_name:
+        record_user_name(user_id, current_name)
 
-        if target_id:
-            u_info = get_user_by_id(target_id)
-            if u_info:
-                user_str = format_user_tag(u_info[0], u_info[1] or 'User', u_info[2])
-            else:
-                user_str = format_user_link(target_id, f"User {target_id}")
-        else:
-            actor_info = get_user_by_id(actor_id)
-            if actor_info:
-                user_str = format_user_tag(actor_info[0], actor_info[1] or 'Admin', actor_info[2])
-            else:
-                user_str = format_user_link(actor_id, f"Admin {actor_id}")
+    db_user = get_user_by_id(user_id)
+    if not current_name and db_user:
+        current_name = db_user[1]
+    if not current_name:
+        current_name = f"User {user_id}"
 
-        rel_time = format_relative_time(created_at)
-        lines_out.append(f"{header}")
-        lines_out.append(f"👤 {user_str}")
-        if details:
-            lines_out.append(f"📝 {html.escape(details)}")
-        lines_out.append(f"🕐 {rel_time}")
-        lines_out.append("")
+    all_history = get_user_name_history(user_id)
+    previous_names = [n for n in all_history if n != current_name]
 
-    await update.message.reply_html("\n".join(lines_out), disable_web_page_preview=True)
+    lines = ["📖 Name History", "", f'👤 Current: "{html.escape(current_name)}"', ""]
+    if previous_names:
+        lines.append("Previous names:")
+        lines.append("")
+        for idx, old_n in enumerate(previous_names, start=1):
+            lines.append(f'{idx}. "{html.escape(old_n)}"')
+    else:
+        lines.append("✨ No previous names found for this user yet.")
+
+    await update.message.reply_text("\n".join(lines))
 
 
 async def addpack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

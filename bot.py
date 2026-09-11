@@ -710,7 +710,7 @@ def main():
         ('setrules', setrules_cmd, 'Moderation Commands', 'Set rules text', '/setrules no spam'),
         ('rulesbtn', rulesbtn_cmd, 'Moderation Commands', 'Set rules buttons', '/rulesbtn Rules - https://example.com'),
         ('modlog', modlog_cmd, 'Moderation Commands', 'Show recent moderation logs (admins only)', '/modlog'),
-        ('history', history_cmd, 'Moderation Commands', 'Show recent moderation history for group or user', '/history'),
+        ('history', history_cmd, 'Users Commands', "Show user's past name history", '/history'),
         ('groupquota', groupquota_cmd, 'Help Sections', 'Show per-group quotas and retention caps', '/groupquota'),
         ('reports', reports_cmd, 'Moderation Commands', 'Enable or disable reports', '/reports on'),
         ('newfed', newfed_cmd, 'Federation Commands', 'Create federation', '/newfed myfed My Federation'),
