@@ -680,6 +680,8 @@ def main():
         ('kick', kick_cmd, 'Group Management Commands', 'Reply-kick a user', '/kick'),
         ('del', del_cmd, 'Group Management Commands', 'Delete replied message', '/del'),
         ('addpack', addpack_cmd, 'Group Management Commands', 'Add sticker pack by reply to a sticker', '/addpack'),
+        ('packs', packs_cmd, 'Group Management Commands', 'View all saved sticker packs', '/packs'),
+        ('delpack', delpack_cmd, 'Group Management Commands', 'Delete a stored sticker pack', '/delpack pack_name'),
         ('dban', dban_cmd, 'Group Management Commands', 'Ban user and purge all their messages', '/dban'),
         ('pin', pin_cmd, 'Group Management Commands', 'Pin replied message', '/pin'),
         ('unpin', unpin_cmd, 'Group Management Commands', 'Clear all pins', '/unpin'),
@@ -728,6 +730,7 @@ def main():
     ]
     for spec in user_cmds + admin_cmds:
         add_registered_command(app, *spec)
+    app.add_handler(CallbackQueryHandler(packs_callback_handler, pattern='^packs_page:'))
     app.add_handler(CallbackQueryHandler(kick_callback_handler, pattern='^kick_'))
     app.add_handler(CallbackQueryHandler(broadcast_callback_handler, pattern='^bcast_'))
     app.add_handler(CallbackQueryHandler(ttt_callback_handler, pattern='^ttt_'))

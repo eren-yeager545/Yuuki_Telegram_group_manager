@@ -1540,3 +1540,54 @@ def delete_afk(arg1: int, arg2: int = None) -> None:
     with get_conn() as c:
         c.execute('DELETE FROM afk WHERE user_id=?', (user_id,))
         c.commit()
+
+
+def get_all_sticker_packs() -> list:
+    """Retrieves metadata for all saved sticker packs."""
+    try:
+        if is_mongo():
+            db = get_mongo_db()
+            packs = list(db['sticker_packs'].find({}))
+            res = []
+            for p in packs:
+                res.append({
+                    'set_name': p.get('set_name', ''),
+                    'title': p.get('title', ''),
+                    'count': p.get('count', 0),
+                    'updated_at': p.get('updated_at', 0)
+                })
+            return res
+        else:
+            with closing(conn()) as c:
+                rows = c.execute('SELECT set_name, title, count, updated_at FROM sticker_packs ORDER BY updated_at DESC').fetchall()
+                return [
+                    {'set_name': r[0], 'title': r[1], 'count': r[2], 'updated_at': r[3]}
+                    for r in rows
+                ]
+    except Exception as e:
+        logger.error(f"Error fetching sticker packs: {e}")
+        return []
+
+
+def delete_sticker_pack(set_name: str) -> bool:
+    """Deletes a sticker pack and its stickers by set_name. Returns True if deleted."""
+    if not set_name:
+        return False
+    try:
+        if is_mongo():
+            db = get_mongo_db()
+            pack_res = db['sticker_packs'].delete_one({'set_name': set_name})
+            db['stickers'].delete_many({'set_name': set_name})
+            return pack_res.deleted_count > 0
+        else:
+            with closing(conn()) as c:
+                row = c.execute('SELECT set_name FROM sticker_packs WHERE set_name=?', (set_name,)).fetchone()
+                if not row:
+                    return False
+                c.execute('DELETE FROM sticker_packs WHERE set_name=?', (set_name,))
+                c.execute('DELETE FROM stickers WHERE set_name=?', (set_name,))
+                c.commit()
+                return True
+    except Exception as e:
+        logger.error(f"Error deleting sticker pack '{set_name}': {e}")
+        return False
