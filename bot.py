@@ -682,6 +682,7 @@ def main():
         ('del', del_cmd, 'Group Management Commands', 'Delete replied message', '/del'),
         ('addpack', addpack_cmd, 'Group Management Commands', 'Add sticker pack by reply to a sticker', '/addpack'),
         ('packs', packs_cmd, 'Group Management Commands', 'View all saved sticker packs', '/packs'),
+        ('pack', pack_cmd, 'Group Management Commands', 'Preview a specific saved sticker pack', '/pack id'),
         ('delpack', delpack_cmd, 'Group Management Commands', 'Delete a stored sticker pack', '/delpack pack_name'),
         ('dban', dban_cmd, 'Group Management Commands', 'Ban user and purge all their messages', '/dban'),
         ('pin', pin_cmd, 'Group Management Commands', 'Pin replied message', '/pin'),

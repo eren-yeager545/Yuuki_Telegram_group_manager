@@ -669,12 +669,12 @@ async def test_addpack_cmd():
     upd.effective_user = user
     ctx = MagicMock()
 
-    # 1. Non-admin check
+    # 1. Non-owner check
     with patch("admin.is_owner", lambda uid, *a, **k: False):
         await addpack_cmd(upd, ctx)
         msg.reply_text.assert_called_with("Gomen ne~ 🌸 /addpack is strictly for my owner desu! (⁠◕⁠‿⁠◕⁠✿⁠)")
 
-    # 2. Admin success replying to sticker
+    # 2. Owner success replying to sticker
     sticker = MagicMock()
     sticker.set_name = "test_pack_set"
     reply_msg = MagicMock(spec=Message)

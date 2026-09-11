@@ -1906,6 +1906,7 @@ async def tag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def packs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+
     msg = update.effective_message
     if not msg:
         return
@@ -2033,3 +2034,57 @@ async def delpack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(msg_text, parse_mode="HTML")
     else:
         await msg.reply_text("Uwaa~ I couldn't find that sticker pack anywhere! 🥺🔍")
+
+
+
+async def pack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /pack <id> command handler.
+    Allows the bot owner to preview a specific saved sticker pack by its set_name/id.
+    """
+    user = update.effective_user
+    if not user or not is_owner(user.id, OWNER_IDS):
+        await update.message.reply_text("Gomen ne~ 🌸 /pack is strictly for my owner desu! (⁠◕⁠‿⁠◕⁠✿⁠)")
+        return
+
+    msg = update.effective_message
+    if not msg:
+        return
+
+    args = context.args
+    if not args:
+        await msg.reply_text("🌸 Usage: <code>/pack &lt;sticker_pack_id&gt;</code>", parse_mode="HTML")
+        return
+
+    target_id = args[0].strip()
+    if not target_id:
+        await msg.reply_text("🌸 Usage: <code>/pack &lt;sticker_pack_id&gt;</code>", parse_mode="HTML")
+        return
+
+    from store import get_sticker_pack
+    pack_data = get_sticker_pack(target_id)
+    if not pack_data:
+        await msg.reply_text("Uwaa~ I couldn't find that sticker pack anywhere! 🥺🔍")
+        return
+
+    title = pack_data.get('title') or 'Untitled Pack'
+    set_name = pack_data.get('set_name') or target_id
+    stickers = pack_data.get('stickers') or []
+    count = pack_data.get('count', len(stickers))
+
+    text_lines = [
+        f"📦 <b>{html.escape(title)}</b>",
+        f"🆔 <code>{html.escape(set_name)}</code>",
+        f"🔢 {count} stickers in pack\n"
+    ]
+
+    await msg.reply_text("\n".join(text_lines), parse_mode="HTML")
+
+    if stickers:
+        first_sticker = stickers[0]
+        file_id = first_sticker.get('file_id')
+        if file_id:
+            try:
+                await msg.reply_sticker(sticker=file_id)
+            except Exception as e:
+                logger.error(f"Error sending sticker preview for pack {set_name}: {e}")
