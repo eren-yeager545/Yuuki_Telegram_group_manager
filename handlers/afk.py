@@ -5,7 +5,6 @@ import random
 from telegram import Update, MessageEntity
 from telegram.ext import ContextTypes
 import store
-from admin import format_user_tag
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +30,13 @@ def format_afk_duration(seconds: int) -> str:
 
     parts = []
     if days > 0:
-        parts.append(f"{days} day{'s' if days != 1 else ''}")
+        parts.append(f"{days} day" if days == 1 else f"{days} days")
     if hours > 0:
-        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+        parts.append(f"{hours} hour" if hours == 1 else f"{hours} hours")
     if minutes > 0:
-        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+        parts.append(f"{minutes} minute" if minutes == 1 else f"{minutes} minutes")
     if not parts or (days == 0 and hours == 0 and minutes == 0):
-        parts.append(f"{secs} second{'s' if secs != 1 else ''}")
+        parts.append(f"{secs} second" if secs == 1 else f"{secs} seconds")
 
     return " ".join(parts)
 
@@ -50,11 +49,6 @@ async def afk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not user or not chat:
         return
 
-    # Check if inside a group / supergroup
-    if chat.type not in ('group', 'supergroup'):
-        await msg.reply_text("The /afk command works in group chats desu~ 🌸")
-        return
-
     # Determine reason
     reason = " ".join(context.args).strip() if context.args else ""
     if not reason:
@@ -62,19 +56,27 @@ async def afk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     now_utc = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
 
+    u_fn = user.full_name or user.first_name or "User"
+    if not isinstance(u_fn, str):
+        u_fn = str(u_fn)
+    u_un = user.username if isinstance(user.username, str) else None
+
     try:
-        store.set_afk(chat.id, user.id, reason, now_utc)
+        store.upsert_user(user.id, u_fn, u_un, touch_seen=True, is_bot=bool(getattr(user, "is_bot", False)))
+        store.set_afk(user.id, reason, now_utc)
     except Exception as e:
         logger.error(f"Failed to set AFK status in DB: {e}")
 
-    user_name = html.escape(user.first_name or "User")
+    user_name = html.escape(user.first_name if isinstance(user.first_name, str) else "User")
+    resp_text = f"🌸 <b>{user_name}</b> is now AFK!\n💭 Reason: {html.escape(reason)}"
+    resp_text = resp_text.replace("\\n", "\n")
     await msg.reply_text(
-        f"🌸 <b>{user_name}</b> is now AFK!\n💭 Reason: {html.escape(reason)}",
+        resp_text,
         parse_mode="HTML"
     )
 
 
-def extract_mentioned_afk_users(update: Update, chat_id: int):
+def extract_mentioned_afk_users(update: Update, chat_id: int = None):
     msg = update.effective_message
     if not msg:
         return []
@@ -82,11 +84,11 @@ def extract_mentioned_afk_users(update: Update, chat_id: int):
     afk_users = []
     seen_uids = set()
 
-    if msg and msg.from_user and hasattr(msg.from_user, 'id'):
+    if msg and msg.from_user and hasattr(msg.from_user, "id"):
         uid = msg.from_user.id
         if isinstance(uid, int):
             seen_uids.add(uid)
-    if update and getattr(update, 'effective_user', None) and hasattr(update.effective_user, 'id'):
+    if update and getattr(update, "effective_user", None) and hasattr(update.effective_user, "id"):
         uid = update.effective_user.id
         if isinstance(uid, int):
             seen_uids.add(uid)
@@ -94,17 +96,19 @@ def extract_mentioned_afk_users(update: Update, chat_id: int):
     # 1. Reply checking
     if msg.reply_to_message and msg.reply_to_message.from_user:
         replied_user = msg.reply_to_message.from_user
-        if not replied_user.is_bot and replied_user.id not in seen_uids:
+        if not getattr(replied_user, "is_bot", False) and replied_user.id not in seen_uids:
             try:
-                afk_info = store.get_afk(chat_id, replied_user.id)
+                afk_info = store.get_afk(replied_user.id)
                 if afk_info:
                     seen_uids.add(replied_user.id)
-                    afk_users.append((replied_user.id, replied_user.first_name, replied_user.username, afk_info[0], afk_info[1]))
+                    r_fn = replied_user.first_name if isinstance(replied_user.first_name, str) else "User"
+                    r_un = replied_user.username if isinstance(replied_user.username, str) else None
+                    afk_users.append((replied_user.id, r_fn, r_un, afk_info[0], afk_info[1]))
             except Exception as e:
                 logger.error(f"Error checking AFK for replied user: {e}")
 
     # 2. Entity mentions checking
-    entities = msg.entities or msg.caption_entities or []
+    entities = (msg.entities or []) + (msg.caption_entities or [])
     txt = msg.text or msg.caption or ""
 
     for entity in entities:
@@ -113,13 +117,16 @@ def extract_mentioned_afk_users(update: Update, chat_id: int):
         target_username = None
 
         if entity.type == MessageEntity.TEXT_MENTION and entity.user:
-            if not entity.user.is_bot:
+            if not getattr(entity.user, "is_bot", False):
                 target_uid = entity.user.id
-                target_first_name = entity.user.first_name
-                target_username = entity.user.username
+                target_first_name = entity.user.first_name if isinstance(entity.user.first_name, str) else "User"
+                target_username = entity.user.username if isinstance(entity.user.username, str) else None
+                try:
+                    store.upsert_user(target_uid, target_first_name, target_username, is_bot=bool(getattr(entity.user, "is_bot", False)))
+                except Exception as e:
+                    logger.error(f"Error saving user from text mention: {e}")
         elif entity.type == MessageEntity.MENTION:
-            # Extract @username from text
-            username = txt[entity.offset:entity.offset + entity.length].lstrip('@').strip()
+            username = txt[entity.offset:entity.offset + entity.length].lstrip("@").strip()
             if username:
                 user_row = store.get_user_by_username(username)
                 if user_row:
@@ -127,7 +134,7 @@ def extract_mentioned_afk_users(update: Update, chat_id: int):
 
         if target_uid and target_uid not in seen_uids:
             try:
-                afk_info = store.get_afk(chat_id, target_uid)
+                afk_info = store.get_afk(target_uid)
                 if afk_info:
                     seen_uids.add(target_uid)
                     if not target_first_name:
