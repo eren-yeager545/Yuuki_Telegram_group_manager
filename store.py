@@ -1500,7 +1500,7 @@ def set_afk(arg1: int, arg2=None, arg3=None, arg4=None) -> None:
         db = get_mongo_db()
         db['afk'].update_one(
             {'user_id': user_id},
-            {'': {'user_id': user_id, 'reason': reason, 'afk_since': afk_since}},
+            {'$set': {'user_id': user_id, 'reason': reason, 'afk_since': afk_since}},
             upsert=True
         )
         return

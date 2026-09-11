@@ -26,7 +26,6 @@ from handlers.ai_chat import handle_ai_chat, should_trigger_yuki
 import store
 import html
 from handlers.afk import afk_cmd, format_afk_duration, extract_mentioned_afk_users
-from handlers.afk import afk_cmd, format_afk_duration, extract_mentioned_afk_users
 
 import tornado.web
 from telegram.ext._utils.webhookhandler import WebhookAppClass
@@ -419,16 +418,16 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # AFK Return Logic
         txt = msg.text or msg.caption or ''
         is_afk_command = bool(txt and txt.strip().startswith('/afk'))
-        if not is_afk_command:
+        if not is_afk_command and not getattr(user, 'is_bot', False):
             try:
-                afk_record = store.get_afk(chat.id, user.id)
+                afk_record = store.get_afk(user.id)
                 if afk_record:
                     reason, afk_since = afk_record
-                    store.delete_afk(chat.id, user.id)
+                    store.delete_afk(user.id)
                     duration_str = format_afk_duration(now - afk_since)
-                    user_disp = html.escape(user.first_name or 'User')
+                    user_disp = html.escape(user.first_name if isinstance(user.first_name, str) else 'User')
                     await msg.reply_text(
-                        f"Welcome back, <b>{user_disp}</b>! 🌸 You were AFK for <b>{duration_str}</b>.\n💭 Reason: {html.escape(reason)}",
+                        f"Welcome back, <b>{user_disp}</b> 🌸 You were away for <b>{duration_str}</b>!",
                         parse_mode="HTML"
                     )
             except Exception as e:
