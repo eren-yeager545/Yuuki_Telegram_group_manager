@@ -16,7 +16,7 @@ from store import (
     list_notes, list_quizzes, list_warned_users, log_admin_action, remove_blacklist,
     reset_warns, save_buttons, save_filter, save_note, set_chat_federation, set_setting,
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
-    get_user_by_username, get_user_by_id, record_user_name, get_user_name_history, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members
+    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members
 )
 from helpers import is_admin, is_owner, is_owner_or_sudo, safe_reply_error
 logger = logging.getLogger(__name__)
@@ -1602,42 +1602,6 @@ Bye-bye, take care! 🌸""")
         await safe_reply_error(update.effective_message, "🌷 Oopsie! Telegram won't let me kick you right now.")
 
 
-
-
-async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    target = await resolve_target_user(update, context)
-    if not target:
-        target = update.effective_user
-
-    if not target:
-        await update.message.reply_text("✨ No user found.")
-        return
-
-    user_id = target.id
-    current_name = getattr(target, 'full_name', None) or getattr(target, 'first_name', None)
-
-    if current_name:
-        record_user_name(user_id, current_name)
-
-    db_user = get_user_by_id(user_id)
-    if not current_name and db_user:
-        current_name = db_user[1]
-    if not current_name:
-        current_name = f"User {user_id}"
-
-    all_history = get_user_name_history(user_id)
-    previous_names = [n for n in all_history if n != current_name]
-
-    lines = ["📖 Name History", "", f'👤 Current: "{html.escape(current_name)}"', ""]
-    if previous_names:
-        lines.append("Previous names:")
-        lines.append("")
-        for idx, old_n in enumerate(previous_names, start=1):
-            lines.append(f'{idx}. "{html.escape(old_n)}"')
-    else:
-        lines.append("✨ No previous names found for this user yet.")
-
-    await update.message.reply_text("\n".join(lines))
 
 
 async def addpack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
