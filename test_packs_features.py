@@ -97,10 +97,14 @@ async def test_packs_cmd_empty():
 
     upd = MagicMock(spec=Update)
     msg = AsyncMock(spec=Message)
+    user = User(id=999, first_name="Owner", is_bot=False)
     upd.effective_message = msg
+    upd.message = msg
+    upd.effective_user = user
 
-    await packs_cmd(upd, None)
-    msg.reply_text.assert_called_with("Aww~ I don't have any sticker packs saved yet! 🥺✨")
+    with patch("admin.is_owner", return_value=True):
+        await packs_cmd(upd, None)
+        msg.reply_text.assert_called_with("Aww~ I don't have any sticker packs saved yet! 🥺✨")
 
 
 @pytest.mark.asyncio
@@ -108,9 +112,54 @@ async def test_delpack_permissions():
     upd = MagicMock(spec=Update)
     msg = MagicMock(spec=Message)
     msg.reply_text = AsyncMock()
+    user = User(id=111, first_name="NonOwner", is_bot=False)
+    upd.effective_message = msg
+    upd.message = msg
+    upd.effective_user = user
+
+    with patch("admin.is_owner", return_value=False):
+        await delpack_cmd(upd, None)
+        msg.reply_text.assert_called_with("🌸 Only my owner or sudo users can delete sticker packs desu~!")
+
+
+
+@pytest.mark.asyncio
+async def test_pack_cmd_features():
+    from admin import pack_cmd
+
+    upd = MagicMock(spec=Update)
+    msg = AsyncMock(spec=Message)
+    user_non_owner = User(id=111, first_name="User", is_bot=False)
+    user_owner = User(id=999, first_name="Owner", is_bot=False)
     upd.effective_message = msg
     upd.message = msg
 
-    with patch("admin.is_admin", AsyncMock(return_value=False)):
-        await delpack_cmd(upd, None)
-        msg.reply_text.assert_called_with("Gomen ne~ 🌸 /delpack is only for admins desu!")
+    # 1. Non-owner permission check
+    upd.effective_user = user_non_owner
+    with patch("admin.is_owner", return_value=False):
+        await pack_cmd(upd, None)
+        msg.reply_text.assert_called_with("🌸 Only my owner or sudo users can view sticker pack details desu~!")
+
+    # 2. Owner without args
+    upd.effective_user = user_owner
+    ctx = MagicMock()
+    ctx.args = []
+    with patch("admin.is_owner", return_value=True):
+        await pack_cmd(upd, ctx)
+        msg.reply_text.assert_called_with("🌸 Usage: <code>/pack &lt;sticker_pack_id&gt;</code>", parse_mode="HTML")
+
+    # 3. Owner with invalid pack ID
+    ctx.args = ["non_existent_pack"]
+    with patch("admin.is_owner", return_value=True):
+        await pack_cmd(upd, ctx)
+        msg.reply_text.assert_called_with("Uwaa~ I couldn't find that sticker pack anywhere! 🥺🔍")
+
+    # 4. Owner with valid pack ID
+    save_sticker_pack("preview_pack", "Preview Pack Title", [{"file_id": "stk_preview_1", "emoji": "🌸"}])
+    ctx.args = ["preview_pack"]
+    with patch("admin.is_owner", return_value=True):
+        await pack_cmd(upd, ctx)
+        msg.reply_text.assert_called()
+        msg.reply_sticker.assert_called_with(sticker="stk_preview_1")
+
+    delete_sticker_pack("preview_pack")
