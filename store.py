@@ -1679,38 +1679,50 @@ def save_emoji_pack(set_name: str, title: str, emojis_data: list, link: str = ""
     emojis_data is a list of dicts: [{'emoji': ..., 'custom_emoji_id': ...}]
     """
     now = _now()
+    cleaned = []
+    seen = set()
+    for e in (emojis_data or []):
+        emoji_str = str(e.get('emoji', '') or '').strip()
+        custom_id_str = str(e.get('custom_emoji_id', '') or '').strip()
+        if not emoji_str and not custom_id_str:
+            continue
+        key = (emoji_str, custom_id_str)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append({'emoji': emoji_str, 'custom_emoji_id': custom_id_str})
     if is_mongo():
         db = get_mongo_db()
         db['emoji_packs'].update_one(
             {'set_name': set_name},
-            {'$set': {'set_name': set_name, 'title': title, 'link': link, 'count': len(emojis_data), 'updated_at': now}},
+            {'$set': {'set_name': set_name, 'title': title, 'link': link, 'count': len(cleaned), 'updated_at': now}},
             upsert=True
         )
         db['emojis'].delete_many({'set_name': set_name})
-        if emojis_data:
+        if cleaned:
             docs = [
                 {
                     'set_name': set_name,
-                    'emoji': e.get('emoji', ''),
-                    'custom_emoji_id': e.get('custom_emoji_id', '')
+                    'emoji': item['emoji'],
+                    'custom_emoji_id': item['custom_emoji_id']
                 }
-                for e in emojis_data
+                for item in cleaned
             ]
             db['emojis'].insert_many(docs)
     else:
         with closing(conn()) as c:
             c.execute(
                 'INSERT OR REPLACE INTO emoji_packs(set_name, title, link, count, updated_at) VALUES(?,?,?,?,?)',
-                (set_name, title, link, len(emojis_data), now)
+                (set_name, title, link, len(cleaned), now)
             )
             c.execute('DELETE FROM emojis WHERE set_name=?', (set_name,))
-            for e in emojis_data:
+            for item in cleaned:
                 c.execute(
                     'INSERT INTO emojis(set_name, emoji, custom_emoji_id) VALUES(?,?,?)',
                     (
                         set_name,
-                        e.get('emoji', ''),
-                        e.get('custom_emoji_id', '')
+                        item['emoji'],
+                        item['custom_emoji_id']
                     )
                 )
             c.commit()
@@ -1783,11 +1795,16 @@ def get_all_emojis() -> list:
         if is_mongo():
             db = get_mongo_db()
             emojis = list(db['emojis'].find({}))
-            return [{'set_name': e.get('set_name', ''), 'emoji': e.get('emoji', ''), 'custom_emoji_id': e.get('custom_emoji_id', '')} for e in emojis]
+            raw_list = [{'set_name': e.get('set_name', ''), 'emoji': str(e.get('emoji', '') or '').strip(), 'custom_emoji_id': str(e.get('custom_emoji_id', '') or '').strip()} for e in emojis]
         else:
             with closing(conn()) as c:
                 rows = c.execute('SELECT set_name, emoji, custom_emoji_id FROM emojis').fetchall()
-                return [{'set_name': r[0], 'emoji': r[1], 'custom_emoji_id': r[2]} for r in rows]
+                raw_list = [{'set_name': r[0], 'emoji': str(r[1] or '').strip(), 'custom_emoji_id': str(r[2] or '').strip()} for r in rows]
+        res = []
+        for item in raw_list:
+            if item['emoji'] or item['custom_emoji_id']:
+                res.append(item)
+        return res
     except Exception as e:
         logger.error(f"Error fetching all emojis: {e}")
         return []

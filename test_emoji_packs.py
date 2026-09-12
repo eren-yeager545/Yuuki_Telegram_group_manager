@@ -257,7 +257,7 @@ async def test_process_active_interaction_targeted_reactions():
     chat.id = chat_id
     chat.type = "supergroup"
 
-    save_emoji_pack("reactions_pack", "Reactions", [{"emoji": "🌟", "custom_emoji_id": ""}])
+    save_emoji_pack("reactions_pack", "Reactions", [{"emoji": "🎉", "custom_emoji_id": ""}])
 
     # User A addresses Yuki -> Yuki responds and reacts
     upd1 = MagicMock(spec=Update)
@@ -387,7 +387,7 @@ async def test_custom_emoji_fallback_and_api_error_handling():
     chat_id = -100444
     msg = AsyncMock(spec=Message)
 
-    save_emoji_pack("custom_pack", "Custom", [{"emoji": "💖", "custom_emoji_id": "bad_id"}])
+    save_emoji_pack("custom_pack", "Custom", [{"emoji": "👍", "custom_emoji_id": "bad_id"}])
 
     async def mock_set_reaction(reaction=None, **kwargs):
         if reaction and type(reaction[0]).__name__ == "ReactionTypeCustomEmoji":
@@ -396,8 +396,16 @@ async def test_custom_emoji_fallback_and_api_error_handling():
 
     msg.set_reaction.side_effect = mock_set_reaction
 
+    # Call 1: tries ReactionTypeCustomEmoji, fails, logs error, quarantines, does NOT fall back to ReactionTypeEmoji
     await try_react_to_message(msg, chat_id)
-    assert msg.set_reaction.call_count == 2
+    assert msg.set_reaction.call_count == 1
+    rect_arg = msg.set_reaction.call_args[1].get("reaction") or msg.set_reaction.call_args[0][0]
+    assert type(rect_arg[0]).__name__ == "ReactionTypeCustomEmoji"
+
+    # Call 2: since bad_id is quarantined, try_react_to_message cleanly skips it without calling set_reaction again
+    msg.set_reaction.reset_mock()
+    await try_react_to_message(msg, chat_id)
+    msg.set_reaction.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -443,3 +451,16 @@ async def test_packsem_cmd_features():
     with patch("admin.is_owner", return_value=False):
         await packsem_callback_handler(upd, ctx)
         query.answer.assert_called_with("Ehehe~ that's an owner-only command! 🥺💫", show_alert=True)
+
+
+@pytest.mark.asyncio
+async def test_invalid_unicode_emoji_skipped():
+    chat_id = -100333
+    msg = AsyncMock(spec=Message)
+
+    # 😞 is not a valid Telegram reaction emoji and has no custom_emoji_id
+    save_emoji_pack("invalid_pack", "Invalid", [{"emoji": "😞", "custom_emoji_id": ""}])
+
+    await try_react_to_message(msg, chat_id)
+    # Should skip set_reaction completely
+    msg.set_reaction.assert_not_called()
