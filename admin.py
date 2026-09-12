@@ -2024,3 +2024,168 @@ async def pack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_sticker(sticker=file_id)
             except Exception as e:
                 logger.error(f"Error sending sticker preview for pack {set_name}: {e}")
+
+
+
+
+
+
+
+
+
+# ============================================================================
+# EMOJI PACK COMMANDS (/addem, /delem, /packem)
+# ============================================================================
+
+def parse_emoji_pack_link(input_str: str) -> str:
+    clean = input_str.strip()
+    if not clean:
+        return ""
+    match = re.search(r'(?:https?://)?(?:t\.me/addemoji/|addemoji/)?([a-zA-Z0-9_]+)', clean)
+    if match:
+        return match.group(1)
+    return clean
+
+
+async def addem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not is_owner(user.id, OWNER_IDS):
+        await update.message.reply_text("🌸 Only my owner or sudo users can save emoji packs desu~!")
+        return
+
+    msg = update.effective_message
+    if not msg:
+        return
+
+    args = context.args
+    if not args:
+        await msg.reply_text("🌸 Usage: <code>/addem &lt;pack link&gt;</code>", parse_mode="HTML")
+        return
+
+    raw_link = args[0].strip()
+    set_name = parse_emoji_pack_link(raw_link)
+    if not set_name:
+        await msg.reply_text("Uwaa~ Please provide a valid emoji pack link desu! 🥺🌸")
+        return
+
+    from store import get_emoji_pack, save_emoji_pack
+    existing_pack = get_emoji_pack(set_name)
+    if existing_pack:
+        await msg.reply_text(f"Ehehe~ That emoji pack <code>{html.escape(set_name)}</code> is already saved! ✨🌸", parse_mode="HTML")
+        return
+
+    try:
+        sticker_set = await context.bot.get_sticker_set(set_name)
+    except Exception as e:
+        logger.error(f"Failed to fetch sticker/emoji set '{set_name}': {e}")
+        await msg.reply_text("Uwaa~ I couldn't find or load that emoji pack! Please check the link and try again 🥺🔍")
+        return
+
+    if not sticker_set or not getattr(sticker_set, "stickers", None):
+        await msg.reply_text("Uwaa~ That emoji pack appears to be empty! 🥺🌸")
+        return
+
+    title = getattr(sticker_set, "title", "") or set_name
+    emojis_data = []
+
+    for item in sticker_set.stickers:
+        emoji_char = getattr(item, "emoji", "") or ""
+        custom_emoji_id = getattr(item, "custom_emoji_id", "") or ""
+        if emoji_char or custom_emoji_id:
+            emojis_data.append({
+                'emoji': emoji_char,
+                'custom_emoji_id': custom_emoji_id
+            })
+
+    if not emojis_data:
+        await msg.reply_text("Uwaa~ No valid reaction items found in that emoji pack! 🥺🌸")
+        return
+
+    save_emoji_pack(set_name, title, emojis_data, link=raw_link)
+    log_admin_action(update.effective_chat.id, update.effective_user.id, 'addem', details=set_name)
+
+    resp_text = (
+        f"✨ Yay! Emoji pack added successfully desu~! 🌸\n\n"
+        f"📦 <b>Pack:</b> {html.escape(title)}\n"
+        f"🆔 <b>ID:</b> <code>{html.escape(set_name)}</code>\n"
+        f"🔢 <b>Items:</b> {len(emojis_data)} emojis saved 💕"
+    )
+    await msg.reply_text(resp_text, parse_mode="HTML")
+
+
+async def delem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not is_owner(user.id, OWNER_IDS):
+        await update.message.reply_text("🌸 Only my owner or sudo users can delete emoji packs desu~!")
+        return
+
+    msg = update.effective_message
+    if not msg:
+        return
+
+    args = context.args
+    if not args:
+        await msg.reply_text("🌸 Usage: <code>/delem &lt;pack id&gt;</code>", parse_mode="HTML")
+        return
+
+    target_id = parse_emoji_pack_link(args[0].strip())
+    if not target_id:
+        await msg.reply_text("🌸 Usage: <code>/delem &lt;pack id&gt;</code>", parse_mode="HTML")
+        return
+
+    from store import get_emoji_pack, delete_emoji_pack
+    pack_data = get_emoji_pack(target_id)
+    if not pack_data:
+        await msg.reply_text("Uwaa~ I couldn't find that emoji pack anywhere! 🥺🔍")
+        return
+
+    title = pack_data.get('title') or target_id
+    success = delete_emoji_pack(target_id)
+
+    if success:
+        log_admin_action(update.effective_chat.id, update.effective_user.id, 'delem', details=target_id)
+        msg_text = f"✨ Emoji pack deleted successfully!\n🧸 Pack: {html.escape(title)}\n🆔 ID: <code>{html.escape(target_id)}</code> desu~ 🌸"
+        await msg.reply_text(msg_text, parse_mode="HTML")
+    else:
+        await msg.reply_text("Uwaa~ I couldn't find that emoji pack anywhere! 🥺🔍")
+
+
+async def packem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not msg:
+        return
+
+    args = context.args
+    if not args:
+        await msg.reply_text("🌸 Usage: <code>/packem &lt;pack id&gt;</code>", parse_mode="HTML")
+        return
+
+    target_id = parse_emoji_pack_link(args[0].strip())
+    if not target_id:
+        await msg.reply_text("🌸 Usage: <code>/packem &lt;pack id&gt;</code>", parse_mode="HTML")
+        return
+
+    from store import get_emoji_pack
+    pack_data = get_emoji_pack(target_id)
+    if not pack_data:
+        await msg.reply_text("Uwaa~ I couldn't find that emoji pack anywhere! 🥺🔍")
+        return
+
+    title = pack_data.get('title') or 'Untitled Pack'
+    set_name = pack_data.get('set_name') or target_id
+    link = pack_data.get('link') or f"https://t.me/addemoji/{set_name}"
+    emojis = pack_data.get('emojis') or []
+    count = pack_data.get('count', len(emojis))
+
+    sample_emojis = [e.get('emoji') for e in emojis if e.get('emoji')][:15]
+    sample_str = " ".join(sample_emojis) if sample_emojis else "Custom Emojis"
+
+    text_lines = [
+        f"📦 <b>Emoji Pack: {html.escape(title)}</b> 🌸",
+        f"🆔 <b>ID:</b> <code>{html.escape(set_name)}</code>",
+        f"🔗 <b>Link:</b> {html.escape(link)}",
+        f"🔢 <b>Items:</b> {count} emojis",
+        f"✨ <b>Available Emojis:</b> {html.escape(sample_str)}"
+    ]
+
+    await msg.reply_text("\n".join(text_lines), parse_mode="HTML")

@@ -1,10 +1,12 @@
 import logging
 import random
 import re
+import time
 from typing import Optional, Tuple
-from telegram import Update, Message, User
+from telegram import Update, Message, User, ReactionTypeEmoji, ReactionTypeCustomEmoji
 from telegram.ext import ContextTypes
 import config
+import store
 from store import get_all_stickers
 from src.ai import (
     YUKI_PERSONA,
@@ -34,6 +36,82 @@ provider_manager = AIProviderManager(
     gemini_model=config.GEMINI_MODEL,
     openrouter_model=config.OPENROUTER_MODEL
 )
+
+# In-memory tracking of active chatter per chat and recent reactions per chat
+# _active_chatters: chat_id -> {'user_id': int, 'last_seen': float}
+_active_chatters = {}
+_recent_chat_reactions = {}
+INTERACTION_TIMEOUT_SECONDS = 300.0  # 5 minutes inactivity timeout
+
+
+def set_active_chatter(chat_id: int, user_id: int):
+    """Sets or updates the active chatter for a given chat."""
+    if not chat_id or not user_id:
+        return
+    _active_chatters[chat_id] = {
+        'user_id': user_id,
+        'last_seen': time.time()
+    }
+
+
+def get_active_chatter(chat_id: int) -> Optional[int]:
+    """Retrieves active chatter user_id if within timeout period, otherwise returns None."""
+    if not chat_id or chat_id not in _active_chatters:
+        return None
+    info = _active_chatters[chat_id]
+    if time.time() - info.get('last_seen', 0) > INTERACTION_TIMEOUT_SECONDS:
+        _active_chatters.pop(chat_id, None)
+        return None
+    return info.get('user_id')
+
+
+def is_active_chatter(chat_id: int, user_id: int) -> bool:
+    """Checks if user_id is the current active chatter for chat_id within timeout."""
+    active_uid = get_active_chatter(chat_id)
+    return active_uid == user_id
+
+
+async def try_react_to_message(msg: Message, chat_id: int):
+    """
+    Reacts to the message with a randomly selected emoji from stored emoji packs.
+    If no emoji packs exist, gracefully skips the reaction.
+    Avoids immediate repetition per chat when possible.
+    """
+    try:
+        emojis = store.get_all_emojis()
+        if not emojis:
+            return
+
+        valid_items = [e for e in emojis if e.get('emoji') or e.get('custom_emoji_id')]
+        if not valid_items:
+            return
+
+        recent = _recent_chat_reactions.get(chat_id, [])
+        fresh = [
+            e for e in valid_items
+            if (e.get('emoji') or e.get('custom_emoji_id')) not in recent
+        ]
+        candidates = fresh if fresh else valid_items
+
+        chosen = random.choice(candidates)
+        raw_key = chosen.get('emoji') or chosen.get('custom_emoji_id')
+
+        if chat_id not in _recent_chat_reactions:
+            _recent_chat_reactions[chat_id] = []
+        _recent_chat_reactions[chat_id].append(raw_key)
+        if len(_recent_chat_reactions[chat_id]) > 5:
+            _recent_chat_reactions[chat_id].pop(0)
+
+        reaction_obj = None
+        if chosen.get('custom_emoji_id'):
+            reaction_obj = ReactionTypeCustomEmoji(custom_emoji_id=chosen['custom_emoji_id'])
+        elif chosen.get('emoji'):
+            reaction_obj = ReactionTypeEmoji(emoji=chosen['emoji'])
+
+        if reaction_obj and hasattr(msg, "set_reaction"):
+            await msg.set_reaction(reaction=[reaction_obj])
+    except Exception as e:
+        logger.warning(f"Failed to set reaction on message: {e}")
 
 
 async def send_owner_ai_alert(message_text: str, context: Optional[ContextTypes.DEFAULT_TYPE] = None):
@@ -191,6 +269,44 @@ def find_matching_sticker(user_emoji: Optional[str], chat_id: Optional[int] = No
     return get_random_sticker(user_emoji=user_emoji, chat_id=chat_id)
 
 
+async def process_active_interaction_and_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Evaluates incoming user message for active chatter interaction and targeted emoji reactions.
+    Triggers AI chat response if Yuki is explicitly addressed.
+    """
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not msg or not chat or not user:
+        return
+
+    # Do not react to bot/system messages or Yuki's own messages
+    if getattr(user, "is_bot", False):
+        return
+
+    bot_obj = getattr(context, "bot", None)
+    bot_username = getattr(bot_obj, "username", None)
+    if not isinstance(bot_username, str):
+        bot_username = "yuki_bot"
+
+    bot_id = getattr(bot_obj, "id", None)
+    if not isinstance(bot_id, int):
+        bot_id = 123456
+
+    triggered, prompt = should_trigger_yuki(update, bot_username=bot_username, bot_id=bot_id)
+
+    if triggered:
+        set_active_chatter(chat.id, user.id)
+        await try_react_to_message(msg, chat.id)
+        await handle_ai_chat(update, context, prompt_override=prompt)
+        return
+
+    if is_active_chatter(chat.id, user.id):
+        set_active_chatter(chat.id, user.id)
+        await try_react_to_message(msg, chat.id)
+
+
 async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt_override: Optional[str] = None):
     """
     Main Telegram handler for Yuki AI Chatbot responses.
@@ -232,6 +348,9 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
         triggered, prompt = should_trigger_yuki(update, bot_username=bot_username, bot_id=bot_id)
         if not triggered:
             return
+
+    # Set active chatter
+    set_active_chatter(chat.id, user.id)
 
     # Check Rate Limiting atomically
     allowed, rejection_msg = await rate_limiter.try_acquire(user.id, chat.id)

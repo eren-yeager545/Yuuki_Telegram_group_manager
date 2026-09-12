@@ -114,6 +114,8 @@ def init_db():
         db['user_messages'].create_index([('chat_id', 1), ('user_id', 1), ('message_id', 1)], unique=True)
         db['sticker_packs'].create_index('set_name', unique=True)
         db['stickers'].create_index('set_name')
+        db['emoji_packs'].create_index('set_name', unique=True)
+        db['emojis'].create_index('set_name')
         db['afk'].create_index('user_id', unique=True)
         db['user_profile_snapshots'].create_index([('chat_id', 1), ('user_id', 1)], unique=True)
         return
@@ -154,6 +156,8 @@ def init_db():
         cur.execute('CREATE TABLE IF NOT EXISTS user_messages (chat_id INTEGER, user_id INTEGER, message_id INTEGER, created_at INTEGER, PRIMARY KEY(chat_id, user_id, message_id))')
         cur.execute('CREATE TABLE IF NOT EXISTS sticker_packs (set_name TEXT PRIMARY KEY, title TEXT, count INTEGER, updated_at INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS stickers (id INTEGER PRIMARY KEY AUTOINCREMENT, set_name TEXT, file_id TEXT, file_unique_id TEXT, emoji TEXT, sticker_type TEXT)')
+        cur.execute('CREATE TABLE IF NOT EXISTS emoji_packs (set_name TEXT PRIMARY KEY, title TEXT, link TEXT, count INTEGER, updated_at INTEGER)')
+        cur.execute('CREATE TABLE IF NOT EXISTS emojis (id INTEGER PRIMARY KEY AUTOINCREMENT, set_name TEXT, emoji TEXT, custom_emoji_id TEXT)')
         cur.execute('CREATE TABLE IF NOT EXISTS afk (user_id INTEGER PRIMARY KEY, reason TEXT, afk_since INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS user_profile_snapshots (chat_id INTEGER, user_id INTEGER, first_name TEXT, last_name TEXT, username TEXT, updated_at INTEGER, PRIMARY KEY(chat_id, user_id))')
 
@@ -1662,3 +1666,152 @@ def save_profile_snapshot(chat_id, user_id, first_name, last_name, username):
             (chat_id, user_id, fn, ln, un, now)
         )
         c.commit()
+
+
+
+# ============================================================================
+# EMOJI PACK MANAGEMENT
+# ============================================================================
+
+def save_emoji_pack(set_name: str, title: str, emojis_data: list, link: str = ""):
+    """
+    Saves an emoji pack and its emojis to storage.
+    emojis_data is a list of dicts: [{'emoji': ..., 'custom_emoji_id': ...}]
+    """
+    now = _now()
+    if is_mongo():
+        db = get_mongo_db()
+        db['emoji_packs'].update_one(
+            {'set_name': set_name},
+            {'$set': {'set_name': set_name, 'title': title, 'link': link, 'count': len(emojis_data), 'updated_at': now}},
+            upsert=True
+        )
+        db['emojis'].delete_many({'set_name': set_name})
+        if emojis_data:
+            docs = [
+                {
+                    'set_name': set_name,
+                    'emoji': e.get('emoji', ''),
+                    'custom_emoji_id': e.get('custom_emoji_id', '')
+                }
+                for e in emojis_data
+            ]
+            db['emojis'].insert_many(docs)
+    else:
+        with closing(conn()) as c:
+            c.execute(
+                'INSERT OR REPLACE INTO emoji_packs(set_name, title, link, count, updated_at) VALUES(?,?,?,?,?)',
+                (set_name, title, link, len(emojis_data), now)
+            )
+            c.execute('DELETE FROM emojis WHERE set_name=?', (set_name,))
+            for e in emojis_data:
+                c.execute(
+                    'INSERT INTO emojis(set_name, emoji, custom_emoji_id) VALUES(?,?,?)',
+                    (
+                        set_name,
+                        e.get('emoji', ''),
+                        e.get('custom_emoji_id', '')
+                    )
+                )
+            c.commit()
+
+
+def get_emoji_pack(set_name: str):
+    """Retrieves metadata and emojis for a specific emoji pack set_name."""
+    if not set_name:
+        return None
+    if is_mongo():
+        db = get_mongo_db()
+        pack = db['emoji_packs'].find_one({'set_name': set_name})
+        if not pack:
+            return None
+        emojis = list(db['emojis'].find({'set_name': set_name}))
+        return {
+            'set_name': pack['set_name'],
+            'title': pack.get('title', ''),
+            'link': pack.get('link', ''),
+            'count': pack.get('count', len(emojis)),
+            'emojis': [{'emoji': e.get('emoji', ''), 'custom_emoji_id': e.get('custom_emoji_id', '')} for e in emojis]
+        }
+    else:
+        with closing(conn()) as c:
+            row = c.execute('SELECT set_name, title, link, count FROM emoji_packs WHERE set_name=?', (set_name,)).fetchone()
+            if not row:
+                return None
+            e_rows = c.execute('SELECT emoji, custom_emoji_id FROM emojis WHERE set_name=?', (set_name,)).fetchall()
+            emojis = [{'emoji': r[0], 'custom_emoji_id': r[1]} for r in e_rows]
+            return {
+                'set_name': row[0],
+                'title': row[1],
+                'link': row[2],
+                'count': row[3],
+                'emojis': emojis
+            }
+
+
+def get_all_emoji_packs() -> list:
+    """Retrieves metadata for all saved emoji packs."""
+    try:
+        if is_mongo():
+            db = get_mongo_db()
+            packs = list(db['emoji_packs'].find({}))
+            res = []
+            for p in packs:
+                res.append({
+                    'set_name': p.get('set_name', ''),
+                    'title': p.get('title', ''),
+                    'link': p.get('link', ''),
+                    'count': p.get('count', 0),
+                    'updated_at': p.get('updated_at', 0)
+                })
+            return res
+        else:
+            with closing(conn()) as c:
+                rows = c.execute('SELECT set_name, title, link, count, updated_at FROM emoji_packs ORDER BY updated_at DESC').fetchall()
+                return [
+                    {'set_name': r[0], 'title': r[1], 'link': r[2], 'count': r[3], 'updated_at': r[4]}
+                    for r in rows
+                ]
+    except Exception as e:
+        logger.error(f"Error fetching emoji packs: {e}")
+        return []
+
+
+def get_all_emojis() -> list:
+    """Retrieves all saved emojis across all emoji packs."""
+    try:
+        if is_mongo():
+            db = get_mongo_db()
+            emojis = list(db['emojis'].find({}))
+            return [{'set_name': e.get('set_name', ''), 'emoji': e.get('emoji', ''), 'custom_emoji_id': e.get('custom_emoji_id', '')} for e in emojis]
+        else:
+            with closing(conn()) as c:
+                rows = c.execute('SELECT set_name, emoji, custom_emoji_id FROM emojis').fetchall()
+                return [{'set_name': r[0], 'emoji': r[1], 'custom_emoji_id': r[2]} for r in rows]
+    except Exception as e:
+        logger.error(f"Error fetching all emojis: {e}")
+        return []
+
+
+def delete_emoji_pack(set_name: str) -> bool:
+    """Deletes an emoji pack and its emojis by set_name. Returns True if deleted."""
+    if not set_name:
+        return False
+    try:
+        if is_mongo():
+            db = get_mongo_db()
+            pack_res = db['emoji_packs'].delete_one({'set_name': set_name})
+            db['emojis'].delete_many({'set_name': set_name})
+            return pack_res.deleted_count > 0
+        else:
+            with closing(conn()) as c:
+                row = c.execute('SELECT set_name FROM emoji_packs WHERE set_name=?', (set_name,)).fetchone()
+                if not row:
+                    return False
+                c.execute('DELETE FROM emoji_packs WHERE set_name=?', (set_name,))
+                c.execute('DELETE FROM emojis WHERE set_name=?', (set_name,))
+                c.commit()
+                return True
+    except Exception as e:
+        logger.error(f"Error deleting emoji pack '{set_name}': {e}")
+        return False
