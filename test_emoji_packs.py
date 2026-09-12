@@ -387,7 +387,8 @@ async def test_custom_emoji_fallback_and_api_error_handling():
     chat_id = -100444
     msg = AsyncMock(spec=Message)
 
-    save_emoji_pack("custom_pack", "Custom", [{"emoji": "👍", "custom_emoji_id": "bad_id"}])
+    # Save custom-only emoji item with no unicode emoji
+    save_emoji_pack("custom_pack", "Custom", [{"emoji": "", "custom_emoji_id": "bad_id"}])
 
     async def mock_set_reaction(reaction=None, **kwargs):
         if reaction and type(reaction[0]).__name__ == "ReactionTypeCustomEmoji":
@@ -402,7 +403,7 @@ async def test_custom_emoji_fallback_and_api_error_handling():
     rect_arg = msg.set_reaction.call_args[1].get("reaction") or msg.set_reaction.call_args[0][0]
     assert type(rect_arg[0]).__name__ == "ReactionTypeCustomEmoji"
 
-    # Call 2: since bad_id is quarantined, try_react_to_message cleanly skips it without calling set_reaction again
+    # Call 2: since bad_id is quarantined and there is no unicode emoji, try_react_to_message cleanly skips without calling set_reaction again
     msg.set_reaction.reset_mock()
     await try_react_to_message(msg, chat_id)
     msg.set_reaction.assert_not_called()
@@ -531,3 +532,41 @@ async def test_cases_a_through_e_reactions():
     msg_e = AsyncMock(spec=Message)
     await try_react_to_message(msg_e, chat_id)
     msg_e.set_reaction.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_combined_item_candidate_separation():
+    from handlers.ai_chat import _quarantined_reactions, _recent_chat_reactions
+    _quarantined_reactions.clear()
+    _recent_chat_reactions.clear()
+
+    chat_id = -1001122
+    # Item has BOTH custom_emoji_id and valid unicode emoji
+    save_emoji_pack("combined_pack", "Combined", [{"emoji": "🎉", "custom_emoji_id": "998877"}])
+
+    msg = AsyncMock(spec=Message)
+    # Custom emoji fails with Reaction_invalid
+    async def mock_set_reaction(reaction=None, **kwargs):
+        if reaction and type(reaction[0]).__name__ == "ReactionTypeCustomEmoji":
+            raise Exception("BadRequest: Reaction_invalid")
+        return True
+
+    msg.set_reaction.side_effect = mock_set_reaction
+
+    # Keep trying until custom reaction gets chosen and quarantined
+    for _ in range(20):
+        await try_react_to_message(msg, chat_id)
+        if "custom:998877" in _quarantined_reactions:
+            break
+
+    assert "custom:998877" in _quarantined_reactions
+
+    # Now that custom is quarantined, try_react_to_message should still succeed using the Unicode emoji candidate 🎉
+    msg.set_reaction.reset_mock()
+    msg.set_reaction.side_effect = None
+    await try_react_to_message(msg, chat_id)
+
+    msg.set_reaction.assert_called_once()
+    rect = msg.set_reaction.call_args[1]["reaction"][0]
+    assert isinstance(rect, ReactionTypeEmoji)
+    assert rect.emoji == "🎉"
