@@ -113,20 +113,27 @@ class AIProviderManager:
     ) -> AIResponse:
         """
         Executes chat request with failover across active providers and key rotation.
+        Enforces a global deadline based on time.monotonic() to ensure total operation does not exceed timeout.
         Includes unique correlation ID and secure diagnostic logging.
         """
+        start_mono = time.monotonic()
         start_time = time.time()
+        deadline = start_mono + max(0.1, float(timeout))
         corr_id = uuid.uuid4().hex[:8]
 
         logger.info(
-            f"AI Request Started | correlation_id={corr_id} chat_id={chat_id or 'none'} message_id={message_id or 'none'}"
+            f"AI Request Started | correlation_id={corr_id} chat_id={chat_id or 'none'} message_id={message_id or 'none'} global_timeout={timeout}s"
         )
 
         has_configured_keys = any(bool(p.api_keys) for p in self.providers.values())
         if not has_configured_keys:
             logger.warning(f"AI Request Warning | correlation_id={corr_id}: No API keys configured for any provider")
 
+        deadline_reached = False
+
         for provider_name in self.provider_order:
+            if deadline_reached:
+                break
             provider = self.providers.get(provider_name)
             if not provider or not provider.api_keys:
                 continue
@@ -137,16 +144,24 @@ class AIProviderManager:
                 if not self._is_key_healthy(provider_name, key_idx):
                     continue
 
+                remaining_timeout = deadline - time.monotonic()
+                if remaining_timeout <= 0.05:
+                    logger.warning(
+                        f"AI Request Deadline Reached | correlation_id={corr_id} provider={provider_name} key_index={key_idx}: No remaining time for attempt"
+                    )
+                    deadline_reached = True
+                    break
+
                 try:
                     logger.info(
-                        f"AI Provider Selected | provider={provider_name} key_index={key_idx} correlation_id={corr_id}"
+                        f"AI Provider Selected | provider={provider_name} key_index={key_idx} correlation_id={corr_id} remaining_timeout={round(remaining_timeout, 2)}s"
                     )
                     response = await provider.generate_response_with_key(
                         api_key=api_key,
                         messages=messages,
                         system_prompt=system_prompt,
                         max_tokens=max_tokens,
-                        timeout=timeout
+                        timeout=remaining_timeout
                     )
                     duration = round(time.time() - start_time, 3)
                     logger.info(
@@ -158,8 +173,9 @@ class AIProviderManager:
                 except AIProviderError as pe:
                     err_msg = self._redact_all_keys(str(pe))
                     err_type = pe.error_code.value if pe.error_code else "unknown"
+                    attempt_timeout = round(remaining_timeout, 1)
                     logger.warning(
-                        f"AI Provider Failed | provider={provider_name} model={model_name} key_index={key_idx} correlation_id={corr_id} type={err_type} timeout={timeout}s: {err_msg}"
+                        f"AI Provider Failed | provider={provider_name} model={model_name} key_index={key_idx} correlation_id={corr_id} type={err_type} timeout={attempt_timeout}s: {err_msg}"
                     )
                     cooldown = pe.suggested_cooldown
                     if pe.retry_after and pe.retry_after > 0:
@@ -175,8 +191,9 @@ class AIProviderManager:
                         active_failover_provider=failover_provider
                     )
                     if pe.error_code == ProviderErrorCode.TIMEOUT:
+                        target_p = failover_provider or "next key/provider"
                         logger.info(
-                            f"AI Provider Failover | correlation_id={corr_id}: Provider '{provider_name}' model='{model_name}' timed out after {timeout}s on key_index={key_idx}. Immediately failing over to target='{failover_provider or 'next key/provider'}'"
+                            f"AI Provider Failover | correlation_id={corr_id}: Provider '{provider_name}' model='{model_name}' timed out after {attempt_timeout}s on key_index={key_idx}. Immediately failing over to target='{target_p}'"
                         )
                     else:
                         logger.info(f"Provider Fallback | correlation_id={corr_id}: Rotating to next available key/provider")

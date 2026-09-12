@@ -1183,3 +1183,199 @@ async def test_gemini_client_reuse_and_close():
 
     await provider.close()
     assert provider._client is None
+
+
+# ==========================================
+# Task-Specific Unit Tests (Tests 1-7)
+# ==========================================
+
+@pytest.mark.asyncio
+async def test_openrouter_empty_response_handling():
+    """Test 1: OpenRouter returns empty choices -> raises EMPTY_RESPONSE & fails over immediately."""
+    provider = OpenRouterProvider(api_keys=["key1"], model="openrouter/free")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.json.return_value = {"choices": []}
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("key1", [{"role": "user", "content": "hi"}], "")
+        assert exc_info.value.error_code == ProviderErrorCode.EMPTY_RESPONSE
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_http_200_error_object():
+    """Test 2: OpenRouter returns HTTP 200 with error object -> classified as error & immediate failover."""
+    provider = OpenRouterProvider(api_keys=["key1"], model="openrouter/free")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.json.return_value = {
+        "error": {
+            "message": "upstream provider error"
+        }
+    }
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("key1", [{"role": "user", "content": "hi"}], "")
+        assert exc_info.value.error_code != ProviderErrorCode.EMPTY_RESPONSE
+        assert "upstream provider error" in str(exc_info.value)
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_gemini_timeout_handling():
+    """Test 3: Gemini times out with httpx.ReadTimeout -> raises ProviderErrorCode.TIMEOUT."""
+    provider = GeminiProvider(api_keys=["key1"], model="gemini-2.5-flash")
+    req_mock = MagicMock(spec=httpx.Request)
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.side_effect = httpx.ReadTimeout("Read timed out", request=req_mock)
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("key1", [{"role": "user", "content": "hi"}], "", timeout=5.0)
+        assert exc_info.value.error_code == ProviderErrorCode.TIMEOUT
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_failover_chain():
+    """Test 4: OpenRouter (EMPTY_RESPONSE) -> Gemini (TIMEOUT) -> Groq (SUCCESS)."""
+    mgr = AIProviderManager(
+        provider_order=["openrouter", "gemini", "groq"],
+        openrouter_keys=["or_key"],
+        gemini_keys=["g_key"],
+        groq_keys=["gr_key"]
+    )
+
+    mgr.providers["openrouter"].generate_response_with_key = AsyncMock(
+        side_effect=AIProviderError("Empty choices", error_code=ProviderErrorCode.EMPTY_RESPONSE)
+    )
+    mgr.providers["gemini"].generate_response_with_key = AsyncMock(
+        side_effect=AIProviderError("ReadTimeout", error_code=ProviderErrorCode.TIMEOUT)
+    )
+    mgr.providers["groq"].generate_response_with_key = AsyncMock(
+        return_value=AIResponse(text="Success from Groq!", provider="groq", model="llama-3.3-70b-versatile")
+    )
+
+    resp = await mgr.chat(messages=[{"role": "user", "content": "hi"}], system_prompt="", timeout=10.0)
+    assert resp.text == "Success from Groq!"
+    assert resp.provider == "groq"
+
+    await mgr.close()
+
+
+@pytest.mark.asyncio
+async def test_all_providers_fail_fallback():
+    """Test 5: All providers fail -> returns FALLBACK_YUKI_RESPONSE."""
+    mgr = AIProviderManager(
+        provider_order=["openrouter", "gemini", "groq"],
+        openrouter_keys=["or_key"],
+        gemini_keys=["g_key"],
+        groq_keys=["gr_key"]
+    )
+
+    mgr.providers["openrouter"].generate_response_with_key = AsyncMock(
+        side_effect=AIProviderError("Error 1", error_code=ProviderErrorCode.SERVER_ERROR)
+    )
+    mgr.providers["gemini"].generate_response_with_key = AsyncMock(
+        side_effect=AIProviderError("Error 2", error_code=ProviderErrorCode.TIMEOUT)
+    )
+    mgr.providers["groq"].generate_response_with_key = AsyncMock(
+        side_effect=AIProviderError("Error 3", error_code=ProviderErrorCode.RATE_LIMIT)
+    )
+
+    resp = await mgr.chat(messages=[{"role": "user", "content": "hi"}], system_prompt="", timeout=10.0)
+    assert resp.text == FALLBACK_YUKI_RESPONSE
+    assert resp.provider == "fallback"
+
+    await mgr.close()
+
+
+@pytest.mark.asyncio
+async def test_multiple_api_keys_cooldown():
+    """Test 6: Verify unhealthy keys are skipped during cooldown and healthy keys remain usable."""
+    mgr = AIProviderManager(
+        provider_order=["gemini"],
+        gemini_keys=["key1", "key2"],
+        groq_keys=[],
+        openrouter_keys=[],
+        key_cooldown_seconds=300.0
+    )
+
+    # Key 1 on cooldown
+    mgr._mark_key_cooldown("gemini", 0, 300.0)
+    assert not mgr._is_key_healthy("gemini", 0)
+    assert mgr._is_key_healthy("gemini", 1)
+
+    mgr.providers["gemini"].generate_response_with_key = AsyncMock(
+        return_value=AIResponse(text="Used key 2!", provider="gemini", model="gemini-2.5-flash")
+    )
+
+    resp = await mgr.chat(messages=[{"role": "user", "content": "hi"}], system_prompt="", timeout=10.0)
+    assert resp.text == "Used key 2!"
+    # Key 1 was skipped, so generate_response_with_key was called with key2
+    mgr.providers["gemini"].generate_response_with_key.assert_called_once_with(
+        api_key="key2",
+        messages=[{"role": "user", "content": "hi"}],
+        system_prompt="",
+        max_tokens=150,
+        timeout=pytest.approx(10.0, abs=0.5)
+    )
+
+    await mgr.close()
+
+
+@pytest.mark.asyncio
+async def test_global_deadline_respected():
+    """Test 7: Verify total AI operation respects overall deadline and does not grant full timeout per provider."""
+    mgr = AIProviderManager(
+        provider_order=["openrouter", "gemini", "groq"],
+        openrouter_keys=["or_key"],
+        gemini_keys=["g_key"],
+        groq_keys=["gr_key"]
+    )
+
+    passed_timeouts = []
+
+    async def mock_or(api_key, timeout, **kwargs):
+        passed_timeouts.append(("openrouter", timeout))
+        # Simulate taking 2 seconds
+        await asyncio.sleep(0.1)
+        raise AIProviderError("OpenRouter timeout", error_code=ProviderErrorCode.TIMEOUT)
+
+    async def mock_gemini(api_key, timeout, **kwargs):
+        passed_timeouts.append(("gemini", timeout))
+        await asyncio.sleep(0.1)
+        raise AIProviderError("Gemini timeout", error_code=ProviderErrorCode.TIMEOUT)
+
+    async def mock_groq(api_key, timeout, **kwargs):
+        passed_timeouts.append(("groq", timeout))
+        return AIResponse(text="Groq success", provider="groq", model="llama-3.3-70b-versatile")
+
+    mgr.providers["openrouter"].generate_response_with_key = AsyncMock(side_effect=mock_or)
+    mgr.providers["gemini"].generate_response_with_key = AsyncMock(side_effect=mock_gemini)
+    mgr.providers["groq"].generate_response_with_key = AsyncMock(side_effect=mock_groq)
+
+    start_time = asyncio.get_event_loop().time()
+    resp = await mgr.chat(messages=[{"role": "user", "content": "hi"}], system_prompt="", timeout=2.0)
+    elapsed = asyncio.get_event_loop().time() - start_time
+
+    assert resp.text == "Groq success"
+    assert len(passed_timeouts) == 3
+    # Initial timeout for OpenRouter was ~2.0s
+    assert passed_timeouts[0][1] == pytest.approx(2.0, abs=0.2)
+    # Remaining timeout for Gemini was ~1.9s (< 2.0s)
+    assert passed_timeouts[1][1] < passed_timeouts[0][1]
+    # Remaining timeout for Groq was ~1.8s (< Gemini timeout)
+    assert passed_timeouts[2][1] < passed_timeouts[1][1]
+    assert elapsed < 2.0
+
+    await mgr.close()
