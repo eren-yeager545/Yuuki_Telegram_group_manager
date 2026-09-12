@@ -5,6 +5,7 @@ import re
 import time
 from typing import Optional, Tuple
 from telegram import Update, Message, User, ReactionTypeEmoji, ReactionTypeCustomEmoji
+from telegram.constants import ReactionEmoji
 from telegram.ext import ContextTypes
 import config
 import store
@@ -41,6 +42,8 @@ provider_manager = AIProviderManager(
 # In-memory tracking of active chatter per chat and recent reactions per chat
 # _active_chatters: chat_id -> {'user_id': int, 'last_seen': float}
 _active_chatters = {}
+VALID_TELEGRAM_REACTION_EMOJIS = {e.value for e in ReactionEmoji}
+_quarantined_reactions = set()
 _recent_chat_reactions = {}
 INTERACTION_TIMEOUT_SECONDS = 300.0  # 5 minutes inactivity timeout
 
@@ -75,56 +78,62 @@ def is_active_chatter(chat_id: int, user_id: int) -> bool:
 async def try_react_to_message(msg: Message, chat_id: int):
     """
     Reacts to the message with a randomly selected emoji from stored emoji packs.
-    If no emoji packs exist, gracefully skips the reaction.
-    Avoids immediate repetition per chat when possible.
+    Uses ReactionTypeCustomEmoji if custom_emoji_id exists, otherwise ReactionTypeEmoji
+    only if the emoji is a valid Telegram reaction emoji.
+    Never falls back from custom emoji to Unicode emoji.
+    Temporarily quarantines rejected reactions during runtime to prevent repeating errors.
     """
     try:
         emojis = store.get_all_emojis()
         if not emojis:
             return
 
-        valid_items = [
-            e for e in emojis
-            if (e.get('emoji') and isinstance(e.get('emoji'), str) and e.get('emoji').strip())
-            or (e.get('custom_emoji_id') and isinstance(e.get('custom_emoji_id'), str) and e.get('custom_emoji_id').strip())
-        ]
+        valid_items = []
+        for e in emojis:
+            cid = str(e.get('custom_emoji_id', '') or '').strip()
+            uemoji = str(e.get('emoji', '') or '').strip()
+            if cid:
+                key = f"custom:{cid}"
+                if key not in _quarantined_reactions:
+                    valid_items.append({'type': 'custom', 'id': cid, 'key': key})
+            elif uemoji and uemoji in VALID_TELEGRAM_REACTION_EMOJIS:
+                key = f"emoji:{uemoji}"
+                if key not in _quarantined_reactions:
+                    valid_items.append({'type': 'emoji', 'emoji': uemoji, 'key': key})
+
         if not valid_items:
             return
 
         recent = _recent_chat_reactions.get(chat_id, [])
-        fresh = [
-            e for e in valid_items
-            if (e.get('emoji') or e.get('custom_emoji_id')) not in recent
-        ]
+        fresh = [item for item in valid_items if item['key'] not in recent]
         candidates = fresh if fresh else valid_items
 
         chosen = random.choice(candidates)
-        raw_key = chosen.get('emoji') or chosen.get('custom_emoji_id')
+        key = chosen['key']
 
         if chat_id not in _recent_chat_reactions:
             _recent_chat_reactions[chat_id] = []
-        _recent_chat_reactions[chat_id].append(raw_key)
+        _recent_chat_reactions[chat_id].append(key)
         if len(_recent_chat_reactions[chat_id]) > 5:
             _recent_chat_reactions[chat_id].pop(0)
 
         if not hasattr(msg, "set_reaction"):
             return
 
-        success = False
-        if chosen.get('custom_emoji_id'):
+        if chosen['type'] == 'custom':
             try:
-                reaction_obj = ReactionTypeCustomEmoji(custom_emoji_id=chosen['custom_emoji_id'])
+                reaction_obj = ReactionTypeCustomEmoji(custom_emoji_id=chosen['id'])
                 await msg.set_reaction(reaction=[reaction_obj])
-                success = True
             except Exception as ce:
-                logger.warning(f"Failed to set custom emoji reaction '{chosen.get('custom_emoji_id')}': {ce}")
-
-        if not success and chosen.get('emoji'):
+                _quarantined_reactions.add(key)
+                logger.warning(f"Custom emoji reaction failed: {ce}")
+        elif chosen['type'] == 'emoji':
             try:
                 reaction_obj = ReactionTypeEmoji(emoji=chosen['emoji'])
                 await msg.set_reaction(reaction=[reaction_obj])
             except Exception as ee:
-                logger.warning(f"Failed to set emoji reaction '{chosen.get('emoji')}': {ee}")
+                _quarantined_reactions.add(key)
+                logger.warning(f"Standard emoji reaction rejected: {ee}")
     except Exception as e:
         logger.warning(f"Failed to set reaction on message: {e}")
 
