@@ -119,7 +119,7 @@ async def test_delpack_permissions():
 
     with patch("admin.is_owner", return_value=False):
         await delpack_cmd(upd, None)
-        msg.reply_text.assert_called_with("🌸 Only my owner or sudo users can delete sticker packs desu~!")
+        msg.reply_text.assert_called_with("Ehehe~ that's an owner-only command! 🥺💫")
 
 
 
@@ -138,7 +138,7 @@ async def test_pack_cmd_features():
     upd.effective_user = user_non_owner
     with patch("admin.is_owner", return_value=False):
         await pack_cmd(upd, None)
-        msg.reply_text.assert_called_with("🌸 Only my owner or sudo users can view sticker pack details desu~!")
+        msg.reply_text.assert_called_with("Ehehe~ that's an owner-only command! 🥺💫")
 
     # 2. Owner without args
     upd.effective_user = user_owner

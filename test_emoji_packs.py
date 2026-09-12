@@ -84,7 +84,7 @@ async def test_addem_cmd_permissions_and_validation():
     ctx.args = ["https://t.me/addemoji/SomePack"]
 
     await addem_cmd(upd, ctx)
-    msg.reply_text.assert_called_with("🌸 Only my owner or sudo users can save emoji packs desu~!")
+    msg.reply_text.assert_called_with("Ehehe~ that's an owner-only command! 🥺💫")
 
     # 2. Owner missing args
     with patch("admin.is_owner", return_value=True):
@@ -176,23 +176,32 @@ async def test_delem_cmd_features():
 async def test_packem_cmd_features():
     upd = MagicMock(spec=Update)
     msg = AsyncMock(spec=Message)
+    user = MagicMock(spec=User)
+    user.id = 999999  # Non-owner
+    upd.effective_user = user
     upd.effective_message = msg
     upd.message = msg
     ctx = MagicMock()
 
-    # Invalid pack ID
+    # 1. Non-owner permission check
     ctx.args = ["unknown_pack"]
     await packem_cmd(upd, ctx)
-    msg.reply_text.assert_called_with("Uwaa~ I couldn't find that emoji pack anywhere! 🥺🔍")
+    msg.reply_text.assert_called_with("Ehehe~ that's an owner-only command! 🥺💫")
 
-    # Valid pack ID
-    save_emoji_pack("pack_show", "Showcase Pack", [{"emoji": "💖", "custom_emoji_id": ""}], link="https://t.me/addemoji/pack_show")
-    ctx.args = ["pack_show"]
-    await packem_cmd(upd, ctx)
-    resp = msg.reply_text.call_args[0][0]
-    assert "Showcase Pack" in resp
-    assert "pack_show" in resp
-    assert "💖" in resp
+    # 2. Owner invalid pack ID
+    with patch("admin.is_owner", return_value=True):
+        ctx.args = ["unknown_pack"]
+        await packem_cmd(upd, ctx)
+        msg.reply_text.assert_called_with("Uwaa~ I couldn't find that emoji pack anywhere! 🥺🔍")
+
+        # 3. Owner valid pack ID
+        save_emoji_pack("pack_show", "Showcase Pack", [{"emoji": "💖", "custom_emoji_id": ""}], link="https://t.me/addemoji/pack_show")
+        ctx.args = ["pack_show"]
+        await packem_cmd(upd, ctx)
+        resp = msg.reply_text.call_args[0][0]
+        assert "Showcase Pack" in resp
+        assert "pack_show" in resp
+        assert "💖" in resp
 
 
 @pytest.mark.asyncio
@@ -270,6 +279,7 @@ async def test_process_active_interaction_targeted_reactions():
     with patch("handlers.ai_chat.should_trigger_yuki", return_value=(True, "hi!")):
         with patch("handlers.ai_chat.handle_ai_chat", new_callable=AsyncMock) as mock_ai:
             await process_active_interaction_and_reaction(upd1, ctx)
+            await asyncio.sleep(0.01)
             assert get_active_chatter(chat_id) == 101
             msg1.set_reaction.assert_called_once()
             mock_ai.assert_called_once()
@@ -284,6 +294,7 @@ async def test_process_active_interaction_targeted_reactions():
 
     with patch("handlers.ai_chat.should_trigger_yuki", return_value=(False, "")):
         await process_active_interaction_and_reaction(upd2, ctx)
+        await asyncio.sleep(0.01)
         msg2.set_reaction.assert_called_once()
 
     # Unrelated User B sends message -> NO reaction!
@@ -296,6 +307,7 @@ async def test_process_active_interaction_targeted_reactions():
 
     with patch("handlers.ai_chat.should_trigger_yuki", return_value=(False, "")):
         await process_active_interaction_and_reaction(upd3, ctx)
+        await asyncio.sleep(0.01)
         msg3.set_reaction.assert_not_called()
         # Active chatter is still User A
         assert get_active_chatter(chat_id) == 101
@@ -311,5 +323,78 @@ async def test_process_active_interaction_targeted_reactions():
     with patch("handlers.ai_chat.should_trigger_yuki", return_value=(True, "notice me!")):
         with patch("handlers.ai_chat.handle_ai_chat", new_callable=AsyncMock):
             await process_active_interaction_and_reaction(upd4, ctx)
+            await asyncio.sleep(0.01)
             assert get_active_chatter(chat_id) == 102
             msg4.set_reaction.assert_called_once()
+
+
+
+@pytest.mark.asyncio
+async def test_non_owner_all_pack_commands_denied():
+    from admin import addpack_cmd, packs_cmd, pack_cmd, delpack_cmd, addem_cmd, delem_cmd, packem_cmd
+
+    upd = MagicMock(spec=Update)
+    msg = AsyncMock(spec=Message)
+    user = User(id=777777, first_name="SneakyNonOwner", is_bot=False)
+    upd.effective_user = user
+    upd.effective_message = msg
+    upd.message = msg
+    ctx = MagicMock()
+    ctx.args = ["test"]
+
+    with patch("admin.is_owner", return_value=False):
+        for cmd in [addpack_cmd, packs_cmd, pack_cmd, delpack_cmd, addem_cmd, delem_cmd, packem_cmd]:
+            msg.reply_text.reset_mock()
+            await cmd(upd, ctx)
+            msg.reply_text.assert_called_with("Ehehe~ that's an owner-only command! 🥺💫")
+
+
+@pytest.mark.asyncio
+async def test_active_chatter_sticker_reaction():
+    chat_id = -100555
+    user_a = MagicMock(spec=User)
+    user_a.id = 301
+    user_a.is_bot = False
+
+    chat = MagicMock(spec=Chat)
+    chat.id = chat_id
+    chat.type = "supergroup"
+
+    save_emoji_pack("sticker_reaction_pack", "Sticker React", [{"emoji": "🎉", "custom_emoji_id": ""}])
+    set_active_chatter(chat_id, 301)
+
+    upd = MagicMock(spec=Update)
+    msg = AsyncMock(spec=Message)
+    sticker_obj = MagicMock()
+    sticker_obj.emoji = "😊"
+    msg.sticker = sticker_obj
+    msg.text = None
+    msg.caption = None
+    upd.effective_message = msg
+    upd.effective_chat = chat
+    upd.effective_user = user_a
+
+    ctx = MagicMock()
+
+    with patch("handlers.ai_chat.should_trigger_yuki", return_value=(False, "")):
+        await process_active_interaction_and_reaction(upd, ctx)
+        await asyncio.sleep(0.01)
+        msg.set_reaction.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_custom_emoji_fallback_and_api_error_handling():
+    chat_id = -100444
+    msg = AsyncMock(spec=Message)
+
+    save_emoji_pack("custom_pack", "Custom", [{"emoji": "💖", "custom_emoji_id": "bad_id"}])
+
+    async def mock_set_reaction(reaction=None, **kwargs):
+        if reaction and type(reaction[0]).__name__ == "ReactionTypeCustomEmoji":
+            raise Exception("Custom emoji not allowed")
+        return True
+
+    msg.set_reaction.side_effect = mock_set_reaction
+
+    await try_react_to_message(msg, chat_id)
+    assert msg.set_reaction.call_count == 2
