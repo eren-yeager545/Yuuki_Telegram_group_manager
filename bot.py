@@ -22,7 +22,7 @@ from broadcast import broadcast_cmd, broadcast_callback_handler, handle_broadcas
 from tictactoe import ttt_cmd, ttt_callback_handler
 from admin import *
 from common import ai_cmd
-from handlers.ai_chat import handle_ai_chat, should_trigger_yuki
+from handlers.ai_chat import handle_ai_chat, should_trigger_yuki, process_active_interaction_and_reaction
 import store
 import html
 from handlers.afk import afk_cmd, format_afk_duration, extract_mentioned_afk_users
@@ -723,12 +723,8 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if filter_triggered:
             return
 
-    # Yuki AI Chatbot Trigger Check
-    bot_username = getattr(context.bot, "username", None)
-    bot_id = getattr(context.bot, "id", None)
-    triggered, prompt = should_trigger_yuki(update, bot_username=bot_username, bot_id=bot_id)
-    if triggered:
-        await handle_ai_chat(update, context, prompt_override=prompt)
+    # Active Interaction and Yuki AI Reaction / Chat Processing
+    await process_active_interaction_and_reaction(update, context)
 
 
 async def post_init(app: Application):
@@ -797,6 +793,9 @@ def main():
         ('packs', packs_cmd, 'Group Management Commands', 'View all saved sticker packs', '/packs'),
         ('pack', pack_cmd, 'Group Management Commands', 'Preview a specific saved sticker pack', '/pack id'),
         ('delpack', delpack_cmd, 'Group Management Commands', 'Delete a stored sticker pack', '/delpack pack_name'),
+        ('addem', addem_cmd, 'Group Management Commands', 'Add emoji pack by link', '/addem https://t.me/addemoji/ExamplePack'),
+        ('delem', delem_cmd, 'Group Management Commands', 'Delete a stored emoji pack', '/delem pack_id'),
+        ('packem', packem_cmd, 'Group Management Commands', 'Preview a specific saved emoji pack', '/packem pack_id'),
         ('dban', dban_cmd, 'Group Management Commands', 'Ban user and purge all their messages', '/dban'),
         ('pin', pin_cmd, 'Group Management Commands', 'Pin replied message', '/pin'),
         ('unpin', unpin_cmd, 'Group Management Commands', 'Clear all pins', '/unpin'),
