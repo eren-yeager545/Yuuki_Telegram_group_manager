@@ -109,7 +109,7 @@ async def try_react_to_message(msg: Message, chat_id: int):
                         "key": key,
                     })
 
-            elif (
+            if (
                 unicode_emoji
                 and unicode_emoji in VALID_TELEGRAM_REACTION_EMOJIS
             ):
