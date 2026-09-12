@@ -17,6 +17,10 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
+# Configurable constants for intentional Gemini timeouts
+DEFAULT_GEMINI_READ_TIMEOUT = 10.0
+DEFAULT_GEMINI_CONNECT_TIMEOUT = 5.0
+
 
 def _redact_key(text: str, secret: str) -> str:
     if not secret or not text:
@@ -73,6 +77,19 @@ class GeminiProvider(AIProvider):
     def __init__(self, api_keys: List[str], model: Optional[str] = None):
         super().__init__(api_keys)
         self.model = model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+        self._client: Optional[httpx.AsyncClient] = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Reuse or create an async HTTP client session."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient()
+        return self._client
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client if open."""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
 
     async def generate_response_with_key(
         self,
@@ -80,7 +97,7 @@ class GeminiProvider(AIProvider):
         messages: List[Dict[str, str]],
         system_prompt: str,
         max_tokens: int = 150,
-        timeout: float = 20.0,
+        timeout: float = 10.0,
         **kwargs
     ) -> AIResponse:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
@@ -133,106 +150,107 @@ class GeminiProvider(AIProvider):
             "Content-Type": "application/json"
         }
 
-        req_timeout = float(timeout) if timeout and float(timeout) > 0 else 10.0
+        req_timeout = float(timeout) if timeout and float(timeout) > 0 else DEFAULT_GEMINI_READ_TIMEOUT
+        read_timeout = min(req_timeout, DEFAULT_GEMINI_READ_TIMEOUT)
         http_timeout = httpx.Timeout(
-            connect=5.0,
-            read=min(req_timeout, 10.0),
+            connect=DEFAULT_GEMINI_CONNECT_TIMEOUT,
+            read=read_timeout,
             write=5.0,
             pool=5.0
         )
 
-        async with httpx.AsyncClient(timeout=http_timeout) as client:
+        client = await self._get_client()
+        try:
+            resp = await client.post(url, headers=headers, json=payload, timeout=http_timeout)
+        except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException) as te:
+            err_msg = f"Gemini API timeout | provider={self.name} model='{self.model}' timeout={read_timeout}s: {type(te).__name__}"
+            logger.warning(_redact_key(err_msg, api_key))
+            raise AIProviderError(
+                message=err_msg,
+                error_code=ProviderErrorCode.TIMEOUT,
+                suggested_cooldown=DEFAULT_TIMEOUT_COOLDOWN,
+                raw_error=te
+            ) from te
+        except httpx.RequestError as re:
+            err_msg = f"Gemini API network error | provider={self.name} model='{self.model}': {type(re).__name__}"
+            logger.warning(_redact_key(err_msg, api_key))
+            raise AIProviderError(
+                message=err_msg,
+                error_code=ProviderErrorCode.NETWORK_ERROR,
+                suggested_cooldown=DEFAULT_TIMEOUT_COOLDOWN,
+                raw_error=re
+            ) from re
+
+        if resp.status_code == 200:
             try:
-                resp = await client.post(url, headers=headers, json=payload)
-            except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException) as te:
-                err_msg = f"Gemini API timeout for model '{self.model}': {type(te).__name__}"
-                logger.warning(_redact_key(err_msg, api_key))
+                data = resp.json()
+            except Exception as je:
                 raise AIProviderError(
-                    message=err_msg,
-                    error_code=ProviderErrorCode.TIMEOUT,
-                    suggested_cooldown=DEFAULT_TIMEOUT_COOLDOWN,
-                    raw_error=te
-                ) from te
-            except httpx.RequestError as re:
-                err_msg = f"Gemini API network error for model '{self.model}': {type(re).__name__}"
-                logger.warning(_redact_key(err_msg, api_key))
-                raise AIProviderError(
-                    message=err_msg,
-                    error_code=ProviderErrorCode.NETWORK_ERROR,
-                    suggested_cooldown=DEFAULT_TIMEOUT_COOLDOWN,
-                    raw_error=re
-                ) from re
-
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                except Exception as je:
-                    raise AIProviderError(
-                        message=f"Gemini response is not valid JSON: {je}",
-                        error_code=ProviderErrorCode.SERVER_ERROR,
-                        suggested_cooldown=DEFAULT_SERVER_ERROR_COOLDOWN
-                    ) from je
-
-                if isinstance(data, dict):
-                    candidates = data.get("candidates", [])
-                    if isinstance(candidates, list) and candidates:
-                        candidate = candidates[0]
-                        if isinstance(candidate, dict):
-                            finish_reason = candidate.get("finishReason")
-                            if finish_reason in ("SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "OTHER"):
-                                logger.warning(f"Gemini API generation blocked due to finishReason: {finish_reason}")
-                                raise AIProviderError(
-                                    message=f"Gemini response content blocked due to finishReason '{finish_reason}'",
-                                    error_code=ProviderErrorCode.INVALID_REQUEST,
-                                    suggested_cooldown=0.0
-                                )
-
-                            content = candidate.get("content", {})
-                            if isinstance(content, dict):
-                                parts = content.get("parts", [])
-                                if isinstance(parts, list):
-                                    text_parts = [p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p]
-                                    full_text = "".join(text_parts).strip()
-                                    if full_text:
-                                        usage = data.get("usageMetadata")
-                                        return AIResponse(
-                                            text=full_text,
-                                            provider=self.name,
-                                            model=self.model,
-                                            usage=usage
-                                        )
-
-                raise AIProviderError(
-                    message="Gemini returned invalid or empty content response structure",
-                    error_code=ProviderErrorCode.EMPTY_RESPONSE,
+                    message=f"Gemini response is not valid JSON: {je}",
+                    error_code=ProviderErrorCode.SERVER_ERROR,
                     suggested_cooldown=DEFAULT_SERVER_ERROR_COOLDOWN
-                )
+                ) from je
 
-            err_detail = ""
-            try:
-                err_json = resp.json()
-                if isinstance(err_json, dict):
-                    err_obj = err_json.get("error", {})
-                    if isinstance(err_obj, dict):
-                        err_detail = err_obj.get("message", "") or str(err_obj)
-                    elif isinstance(err_obj, str):
-                        err_detail = err_obj
-                    else:
-                        err_detail = str(err_json)
-            except Exception:
-                err_detail = resp.text[:200]
+            if isinstance(data, dict):
+                candidates = data.get("candidates", [])
+                if isinstance(candidates, list) and candidates:
+                    candidate = candidates[0]
+                    if isinstance(candidate, dict):
+                        finish_reason = candidate.get("finishReason")
+                        if finish_reason in ("SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "OTHER"):
+                            logger.warning(f"Gemini API generation blocked due to finishReason: {finish_reason}")
+                            raise AIProviderError(
+                                message=f"Gemini response content blocked due to finishReason '{finish_reason}'",
+                                error_code=ProviderErrorCode.INVALID_REQUEST,
+                                suggested_cooldown=0.0
+                            )
 
-            err_detail = _redact_key(err_detail, api_key)
-            status = resp.status_code
-
-            code, cooldown = _classify_gemini_error(status, err_detail)
-            log_msg = f"Gemini API Error Status {status} ({code.value}, model='{self.model}'): {err_detail}"
-            logger.warning(log_msg)
+                        content = candidate.get("content", {})
+                        if isinstance(content, dict):
+                            parts = content.get("parts", [])
+                            if isinstance(parts, list):
+                                text_parts = [p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p]
+                                full_text = "".join(text_parts).strip()
+                                if full_text:
+                                    usage = data.get("usageMetadata")
+                                    return AIResponse(
+                                        text=full_text,
+                                        provider=self.name,
+                                        model=self.model,
+                                        usage=usage
+                                    )
 
             raise AIProviderError(
-                message=f"Gemini API Error Status {status}: {err_detail or log_msg}",
-                status_code=status,
-                error_code=code,
-                suggested_cooldown=cooldown,
-                raw_error=resp
+                message="Gemini returned invalid or empty content response structure",
+                error_code=ProviderErrorCode.EMPTY_RESPONSE,
+                suggested_cooldown=DEFAULT_SERVER_ERROR_COOLDOWN
             )
+
+        err_detail = ""
+        try:
+            err_json = resp.json()
+            if isinstance(err_json, dict):
+                err_obj = err_json.get("error", {})
+                if isinstance(err_obj, dict):
+                    err_detail = err_obj.get("message", "") or str(err_obj)
+                elif isinstance(err_obj, str):
+                    err_detail = err_obj
+                else:
+                    err_detail = str(err_json)
+        except Exception:
+            err_detail = resp.text[:200]
+
+        err_detail = _redact_key(err_detail, api_key)
+        status = resp.status_code
+
+        code, cooldown = _classify_gemini_error(status, err_detail)
+        log_msg = f"Gemini API Error Status {status} ({code.value}, model='{self.model}'): {err_detail}"
+        logger.warning(log_msg)
+
+        raise AIProviderError(
+            message=f"Gemini API Error Status {status}: {err_detail or log_msg}",
+            status_code=status,
+            error_code=code,
+            suggested_cooldown=cooldown,
+            raw_error=resp
+        )

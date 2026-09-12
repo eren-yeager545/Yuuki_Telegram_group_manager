@@ -35,7 +35,7 @@ OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', 'openrouter/free').strip() or '
 
 AI_MAX_CONTEXT_MESSAGES = int(os.getenv('AI_MAX_CONTEXT_MESSAGES', '10') or 10)
 AI_MAX_OUTPUT_TOKENS = int(os.getenv('AI_MAX_OUTPUT_TOKENS', '150') or 150)
-AI_REQUEST_TIMEOUT = float(os.getenv('AI_REQUEST_TIMEOUT', '20') or 20)
+AI_REQUEST_TIMEOUT = float(os.getenv('AI_REQUEST_TIMEOUT', '10') or 10)
 AI_USER_COOLDOWN = float(os.getenv('AI_USER_COOLDOWN', '5') or 5)
 AI_CHAT_COOLDOWN = float(os.getenv('AI_CHAT_COOLDOWN', '2') or 2)
 AI_MAX_CONCURRENT_REQUESTS = int(os.getenv('AI_MAX_CONCURRENT_REQUESTS', '10') or 10)
