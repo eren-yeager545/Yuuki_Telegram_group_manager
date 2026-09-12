@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 import httpx
 from typing import List, Dict, Optional, Any
 from .base import (
@@ -62,6 +63,26 @@ def _classify_openrouter_error(status: int, err_message: str, is_upstream: bool)
         return ProviderErrorCode.SERVER_ERROR, DEFAULT_SERVER_ERROR_COOLDOWN
 
     return ProviderErrorCode.UNKNOWN, 60.0
+
+
+def _extract_content_text(content_val: Any) -> str:
+    """Safely extract textual content from string or structured content representations."""
+    if content_val is None:
+        return ""
+    if isinstance(content_val, str):
+        return content_val.strip()
+    if isinstance(content_val, list):
+        parts = []
+        for item in content_val:
+            if isinstance(item, dict):
+                if item.get("type") == "text" and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif "text" in item and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+            elif isinstance(item, str):
+                parts.append(item)
+        return "".join(parts).strip()
+    return str(content_val).strip()
 
 
 class OpenRouterProvider(AIProvider):
@@ -132,12 +153,14 @@ class OpenRouterProvider(AIProvider):
             "X-Title": "Yuuki Telegram Bot"
         }
 
-        req_timeout = float(timeout) if timeout and float(timeout) > 0 else 10.0
+        req_timeout = max(0.1, float(timeout)) if timeout else 10.0
+        start_mono = time.monotonic()
+
         http_timeout = httpx.Timeout(
-            connect=5.0,
-            read=min(req_timeout, 10.0),
-            write=5.0,
-            pool=5.0
+            connect=min(req_timeout, 5.0),
+            read=req_timeout,
+            write=min(req_timeout, 5.0),
+            pool=min(req_timeout, 5.0)
         )
 
         client = await self._get_client(http_timeout)
@@ -146,8 +169,20 @@ class OpenRouterProvider(AIProvider):
         max_retries = 1
 
         while True:
+            elapsed = time.monotonic() - start_mono
+            remaining_time = req_timeout - elapsed
+            if remaining_time <= 0.05 and retry_count > 0:
+                break
+
+            current_http_timeout = httpx.Timeout(
+                connect=min(remaining_time, 5.0),
+                read=max(0.1, remaining_time),
+                write=min(remaining_time, 5.0),
+                pool=min(remaining_time, 5.0)
+            )
+
             try:
-                resp = await client.post(url, headers=headers, json=payload, timeout=http_timeout)
+                resp = await client.post(url, headers=headers, json=payload, timeout=current_http_timeout)
             except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException) as te:
                 err_msg = f"OpenRouter API timeout for model '{self.model}': {type(te).__name__}"
                 logger.warning(_redact_secrets(err_msg, api_key))
@@ -183,8 +218,15 @@ class OpenRouterProvider(AIProvider):
                 except (ValueError, TypeError):
                     retry_after_sec = None
 
-            # Handle 429 limited retry if Retry-After is specified and small (<= 3.0s)
-            if resp.status_code == 429 and retry_count < max_retries and retry_after_sec is not None and retry_after_sec <= 3.0:
+            # Handle 429 limited retry if Retry-After is specified, small (<= 3.0s), and fits within remaining deadline
+            time_left_after_resp = req_timeout - (time.monotonic() - start_mono)
+            if (
+                resp.status_code == 429
+                and retry_count < max_retries
+                and retry_after_sec is not None
+                and retry_after_sec <= 3.0
+                and retry_after_sec < (time_left_after_resp - 0.5)
+            ):
                 retry_count += 1
                 logger.info(
                     f"OpenRouter 429 received with Retry-After={retry_after_sec}s. Backing off before retry {retry_count}/{max_retries}..."
@@ -253,16 +295,15 @@ class OpenRouterProvider(AIProvider):
                             message_obj = first_choice.get("message")
                             if isinstance(message_obj, dict):
                                 content_val = message_obj.get("content")
-                                if content_val is not None:
-                                    content_text = str(content_val).strip()
-                                    if content_text:
-                                        usage = data.get("usage")
-                                        return AIResponse(
-                                            text=content_text,
-                                            provider=self.name,
-                                            model=self.model,
-                                            usage=usage
-                                        )
+                                content_text = _extract_content_text(content_val)
+                                if content_text:
+                                    usage = data.get("usage")
+                                    return AIResponse(
+                                        text=content_text,
+                                        provider=self.name,
+                                        model=self.model,
+                                        usage=usage
+                                    )
 
                 raw_text = getattr(resp, "text", "") or ""
                 preview = _redact_secrets(raw_text[:200], api_key)

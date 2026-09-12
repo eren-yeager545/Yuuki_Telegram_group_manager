@@ -17,7 +17,6 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
-# Configurable constants for intentional Gemini timeouts
 DEFAULT_GEMINI_READ_TIMEOUT = 10.0
 DEFAULT_GEMINI_CONNECT_TIMEOUT = 5.0
 
@@ -35,7 +34,6 @@ def _classify_gemini_error(status: int, err_detail: str) -> tuple[ProviderErrorC
     """
     detail_lower = err_detail.lower()
 
-    # Check for specific quota exhaustion indicators
     quota_keywords = [
         "resource_exhausted",
         "quota exceeded",
@@ -150,20 +148,19 @@ class GeminiProvider(AIProvider):
             "Content-Type": "application/json"
         }
 
-        req_timeout = float(timeout) if timeout and float(timeout) > 0 else DEFAULT_GEMINI_READ_TIMEOUT
-        read_timeout = min(req_timeout, DEFAULT_GEMINI_READ_TIMEOUT)
+        req_timeout = max(0.1, float(timeout)) if timeout else DEFAULT_GEMINI_READ_TIMEOUT
         http_timeout = httpx.Timeout(
-            connect=DEFAULT_GEMINI_CONNECT_TIMEOUT,
-            read=read_timeout,
-            write=5.0,
-            pool=5.0
+            connect=min(req_timeout, DEFAULT_GEMINI_CONNECT_TIMEOUT),
+            read=req_timeout,
+            write=min(req_timeout, 5.0),
+            pool=min(req_timeout, 5.0)
         )
 
         client = await self._get_client()
         try:
             resp = await client.post(url, headers=headers, json=payload, timeout=http_timeout)
         except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException) as te:
-            err_msg = f"Gemini API timeout | provider={self.name} model='{self.model}' timeout={read_timeout}s: {type(te).__name__}"
+            err_msg = f"Gemini API timeout | provider={self.name} model='{self.model}' timeout={req_timeout}s: {type(te).__name__}"
             logger.warning(_redact_key(err_msg, api_key))
             raise AIProviderError(
                 message=err_msg,
