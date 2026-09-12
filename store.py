@@ -157,11 +157,16 @@ def init_db():
         cur.execute('CREATE TABLE IF NOT EXISTS sticker_packs (set_name TEXT PRIMARY KEY, title TEXT, count INTEGER, updated_at INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS stickers (id INTEGER PRIMARY KEY AUTOINCREMENT, set_name TEXT, file_id TEXT, file_unique_id TEXT, emoji TEXT, sticker_type TEXT)')
         cur.execute('CREATE TABLE IF NOT EXISTS emoji_packs (set_name TEXT PRIMARY KEY, title TEXT, link TEXT, count INTEGER, updated_at INTEGER)')
-        cur.execute('CREATE TABLE IF NOT EXISTS emojis (id INTEGER PRIMARY KEY AUTOINCREMENT, set_name TEXT, emoji TEXT, custom_emoji_id TEXT)')
+        cur.execute('CREATE TABLE IF NOT EXISTS emojis (id INTEGER PRIMARY KEY AUTOINCREMENT, set_name TEXT, emoji TEXT, custom_emoji_id TEXT, reaction_enabled INTEGER DEFAULT 1)')
         cur.execute('CREATE TABLE IF NOT EXISTS afk (user_id INTEGER PRIMARY KEY, reason TEXT, afk_since INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS user_profile_snapshots (chat_id INTEGER, user_id INTEGER, first_name TEXT, last_name TEXT, username TEXT, updated_at INTEGER, PRIMARY KEY(chat_id, user_id))')
 
         # Schema migrations for existing SQLite databases
+        cur.execute("PRAGMA table_info(emojis)")
+        cols = [row[1] for row in cur.fetchall()]
+        if 'reaction_enabled' not in cols:
+            cur.execute("ALTER TABLE emojis ADD COLUMN reaction_enabled INTEGER DEFAULT 1")
+
         cur.execute("PRAGMA table_info(afk)")
         afk_cols = [row[1] for row in cur.fetchall()]
         if afk_cols and 'chat_id' in afk_cols:
@@ -1704,7 +1709,7 @@ def save_emoji_pack(set_name: str, title: str, emojis_data: list, link: str = ""
                 {
                     'set_name': set_name,
                     'emoji': item['emoji'],
-                    'custom_emoji_id': item['custom_emoji_id']
+                    'custom_emoji_id': item['custom_emoji_id'], 'reaction_enabled': True
                 }
                 for item in cleaned
             ]
@@ -1718,7 +1723,7 @@ def save_emoji_pack(set_name: str, title: str, emojis_data: list, link: str = ""
             c.execute('DELETE FROM emojis WHERE set_name=?', (set_name,))
             for item in cleaned:
                 c.execute(
-                    'INSERT INTO emojis(set_name, emoji, custom_emoji_id) VALUES(?,?,?)',
+                    'INSERT INTO emojis(set_name, emoji, custom_emoji_id, reaction_enabled) VALUES(?,?,?,1)',
                     (
                         set_name,
                         item['emoji'],
@@ -1743,15 +1748,15 @@ def get_emoji_pack(set_name: str):
             'title': pack.get('title', ''),
             'link': pack.get('link', ''),
             'count': pack.get('count', len(emojis)),
-            'emojis': [{'emoji': e.get('emoji', ''), 'custom_emoji_id': e.get('custom_emoji_id', '')} for e in emojis]
+            'emojis': [{'emoji': e.get('emoji', ''), 'custom_emoji_id': e.get('custom_emoji_id', ''), 'reaction_enabled': bool(e.get('reaction_enabled', True))} for e in emojis]
         }
     else:
         with closing(conn()) as c:
             row = c.execute('SELECT set_name, title, link, count FROM emoji_packs WHERE set_name=?', (set_name,)).fetchone()
             if not row:
                 return None
-            e_rows = c.execute('SELECT emoji, custom_emoji_id FROM emojis WHERE set_name=?', (set_name,)).fetchall()
-            emojis = [{'emoji': r[0], 'custom_emoji_id': r[1]} for r in e_rows]
+            e_rows = c.execute('SELECT emoji, custom_emoji_id, reaction_enabled FROM emojis WHERE set_name=?', (set_name,)).fetchall()
+            emojis = [{'emoji': r[0], 'custom_emoji_id': r[1], 'reaction_enabled': bool(r[2] if r[2] is not None else 1)} for r in e_rows]
             return {
                 'set_name': row[0],
                 'title': row[1],
@@ -1790,24 +1795,55 @@ def get_all_emoji_packs() -> list:
 
 
 def get_all_emojis() -> list:
-    """Retrieves all saved emojis across all emoji packs."""
+    """Retrieves all saved emojis across all emoji packs for reaction selection."""
     try:
         if is_mongo():
             db = get_mongo_db()
             emojis = list(db['emojis'].find({}))
-            raw_list = [{'set_name': e.get('set_name', ''), 'emoji': str(e.get('emoji', '') or '').strip(), 'custom_emoji_id': str(e.get('custom_emoji_id', '') or '').strip()} for e in emojis]
+            raw_list = [{
+                'set_name': e.get('set_name', ''),
+                'emoji': str(e.get('emoji', '') or '').strip(),
+                'custom_emoji_id': str(e.get('custom_emoji_id', '') or '').strip(),
+                'reaction_enabled': bool(e.get('reaction_enabled', True))
+            } for e in emojis]
         else:
             with closing(conn()) as c:
-                rows = c.execute('SELECT set_name, emoji, custom_emoji_id FROM emojis').fetchall()
-                raw_list = [{'set_name': r[0], 'emoji': str(r[1] or '').strip(), 'custom_emoji_id': str(r[2] or '').strip()} for r in rows]
+                rows = c.execute('SELECT set_name, emoji, custom_emoji_id, reaction_enabled FROM emojis').fetchall()
+                raw_list = [{
+                    'set_name': r[0],
+                    'emoji': str(r[1] or '').strip(),
+                    'custom_emoji_id': str(r[2] or '').strip(),
+                    'reaction_enabled': bool(r[3] if r[3] is not None else 1)
+                } for r in rows]
         res = []
         for item in raw_list:
             if item['emoji'] or item['custom_emoji_id']:
-                res.append(item)
+                if item['reaction_enabled'] or item['emoji']:
+                    res.append(item)
         return res
     except Exception as e:
         logger.error(f"Error fetching all emojis: {e}")
         return []
+
+
+def disable_emoji_reaction(custom_emoji_id: str) -> bool:
+    """Disables reaction_enabled for all emoji records matching custom_emoji_id."""
+    custom_id = str(custom_emoji_id or '').strip()
+    if not custom_id:
+        return False
+    try:
+        if is_mongo():
+            db = get_mongo_db()
+            res = db['emojis'].update_many({'custom_emoji_id': custom_id}, {'$set': {'reaction_enabled': False}})
+            return res.matched_count > 0
+        else:
+            with closing(conn()) as c:
+                cur = c.execute('UPDATE emojis SET reaction_enabled=0 WHERE custom_emoji_id=?', (custom_id,))
+                c.commit()
+                return cur.rowcount > 0
+    except Exception as e:
+        logger.error(f"Error disabling emoji reaction for custom_emoji_id '{custom_id}': {e}")
+        return False
 
 
 def delete_emoji_pack(set_name: str) -> bool:

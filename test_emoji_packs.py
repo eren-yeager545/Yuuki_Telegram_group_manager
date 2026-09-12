@@ -10,6 +10,7 @@ from store import (
     get_all_emoji_packs,
     get_all_emojis,
     delete_emoji_pack,
+    disable_emoji_reaction,
     init_db
 )
 from admin import addem_cmd, delem_cmd, packem_cmd, parse_emoji_pack_link
@@ -570,3 +571,89 @@ async def test_combined_item_candidate_separation():
     rect = msg.set_reaction.call_args[1]["reaction"][0]
     assert isinstance(rect, ReactionTypeEmoji)
     assert rect.emoji == "🎉"
+
+
+@pytest.mark.asyncio
+async def test_reaction_enabled_db_persistence_and_fallback():
+    from handlers.ai_chat import _quarantined_reactions, _recent_chat_reactions
+    _quarantined_reactions.clear()
+    _recent_chat_reactions.clear()
+
+    chat_id = -100777
+    pack_name = "persisted_test_pack"
+
+    # 1. Save pack with a custom emoji ID
+    save_emoji_pack(pack_name, "Persisted Test", [{"emoji": "", "custom_emoji_id": "777111"}])
+
+    msg = AsyncMock(spec=Message)
+    async def mock_set_reaction(reaction=None, **kwargs):
+        if reaction and type(reaction[0]).__name__ == "ReactionTypeCustomEmoji":
+            raise Exception("BadRequest: Reaction_invalid")
+        return True
+
+    msg.set_reaction.side_effect = mock_set_reaction
+
+    # 2. Trigger reaction attempt - Telegram rejects it
+    await try_react_to_message(msg, chat_id)
+    assert "custom:777111" in _quarantined_reactions
+
+    # 3. Check DB state: reaction_enabled must be False
+    pack_data = get_emoji_pack(pack_name)
+    assert pack_data is not None
+    assert len(pack_data["emojis"]) == 1
+    assert pack_data["emojis"][0]["custom_emoji_id"] == "777111"
+    assert pack_data["emojis"][0]["reaction_enabled"] == False
+
+    # 4. Clear in-memory quarantine (simulating bot restart)
+    _quarantined_reactions.clear()
+
+    # 5. Call try_react_to_message again - disabled custom emoji should NOT be attempted
+    msg.set_reaction.reset_mock()
+    await try_react_to_message(msg, chat_id)
+    msg.set_reaction.assert_not_called()
+
+    # 6. Deleting the pack cleans it up from DB
+    assert delete_emoji_pack(pack_name) == True
+    assert get_emoji_pack(pack_name) is None
+
+
+@pytest.mark.asyncio
+async def test_mongo_backend_reaction_enabled_support():
+    import os
+    from mongomock import MongoClient
+
+    # Temporarily switch to mongomock
+    import store
+    orig_is_mongo = store.is_mongo
+    orig_client = store._mongo_client
+    orig_db = store._mongo_db
+
+    try:
+        os.environ['MONGO_URI'] = 'mongodb://localhost:27017/test_reaction_db'
+        store.is_mongo = lambda: True
+        store._mongo_client = MongoClient()
+        store._mongo_db = store._mongo_client.get_database('test_reaction_db')
+
+        pack_name = "mongo_pack"
+        save_emoji_pack(pack_name, "Mongo Pack", [{"emoji": "⭐", "custom_emoji_id": "999000"}])
+
+        # Check save default
+        pack = get_emoji_pack(pack_name)
+        assert pack["emojis"][0]["reaction_enabled"] == True
+
+        # Check disable
+        assert disable_emoji_reaction("999000") == True
+
+        # Check get_emoji_pack retains disabled emoji
+        pack_after = get_emoji_pack(pack_name)
+        assert len(pack_after["emojis"]) == 1
+        assert pack_after["emojis"][0]["reaction_enabled"] == False
+
+        # Delete pack
+        assert delete_emoji_pack(pack_name) == True
+        assert get_emoji_pack(pack_name) is None
+
+    finally:
+        store.is_mongo = orig_is_mongo
+        store._mongo_client = orig_client
+        store._mongo_db = orig_db
