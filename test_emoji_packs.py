@@ -331,7 +331,7 @@ async def test_process_active_interaction_targeted_reactions():
 
 @pytest.mark.asyncio
 async def test_non_owner_all_pack_commands_denied():
-    from admin import addpack_cmd, packs_cmd, pack_cmd, delpack_cmd, addem_cmd, delem_cmd, packem_cmd
+    from admin import addpack_cmd, packs_cmd, pack_cmd, delpack_cmd, addem_cmd, delem_cmd, packem_cmd, packsem_cmd
 
     upd = MagicMock(spec=Update)
     msg = AsyncMock(spec=Message)
@@ -343,7 +343,7 @@ async def test_non_owner_all_pack_commands_denied():
     ctx.args = ["test"]
 
     with patch("admin.is_owner", return_value=False):
-        for cmd in [addpack_cmd, packs_cmd, pack_cmd, delpack_cmd, addem_cmd, delem_cmd, packem_cmd]:
+        for cmd in [addpack_cmd, packs_cmd, pack_cmd, delpack_cmd, addem_cmd, delem_cmd, packem_cmd, packsem_cmd]:
             msg.reply_text.reset_mock()
             await cmd(upd, ctx)
             msg.reply_text.assert_called_with("Ehehe~ that's an owner-only command! 🥺💫")
@@ -398,3 +398,48 @@ async def test_custom_emoji_fallback_and_api_error_handling():
 
     await try_react_to_message(msg, chat_id)
     assert msg.set_reaction.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_packsem_cmd_features():
+    from admin import packsem_cmd, packsem_callback_handler
+
+    upd = MagicMock(spec=Update)
+    msg = AsyncMock(spec=Message)
+    user_non_owner = User(id=888888, first_name="NonOwner", is_bot=False)
+    upd.effective_user = user_non_owner
+    upd.effective_message = msg
+    upd.message = msg
+    ctx = MagicMock()
+
+    # 1. Non-owner permission check
+    await packsem_cmd(upd, ctx)
+    msg.reply_text.assert_called_with("Ehehe~ that's an owner-only command! 🥺💫")
+
+    user_owner = User(id=111111111, first_name="Owner", is_bot=False)
+    upd.effective_user = user_owner
+
+    with patch("admin.is_owner", return_value=True):
+        # 2. Owner when no emoji packs saved
+        msg.reply_text.reset_mock()
+        await packsem_cmd(upd, ctx)
+        msg.reply_text.assert_called_with("Aww~ I don't have any emoji packs saved yet! 🥺✨")
+
+        # 3. Owner when emoji packs exist
+        save_emoji_pack("pack_sem_1", "Emoji Pack One", [{"emoji": "🌸", "custom_emoji_id": ""}])
+        save_emoji_pack("pack_sem_2", "Emoji Pack Two", [{"emoji": "✨", "custom_emoji_id": "12345"}])
+        msg.reply_text.reset_mock()
+        await packsem_cmd(upd, ctx)
+        resp = msg.reply_text.call_args[0][0]
+        assert "Stored Emoji Packs" in resp
+        assert "pack_sem_1" in resp
+        assert "pack_sem_2" in resp
+
+    # 4. Non-owner callback query check
+    query = AsyncMock()
+    query.data = "packsem_page:0"
+    upd.callback_query = query
+    upd.effective_user = user_non_owner
+    with patch("admin.is_owner", return_value=False):
+        await packsem_callback_handler(upd, ctx)
+        query.answer.assert_called_with("Ehehe~ that's an owner-only command! 🥺💫", show_alert=True)
