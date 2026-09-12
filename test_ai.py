@@ -1,3 +1,4 @@
+import logging
 import asyncio
 import pytest
 import httpx
@@ -1117,3 +1118,68 @@ async def test_all_providers_exhausted_fallback():
         assert "taking a little break" in resp.text
 
     await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_gemini_timeout_raises_provider_error():
+    provider = GeminiProvider(api_keys=["secret_gemini_key_123"], model="gemini-2.5-flash")
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.side_effect = httpx.ReadTimeout("Read timed out")
+
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key(
+                "secret_gemini_key_123",
+                [{"role": "user", "content": "hello"}],
+                system_prompt="test"
+            )
+
+        err = exc_info.value
+        assert err.error_code == ProviderErrorCode.TIMEOUT
+        assert "secret_gemini_key_123" not in str(err)
+        assert "Gemini API timeout" in str(err)
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_gemini_timeout_failover_to_next_key_and_groq(caplog):
+    manager = AIProviderManager(
+        provider_order=["gemini", "groq"],
+        gemini_keys=["g_key1", "g_key2"],
+        groq_keys=["groq_key1"],
+        openrouter_keys=[],
+        key_cooldown_seconds=30.0
+    )
+
+    with patch.object(GeminiProvider, "generate_response_with_key", new_callable=AsyncMock) as mock_gemini, \
+         patch.object(GroqProvider, "generate_response_with_key", new_callable=AsyncMock) as mock_groq:
+
+        mock_gemini.side_effect = [
+            AIProviderError("Gemini API timeout for model 'gemini-2.5-flash': ReadTimeout", error_code=ProviderErrorCode.TIMEOUT, suggested_cooldown=30.0),
+            AIProviderError("Gemini API timeout for model 'gemini-2.5-flash': ReadTimeout", error_code=ProviderErrorCode.TIMEOUT, suggested_cooldown=30.0),
+        ]
+        mock_groq.return_value = AIResponse(text="Groq response after Gemini timeout!", provider="groq", model="llama-3.3-70b-versatile")
+
+        with caplog.at_level(logging.INFO):
+            resp = await manager.chat(messages=[{"role": "user", "content": "hello"}], system_prompt="")
+
+        assert resp.text == "Groq response after Gemini timeout!"
+        assert resp.provider == "groq"
+        assert mock_gemini.call_count == 2
+        assert mock_groq.call_count == 1
+        assert "Provider 'gemini' model='gemini-2.5-flash' timed out" in caplog.text
+
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_gemini_client_reuse_and_close():
+    provider = GeminiProvider(api_keys=["g_key1"], model="gemini-2.5-flash")
+    client1 = await provider._get_client()
+    client2 = await provider._get_client()
+    assert client1 is client2
+    assert not client1.is_closed
+
+    await provider.close()
+    assert provider._client is None

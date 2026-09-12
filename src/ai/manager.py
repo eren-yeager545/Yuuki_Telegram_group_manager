@@ -107,7 +107,7 @@ class AIProviderManager:
         messages: List[Dict[str, str]],
         system_prompt: str,
         max_tokens: int = 150,
-        timeout: float = 20.0,
+        timeout: float = 10.0,
         chat_id: Optional[int] = None,
         message_id: Optional[int] = None
     ) -> AIResponse:
@@ -159,7 +159,7 @@ class AIProviderManager:
                     err_msg = self._redact_all_keys(str(pe))
                     err_type = pe.error_code.value if pe.error_code else "unknown"
                     logger.warning(
-                        f"AI Provider Failed | provider={provider_name} key_index={key_idx} correlation_id={corr_id} model={model_name} type={err_type}: {err_msg}"
+                        f"AI Provider Failed | provider={provider_name} model={model_name} key_index={key_idx} correlation_id={corr_id} type={err_type} timeout={timeout}s: {err_msg}"
                     )
                     cooldown = pe.suggested_cooldown
                     if pe.retry_after and pe.retry_after > 0:
@@ -174,7 +174,12 @@ class AIProviderManager:
                         cooldown_seconds=cooldown or self.default_cooldown_seconds,
                         active_failover_provider=failover_provider
                     )
-                    logger.info(f"Provider Fallback | correlation_id={corr_id}: Rotating to next available key/provider")
+                    if pe.error_code == ProviderErrorCode.TIMEOUT:
+                        logger.info(
+                            f"AI Provider Failover | correlation_id={corr_id}: Provider '{provider_name}' model='{model_name}' timed out after {timeout}s on key_index={key_idx}. Immediately failing over to target='{failover_provider or 'next key/provider'}'"
+                        )
+                    else:
+                        logger.info(f"Provider Fallback | correlation_id={corr_id}: Rotating to next available key/provider")
 
                 except Exception as e:
                     err_msg = self._redact_all_keys(str(e))
