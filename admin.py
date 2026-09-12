@@ -2194,3 +2194,93 @@ async def packem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     await msg.reply_text("\n".join(text_lines), parse_mode="HTML")
+
+
+async def packsem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not is_owner(user.id, OWNER_IDS):
+        await update.message.reply_text("Ehehe~ that's an owner-only command! 🥺💫")
+        return
+
+    msg = update.effective_message
+    if not msg:
+        return
+
+    from store import get_all_emoji_packs
+    packs = get_all_emoji_packs()
+
+    if not packs:
+        await msg.reply_text("Aww~ I don't have any emoji packs saved yet! 🥺✨")
+        return
+
+    page = 0
+    await send_packsem_page(update, context, packs, page=page)
+
+
+async def send_packsem_page(update: Update, context: ContextTypes.DEFAULT_TYPE, packs: list, page: int = 0, is_callback: bool = False):
+    per_page = 5
+    total_packs = len(packs)
+    total_pages = (total_packs + per_page - 1) // per_page
+    page = max(0, min(page, total_pages - 1))
+
+    start_idx = page * per_page
+    page_packs = packs[start_idx:start_idx + per_page]
+
+    text_lines = ["<b>🌸 Stored Emoji Packs 🌸</b>", ""]
+    for p in page_packs:
+        title = p.get('title') or 'Untitled Pack'
+        set_name = p.get('set_name') or 'unknown'
+        count = p.get('count', 0)
+        text_lines.append(f"📦 <b>{html.escape(title)}</b>")
+        text_lines.append(f"🆔 <code>{html.escape(set_name)}</code>")
+        text_lines.append(f"🔢 {count} emojis")
+        text_lines.append("")
+
+    text_lines.append(f"<i>Page {page + 1} of {total_pages} (Total: {total_packs})</i>")
+    text = "\n".join(text_lines)
+
+    buttons = []
+    if total_pages > 1:
+        row = []
+        if page > 0:
+            row.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"packsem_page:{page - 1}"))
+        if page < total_pages - 1:
+            row.append(InlineKeyboardButton("Next ➡️", callback_data=f"packsem_page:{page + 1}"))
+        buttons.append(row)
+
+    reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
+
+    if is_callback and update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(text, parse_mode="HTML", reply_markup=reply_markup)
+        except Exception:
+            pass
+    else:
+        msg = update.effective_message
+        if msg:
+            await msg.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
+
+
+async def packsem_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith("packsem_page:"):
+        return
+
+    user = update.effective_user
+    if not user or not is_owner(user.id, OWNER_IDS):
+        await query.answer("Ehehe~ that's an owner-only command! 🥺💫", show_alert=True)
+        return
+
+    await query.answer()
+    try:
+        page = int(query.data.split(":")[1])
+    except Exception:
+        page = 0
+
+    from store import get_all_emoji_packs
+    packs = get_all_emoji_packs()
+    if not packs:
+        await query.edit_message_text("Aww~ I don't have any emoji packs saved yet! 🥺✨")
+        return
+
+    await send_packsem_page(update, context, packs, page=page, is_callback=True)

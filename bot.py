@@ -796,6 +796,7 @@ def main():
         ('addem', addem_cmd, 'Group Management Commands', 'Add emoji pack by link', '/addem https://t.me/addemoji/ExamplePack'),
         ('delem', delem_cmd, 'Group Management Commands', 'Delete a stored emoji pack', '/delem pack_id'),
         ('packem', packem_cmd, 'Group Management Commands', 'Preview a specific saved emoji pack', '/packem pack_id'),
+        ('packsem', packsem_cmd, 'Group Management Commands', 'View all saved emoji packs', '/packsem'),
         ('dban', dban_cmd, 'Group Management Commands', 'Ban user and purge all their messages', '/dban'),
         ('pin', pin_cmd, 'Group Management Commands', 'Pin replied message', '/pin'),
         ('unpin', unpin_cmd, 'Group Management Commands', 'Clear all pins', '/unpin'),
@@ -845,6 +846,7 @@ def main():
     for spec in user_cmds + admin_cmds:
         add_registered_command(app, *spec)
     app.add_handler(CallbackQueryHandler(packs_callback_handler, pattern='^packs_page:'))
+    app.add_handler(CallbackQueryHandler(packsem_callback_handler, pattern='^packsem_page:'))
     app.add_handler(CallbackQueryHandler(kick_callback_handler, pattern='^kick_'))
     app.add_handler(CallbackQueryHandler(broadcast_callback_handler, pattern='^bcast_'))
     app.add_handler(CallbackQueryHandler(ttt_callback_handler, pattern='^ttt_'))
