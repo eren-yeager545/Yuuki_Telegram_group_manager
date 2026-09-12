@@ -77,65 +77,125 @@ def is_active_chatter(chat_id: int, user_id: int) -> bool:
 
 async def try_react_to_message(msg: Message, chat_id: int):
     """
-    Reacts to the message with a randomly selected emoji from stored emoji packs.
-    Uses ReactionTypeCustomEmoji if custom_emoji_id exists, otherwise ReactionTypeEmoji
-    only if the emoji is a valid Telegram reaction emoji.
-    Never falls back from custom emoji to Unicode emoji.
-    Temporarily quarantines rejected reactions during runtime to prevent repeating errors.
+    Try to add a random valid reaction to a message.
+
+    Custom emoji reactions that Telegram rejects are quarantined
+    for the current runtime so they are not repeatedly retried.
     """
     try:
         emojis = store.get_all_emojis()
+
         if not emojis:
             return
 
         valid_items = []
-        for e in emojis:
-            cid = str(e.get('custom_emoji_id', '') or '').strip()
-            uemoji = str(e.get('emoji', '') or '').strip()
-            if cid:
-                key = f"custom:{cid}"
+
+        for item in emojis:
+            custom_id = str(
+                item.get("custom_emoji_id", "") or ""
+            ).strip()
+
+            unicode_emoji = str(
+                item.get("emoji", "") or ""
+            ).strip()
+
+            if custom_id:
+                key = f"custom:{custom_id}"
+
                 if key not in _quarantined_reactions:
-                    valid_items.append({'type': 'custom', 'id': cid, 'key': key})
-            elif uemoji and uemoji in VALID_TELEGRAM_REACTION_EMOJIS:
-                key = f"emoji:{uemoji}"
+                    valid_items.append({
+                        "type": "custom",
+                        "id": custom_id,
+                        "key": key,
+                    })
+
+            elif (
+                unicode_emoji
+                and unicode_emoji in VALID_TELEGRAM_REACTION_EMOJIS
+            ):
+                key = f"emoji:{unicode_emoji}"
+
                 if key not in _quarantined_reactions:
-                    valid_items.append({'type': 'emoji', 'emoji': uemoji, 'key': key})
+                    valid_items.append({
+                        "type": "emoji",
+                        "emoji": unicode_emoji,
+                        "key": key,
+                    })
 
         if not valid_items:
             return
 
         recent = _recent_chat_reactions.get(chat_id, [])
-        fresh = [item for item in valid_items if item['key'] not in recent]
+
+        fresh = [
+            item
+            for item in valid_items
+            if item["key"] not in recent
+        ]
+
         candidates = fresh if fresh else valid_items
 
         chosen = random.choice(candidates)
-        key = chosen['key']
+        key = chosen["key"]
 
-        if chat_id not in _recent_chat_reactions:
-            _recent_chat_reactions[chat_id] = []
-        _recent_chat_reactions[chat_id].append(key)
-        if len(_recent_chat_reactions[chat_id]) > 5:
-            _recent_chat_reactions[chat_id].pop(0)
+        try:
+            if chosen["type"] == "custom":
+                reaction = ReactionTypeCustomEmoji(
+                    custom_emoji_id=chosen["id"]
+                )
 
-        if not hasattr(msg, "set_reaction"):
+                await msg.set_reaction(
+                    reaction=[reaction]
+                )
+
+            else:
+                reaction = ReactionTypeEmoji(
+                    emoji=chosen["emoji"]
+                )
+
+                await msg.set_reaction(
+                    reaction=[reaction]
+                )
+
+        except Exception as exc:
+            error_text = str(exc)
+
+            # Telegram permanently rejects this particular
+            # custom emoji as a reaction.
+            if (
+                chosen["type"] == "custom"
+                and "Reaction_invalid" in error_text
+            ):
+                _quarantined_reactions.add(key)
+
+                logger.warning(
+                    "Invalid custom emoji reaction quarantined: "
+                    "custom_emoji_id=%s",
+                    chosen["id"],
+                )
+
+            else:
+                logger.warning(
+                    "Reaction failed: type=%s error=%s",
+                    chosen["type"],
+                    type(exc).__name__,
+                )
+
             return
 
-        if chosen['type'] == 'custom':
-            try:
-                reaction_obj = ReactionTypeCustomEmoji(custom_emoji_id=chosen['id'])
-                await msg.set_reaction(reaction=[reaction_obj])
-            except Exception as ce:
-                _quarantined_reactions.add(key)
-                logger.warning(f"Custom emoji reaction failed: {ce}")
-        elif chosen['type'] == 'emoji':
-            try:
-                reaction_obj = ReactionTypeEmoji(emoji=chosen['emoji'])
-                await msg.set_reaction(reaction=[reaction_obj])
-            except Exception as ee:
-                _quarantined_reactions.add(key)
-                logger.warning(f"Standard emoji reaction rejected: {ee}")
-    except Exception as e:
-        logger.warning(f"Failed to set reaction on message: {e}")
+        # Only remember the reaction as recently used after
+        # Telegram successfully accepted it.
+        recent = _recent_chat_reactions.setdefault(chat_id, [])
+        recent.append(key)
+
+        if len(recent) > 5:
+            recent.pop(0)
+
+    except Exception as exc:
+        logger.warning(
+            "Failed to process message reaction: %s",
+            type(exc).__name__,
+        )
 
 
 async def send_owner_ai_alert(message_text: str, context: Optional[ContextTypes.DEFAULT_TYPE] = None):

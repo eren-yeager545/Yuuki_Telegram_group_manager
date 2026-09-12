@@ -391,7 +391,7 @@ async def test_custom_emoji_fallback_and_api_error_handling():
 
     async def mock_set_reaction(reaction=None, **kwargs):
         if reaction and type(reaction[0]).__name__ == "ReactionTypeCustomEmoji":
-            raise Exception("Custom emoji not allowed")
+            raise Exception("BadRequest: Reaction_invalid")
         return True
 
     msg.set_reaction.side_effect = mock_set_reaction
@@ -464,3 +464,70 @@ async def test_invalid_unicode_emoji_skipped():
     await try_react_to_message(msg, chat_id)
     # Should skip set_reaction completely
     msg.set_reaction.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cases_a_through_e_reactions():
+    from handlers.ai_chat import _quarantined_reactions, _recent_chat_reactions
+    _quarantined_reactions.clear()
+    _recent_chat_reactions.clear()
+
+    chat_id = -1009999
+
+    # Case A: Valid Unicode reaction
+    save_emoji_pack("unicode_pack", "Unicode", [{"emoji": "👍", "custom_emoji_id": ""}])
+    msg_a = AsyncMock(spec=Message)
+    await try_react_to_message(msg_a, chat_id)
+    msg_a.set_reaction.assert_called_once()
+    rect = msg_a.set_reaction.call_args[1]["reaction"][0]
+    assert isinstance(rect, ReactionTypeEmoji)
+    assert rect.emoji == "👍"
+    assert "emoji:👍" in _recent_chat_reactions[chat_id]
+
+    delete_emoji_pack("unicode_pack")
+    _recent_chat_reactions.clear()
+
+    # Case B: Valid custom emoji
+    save_emoji_pack("custom_valid_pack", "Custom Valid", [{"emoji": "", "custom_emoji_id": "54321"}])
+    msg_b = AsyncMock(spec=Message)
+    await try_react_to_message(msg_b, chat_id)
+    msg_b.set_reaction.assert_called_once()
+    rect_b = msg_b.set_reaction.call_args[1]["reaction"][0]
+    assert isinstance(rect_b, ReactionTypeCustomEmoji)
+    assert rect_b.custom_emoji_id == "54321"
+    assert "custom:54321" in _recent_chat_reactions[chat_id]
+
+    delete_emoji_pack("custom_valid_pack")
+    _recent_chat_reactions.clear()
+
+    # Case C: Invalid custom emoji (Reaction_invalid)
+    save_emoji_pack("custom_invalid_pack", "Custom Invalid", [{"emoji": "", "custom_emoji_id": "99999"}])
+    msg_c = AsyncMock(spec=Message)
+    msg_c.set_reaction.side_effect = Exception("BadRequest: Reaction_invalid")
+    await try_react_to_message(msg_c, chat_id)
+
+    assert "custom:99999" in _quarantined_reactions
+    assert "custom:99999" not in _recent_chat_reactions.get(chat_id, [])
+
+    # Retrying should skip quarantined emoji
+    msg_c.set_reaction.reset_mock()
+    await try_react_to_message(msg_c, chat_id)
+    msg_c.set_reaction.assert_not_called()
+
+    delete_emoji_pack("custom_invalid_pack")
+
+    # Case D: Temporary API / network failure
+    save_emoji_pack("temp_fail_pack", "Temp Fail", [{"emoji": "", "custom_emoji_id": "88888"}])
+    msg_d = AsyncMock(spec=Message)
+    msg_d.set_reaction.side_effect = Exception("Timed out network error")
+    await try_react_to_message(msg_d, chat_id)
+
+    assert "custom:88888" not in _quarantined_reactions
+    assert "custom:88888" not in _recent_chat_reactions.get(chat_id, [])
+
+    delete_emoji_pack("temp_fail_pack")
+
+    # Case E: No valid reactions available
+    msg_e = AsyncMock(spec=Message)
+    await try_react_to_message(msg_e, chat_id)
+    msg_e.set_reaction.assert_not_called()
