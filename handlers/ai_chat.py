@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import random
 import re
@@ -82,7 +83,11 @@ async def try_react_to_message(msg: Message, chat_id: int):
         if not emojis:
             return
 
-        valid_items = [e for e in emojis if e.get('emoji') or e.get('custom_emoji_id')]
+        valid_items = [
+            e for e in emojis
+            if (e.get('emoji') and isinstance(e.get('emoji'), str) and e.get('emoji').strip())
+            or (e.get('custom_emoji_id') and isinstance(e.get('custom_emoji_id'), str) and e.get('custom_emoji_id').strip())
+        ]
         if not valid_items:
             return
 
@@ -102,14 +107,24 @@ async def try_react_to_message(msg: Message, chat_id: int):
         if len(_recent_chat_reactions[chat_id]) > 5:
             _recent_chat_reactions[chat_id].pop(0)
 
-        reaction_obj = None
-        if chosen.get('custom_emoji_id'):
-            reaction_obj = ReactionTypeCustomEmoji(custom_emoji_id=chosen['custom_emoji_id'])
-        elif chosen.get('emoji'):
-            reaction_obj = ReactionTypeEmoji(emoji=chosen['emoji'])
+        if not hasattr(msg, "set_reaction"):
+            return
 
-        if reaction_obj and hasattr(msg, "set_reaction"):
-            await msg.set_reaction(reaction=[reaction_obj])
+        success = False
+        if chosen.get('custom_emoji_id'):
+            try:
+                reaction_obj = ReactionTypeCustomEmoji(custom_emoji_id=chosen['custom_emoji_id'])
+                await msg.set_reaction(reaction=[reaction_obj])
+                success = True
+            except Exception as ce:
+                logger.warning(f"Failed to set custom emoji reaction '{chosen.get('custom_emoji_id')}': {ce}")
+
+        if not success and chosen.get('emoji'):
+            try:
+                reaction_obj = ReactionTypeEmoji(emoji=chosen['emoji'])
+                await msg.set_reaction(reaction=[reaction_obj])
+            except Exception as ee:
+                logger.warning(f"Failed to set emoji reaction '{chosen.get('emoji')}': {ee}")
     except Exception as e:
         logger.warning(f"Failed to set reaction on message: {e}")
 
@@ -298,13 +313,13 @@ async def process_active_interaction_and_reaction(update: Update, context: Conte
 
     if triggered:
         set_active_chatter(chat.id, user.id)
-        await try_react_to_message(msg, chat.id)
+        asyncio.create_task(try_react_to_message(msg, chat.id))
         await handle_ai_chat(update, context, prompt_override=prompt)
         return
 
     if is_active_chatter(chat.id, user.id):
         set_active_chatter(chat.id, user.id)
-        await try_react_to_message(msg, chat.id)
+        asyncio.create_task(try_react_to_message(msg, chat.id))
 
 
 async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt_override: Optional[str] = None):

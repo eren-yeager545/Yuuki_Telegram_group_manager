@@ -673,7 +673,7 @@ async def test_addpack_cmd():
     # 1. Non-owner check
     with patch("admin.is_owner", return_value=False):
         await addpack_cmd(upd, ctx)
-        msg.reply_text.assert_called_with("🌸 Only my owner or sudo users can save sticker packs desu~!")
+        msg.reply_text.assert_called_with("Ehehe~ that's an owner-only command! 🥺💫")
 
     # 2. Owner success replying to sticker
     sticker = MagicMock()

@@ -1607,11 +1607,11 @@ Bye-bye, take care! 🌸""")
 async def addpack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /addpack command handler.
-    Allows authorized owners/sudos to save an entire sticker pack by replying to a sticker.
+    Allows authorized owners to save an entire sticker pack by replying to a sticker.
     """
     user = update.effective_user
     if not user or not is_owner(user.id, OWNER_IDS):
-        await update.message.reply_text("🌸 Only my owner or sudo users can save sticker packs desu~!")
+        await update.message.reply_text("Ehehe~ that's an owner-only command! 🥺💫")
         return
 
     msg = update.effective_message
@@ -1848,7 +1848,7 @@ async def tag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def packs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or not is_owner(user.id, OWNER_IDS):
-        await update.message.reply_text("🌸 Only my owner or sudo users can view sticker packs desu~!")
+        await update.message.reply_text("Ehehe~ that's an owner-only command! 🥺💫")
         return
 
     msg = update.effective_message
@@ -1917,7 +1917,7 @@ async def packs_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     user = update.effective_user
     if not user or not is_owner(user.id, OWNER_IDS):
-        await query.answer("🌸 Only my owner or sudo users can view sticker packs desu~!", show_alert=True)
+        await query.answer("Ehehe~ that's an owner-only command! 🥺💫", show_alert=True)
         return
 
     await query.answer()
@@ -1938,7 +1938,7 @@ async def packs_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 async def delpack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or not is_owner(user.id, OWNER_IDS):
-        await update.message.reply_text("🌸 Only my owner or sudo users can delete sticker packs desu~!")
+        await update.message.reply_text("Ehehe~ that's an owner-only command! 🥺💫")
         return
 
     msg = update.effective_message
@@ -1980,7 +1980,7 @@ async def pack_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     user = update.effective_user
     if not user or not is_owner(user.id, OWNER_IDS):
-        await update.message.reply_text("🌸 Only my owner or sudo users can view sticker pack details desu~!")
+        await update.message.reply_text("Ehehe~ that's an owner-only command! 🥺💫")
         return
 
     msg = update.effective_message
@@ -2050,7 +2050,7 @@ def parse_emoji_pack_link(input_str: str) -> str:
 async def addem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or not is_owner(user.id, OWNER_IDS):
-        await update.message.reply_text("🌸 Only my owner or sudo users can save emoji packs desu~!")
+        await update.message.reply_text("Ehehe~ that's an owner-only command! 🥺💫")
         return
 
     msg = update.effective_message
@@ -2116,7 +2116,7 @@ async def addem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def delem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or not is_owner(user.id, OWNER_IDS):
-        await update.message.reply_text("🌸 Only my owner or sudo users can delete emoji packs desu~!")
+        await update.message.reply_text("Ehehe~ that's an owner-only command! 🥺💫")
         return
 
     msg = update.effective_message
@@ -2151,6 +2151,11 @@ async def delem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def packem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not is_owner(user.id, OWNER_IDS):
+        await update.message.reply_text("Ehehe~ that's an owner-only command! 🥺💫")
+        return
+
     msg = update.effective_message
     if not msg:
         return
