@@ -9,6 +9,7 @@ from telegram.constants import ReactionEmoji
 from telegram.ext import ContextTypes
 import config
 import store
+from helpers import send_reply_with_custom_emoji
 from store import get_all_stickers
 from src.ai import (
     YUKI_PERSONA,
@@ -505,7 +506,7 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
             context_manager.add_message(chat.id, role="assistant", content=final_text)
 
             try:
-                await msg.reply_text(final_text)
+                await send_reply_with_custom_emoji(msg, final_text)
             except Exception as e:
                 logger.error(f"Error sending AI response: {type(e).__name__}")
 
