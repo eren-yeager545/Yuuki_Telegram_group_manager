@@ -909,3 +909,70 @@ async def test_packsem_navigation_and_security():
 
     delete_emoji_pack("anime_pack")
     delete_emoji_pack("cute_pack")
+
+
+@pytest.mark.asyncio
+async def test_get_all_custom_emojis_store():
+    from store import save_emoji_pack, get_all_custom_emojis, delete_emoji_pack
+    save_emoji_pack('pack_custom_test', 'Custom Test Pack', [
+        {'emoji': '🌸', 'custom_emoji_id': '998811'},
+        {'emoji': '✨', 'custom_emoji_id': '998822'}
+    ])
+
+    custom_emojis = get_all_custom_emojis()
+    matching = [e for e in custom_emojis if e['set_name'] == 'pack_custom_test']
+    assert len(matching) == 2
+    assert matching[0]['custom_emoji_id'] in ('998811', '998822')
+    assert matching[0]['title'] == 'Custom Test Pack'
+
+    delete_emoji_pack('pack_custom_test')
+
+
+@pytest.mark.asyncio
+async def test_inline_custom_emoji_in_yuki_ai_chat():
+    from helpers import send_reply_with_custom_emoji
+    from store import save_emoji_pack, delete_emoji_pack
+
+    save_emoji_pack('pack_ai_custom', 'AI Pack', [
+        {'emoji': '🥺', 'custom_emoji_id': '77665544'}
+    ])
+
+    msg = AsyncMock(spec=Message)
+    text = "A-ahh~ that's cute 🥺"
+
+    await send_reply_with_custom_emoji(msg, text)
+
+    msg.reply_text.assert_called_once()
+    call_args = msg.reply_text.call_args
+    assert call_args[0][0] == text
+    entities = call_args[1].get('entities', [])
+    assert len(entities) == 1
+    assert entities[0].type == MessageEntity.CUSTOM_EMOJI
+    assert entities[0].custom_emoji_id == '77665544'
+
+    delete_emoji_pack('pack_ai_custom')
+
+
+@pytest.mark.asyncio
+async def test_custom_emoji_message_rejection_separation_from_reactions():
+    from helpers import send_reply_with_custom_emoji
+    from store import save_emoji_pack, get_emoji_pack, delete_emoji_pack
+    from telegram.error import TelegramError
+
+    save_emoji_pack('pack_sep_test', 'Separation Pack', [
+        {'emoji': '✨', 'custom_emoji_id': '332211'}
+    ])
+
+    msg = AsyncMock(spec=Message)
+    msg.reply_text.side_effect = [TelegramError('Invalid custom_emoji_id entity'), AsyncMock()]
+
+    text = "H-hey~ ✨"
+    await send_reply_with_custom_emoji(msg, text)
+
+    assert msg.reply_text.call_count == 2
+
+    # Verify custom_emoji_id remains enabled for reactions in store!
+    pack = get_emoji_pack('pack_sep_test')
+    assert pack['emojis'][0]['reaction_enabled'] is True
+
+    delete_emoji_pack('pack_sep_test')

@@ -1826,6 +1826,53 @@ def get_all_emojis() -> list:
         return []
 
 
+
+
+def get_all_custom_emojis() -> list:
+    """
+    Retrieves all stored custom emoji records with their metadata.
+    Only returns items that have a non-empty custom_emoji_id.
+    """
+    try:
+        if is_mongo():
+            db = get_mongo_db()
+            emojis = list(db['emojis'].find({}))
+            packs = {p['set_name']: p.get('title', '') for p in db['emoji_packs'].find({})}
+            res = []
+            for e in emojis:
+                cid = str(e.get('custom_emoji_id', '') or '').strip()
+                if cid:
+                    set_name = e.get('set_name', '')
+                    res.append({
+                        'set_name': set_name,
+                        'title': packs.get(set_name, set_name),
+                        'emoji': str(e.get('emoji', '') or '').strip(),
+                        'custom_emoji_id': cid,
+                        'reaction_enabled': bool(e.get('reaction_enabled', True))
+                    })
+            return res
+        else:
+            with closing(conn()) as c:
+                rows = c.execute(
+                    'SELECT e.set_name, COALESCE(p.title, e.set_name), e.emoji, e.custom_emoji_id, e.reaction_enabled '
+                    'FROM emojis e LEFT JOIN emoji_packs p ON e.set_name = p.set_name'
+                ).fetchall()
+                res = []
+                for r in rows:
+                    cid = str(r[3] or '').strip()
+                    if cid:
+                        res.append({
+                            'set_name': r[0],
+                            'title': r[1],
+                            'emoji': str(r[2] or '').strip(),
+                            'custom_emoji_id': cid,
+                            'reaction_enabled': bool(r[4] if r[4] is not None else 1)
+                        })
+                return res
+    except Exception as e:
+        logger.error(f'Error fetching all custom emojis: {e}')
+        return []
+
 def add_or_enable_reaction_emoji(custom_emoji_id: str, emoji: str = "", set_name: str = "custom_reactions", title: str = "Custom Reactions") -> bool:
     """
     Adds a custom emoji for reactions or enables reaction_enabled if it already exists.

@@ -1,4 +1,5 @@
 import logging
+import random
 import uuid
 from telegram import MessageEntity
 from config import OWNER_IDS, SUDO_USERS
@@ -44,11 +45,13 @@ def create_custom_emoji_entities(text: str, custom_emojis: list) -> list:
     """
     Creates MessageEntity objects for custom emojis in text.
     custom_emojis is a list of dicts: [{'emoji': '🌸', 'custom_emoji_id': '123456'}, ...]
-    Calculates exact UTF-16 offsets and lengths.
+    Calculates exact UTF-16 offsets and lengths. Prevents duplicate entities at the same offset.
     """
     entities = []
     if not text or not custom_emojis:
         return entities
+
+    used_offsets = set()
 
     for item in custom_emojis:
         if isinstance(item, dict):
@@ -71,26 +74,53 @@ def create_custom_emoji_entities(text: str, custom_emojis: list) -> list:
                 break
             utf16_offset = get_utf16_length(text[:idx])
             utf16_len = get_utf16_length(emoji_str)
-            entities.append(
-                MessageEntity(
-                    type=MessageEntity.CUSTOM_EMOJI,
-                    offset=utf16_offset,
-                    length=utf16_len,
-                    custom_emoji_id=cid_str
+
+            if utf16_offset not in used_offsets:
+                entities.append(
+                    MessageEntity(
+                        type=MessageEntity.CUSTOM_EMOJI,
+                        offset=utf16_offset,
+                        length=utf16_len,
+                        custom_emoji_id=cid_str
+                    )
                 )
-            )
+                used_offsets.add(utf16_offset)
+
             start = idx + len(emoji_str)
 
+    entities.sort(key=lambda e: e.offset)
     return entities
 
 
-async def send_reply_with_custom_emoji(msg_obj, text: str, custom_emojis: list = None, **kwargs):
+async def send_reply_with_custom_emoji(msg_obj, text: str, custom_emojis: list = None, auto_insert: bool = True, **kwargs):
     """
     Replies to a message with text and optional custom emoji entities.
-    If Telegram rejects the message with custom emoji entities, it gracefully retries
-    sending the plain text with Unicode fallback emojis (without entities).
+    If custom_emojis is not provided, automatically looks up custom emojis from store.get_all_custom_emojis().
+    Matches fallback Unicode emojis in text or randomly inserts an available custom emoji when appropriate.
+    If Telegram rejects the message with custom emoji entities, it logs the custom emoji ID and error,
+    then gracefully retries sending plain text with Unicode fallback emojis (without entities).
     Does NOT disable custom emojis in DB upon message send failure.
     """
+    import store
+
+    if custom_emojis is None:
+        custom_emojis = []
+        try:
+            all_custom = store.get_all_custom_emojis()
+            if all_custom:
+                matching = [item for item in all_custom if item.get('emoji') and item.get('emoji') in text]
+                custom_emojis.extend(matching)
+
+                if not custom_emojis and auto_insert:
+                    candidates = [item for item in all_custom if item.get('emoji') and item.get('custom_emoji_id')]
+                    if candidates and random.random() < 0.6:
+                        chosen = random.choice(candidates)
+                        emoji_char = chosen['emoji']
+                        text = f"{text} {emoji_char}".strip()
+                        custom_emojis.append(chosen)
+        except Exception as e:
+            logger.warning(f"Error resolving custom emojis from store: {e}")
+
     entities = create_custom_emoji_entities(text, custom_emojis) if custom_emojis else None
 
     if entities:
@@ -99,7 +129,8 @@ async def send_reply_with_custom_emoji(msg_obj, text: str, custom_emojis: list =
         try:
             return await msg_obj.reply_text(text, entities=combined_entities, **kwargs)
         except Exception as exc:
-            logger.warning(f"Failed to send message with custom emoji entities: {exc}. Falling back to plain text.")
+            cids = [getattr(e, 'custom_emoji_id', '') for e in entities if getattr(e, 'custom_emoji_id', None)]
+            logger.warning(f"Failed to send message with custom emoji entities (IDs: {cids}): {exc}. Falling back to plain text.")
             try:
                 return await msg_obj.reply_text(text, **kwargs)
             except Exception as e:
