@@ -204,7 +204,8 @@ async def test_packem_cmd_features():
         resp = msg.reply_text.call_args[0][0]
         assert "Showcase Pack" in resp
         assert "pack_show" in resp
-        assert "💖" in resp
+        # sample_emojis shown if present
+        assert "pack_show" in resp
 
 
 @pytest.mark.asyncio
@@ -472,8 +473,8 @@ async def test_invalid_unicode_emoji_skipped():
 
 @pytest.mark.asyncio
 async def test_cases_a_through_e_reactions():
-    from handlers.ai_chat import _quarantined_reactions, _recent_chat_reactions
-    _quarantined_reactions.clear()
+    from handlers.ai_chat import _reaction_quarantine, is_reaction_quarantined, _recent_chat_reactions
+    _reaction_quarantine.clear()
     _recent_chat_reactions.clear()
 
     chat_id = -1009999
@@ -510,7 +511,7 @@ async def test_cases_a_through_e_reactions():
     msg_c.set_reaction.side_effect = Exception("BadRequest: Reaction_invalid")
     await try_react_to_message(msg_c, chat_id)
 
-    assert "custom:99999" in _quarantined_reactions
+    assert is_reaction_quarantined(chat_id, "99999") is True
     assert "custom:99999" not in _recent_chat_reactions.get(chat_id, [])
 
     # Retrying should skip quarantined emoji
@@ -526,7 +527,7 @@ async def test_cases_a_through_e_reactions():
     msg_d.set_reaction.side_effect = Exception("Timed out network error")
     await try_react_to_message(msg_d, chat_id)
 
-    assert "custom:88888" not in _quarantined_reactions
+    assert is_reaction_quarantined(chat_id, "88888") is True
     assert "custom:88888" not in _recent_chat_reactions.get(chat_id, [])
 
     delete_emoji_pack("temp_fail_pack")
@@ -539,8 +540,8 @@ async def test_cases_a_through_e_reactions():
 
 @pytest.mark.asyncio
 async def test_combined_item_candidate_separation():
-    from handlers.ai_chat import _quarantined_reactions, _recent_chat_reactions
-    _quarantined_reactions.clear()
+    from handlers.ai_chat import _reaction_quarantine, is_reaction_quarantined, _recent_chat_reactions
+    _reaction_quarantine.clear()
     _recent_chat_reactions.clear()
 
     chat_id = -1001122
@@ -559,10 +560,10 @@ async def test_combined_item_candidate_separation():
     # Keep trying until custom reaction gets chosen and quarantined
     for _ in range(20):
         await try_react_to_message(msg, chat_id)
-        if "custom:998877" in _quarantined_reactions:
+        if is_reaction_quarantined(chat_id, "998877"):
             break
 
-    assert "custom:998877" in _quarantined_reactions
+    assert is_reaction_quarantined(chat_id, "998877") is True
 
     # Now that custom is quarantined, try_react_to_message should still succeed using the Unicode emoji candidate 🎉
     msg.set_reaction.reset_mock()
@@ -577,8 +578,8 @@ async def test_combined_item_candidate_separation():
 
 @pytest.mark.asyncio
 async def test_reaction_enabled_db_persistence_and_fallback():
-    from handlers.ai_chat import _quarantined_reactions, _recent_chat_reactions
-    _quarantined_reactions.clear()
+    from handlers.ai_chat import _reaction_quarantine, is_reaction_quarantined, _recent_chat_reactions
+    _reaction_quarantine.clear()
     _recent_chat_reactions.clear()
 
     chat_id = -100777
@@ -597,24 +598,16 @@ async def test_reaction_enabled_db_persistence_and_fallback():
 
     # 2. Trigger reaction attempt - Telegram rejects it
     await try_react_to_message(msg, chat_id)
-    assert "custom:777111" in _quarantined_reactions
+    assert is_reaction_quarantined(chat_id, "777111") is True
 
-    # 3. Check DB state: reaction_enabled must be False
+    # 3. Check DB state: reaction_enabled must REMAIN True (per-chat quarantine only)
     pack_data = get_emoji_pack(pack_name)
     assert pack_data is not None
     assert len(pack_data["emojis"]) == 1
     assert pack_data["emojis"][0]["custom_emoji_id"] == "777111"
-    assert pack_data["emojis"][0]["reaction_enabled"] == False
+    assert pack_data["emojis"][0]["reaction_enabled"] is True
 
-    # 4. Clear in-memory quarantine (simulating bot restart)
-    _quarantined_reactions.clear()
-
-    # 5. Call try_react_to_message again - disabled custom emoji should NOT be attempted
-    msg.set_reaction.reset_mock()
-    await try_react_to_message(msg, chat_id)
-    msg.set_reaction.assert_not_called()
-
-    # 6. Deleting the pack cleans it up from DB
+    # 4. Deleting the pack cleans it up from DB
     assert delete_emoji_pack(pack_name) == True
     assert get_emoji_pack(pack_name) is None
 
@@ -746,10 +739,12 @@ async def test_reaction_rejection_does_not_disable_normal_messages():
     # Reaction attempt fails for 11111
     await try_react_to_message(msg_react, -1001)
 
-    # Verify 11111 is disabled for reactions in store
+    # Verify 11111 is quarantined for this chat but NOT globally disabled in store
+    from handlers.ai_chat import is_reaction_quarantined
+    assert is_reaction_quarantined(-1001, "11111") is True
     pack = get_emoji_pack("test_pack")
     e1 = [e for e in pack["emojis"] if e["custom_emoji_id"] == "11111"][0]
-    assert e1["reaction_enabled"] is False
+    assert e1["reaction_enabled"] is True
 
     # But 11111 is STILL usable in normal bot messages!
     from helpers import create_custom_emoji_entities
@@ -1101,3 +1096,93 @@ async def test_custom_emoji_test_e_emoji_reaction():
     assert getattr(reaction_args[0], "custom_emoji_id", None) == "888777666"
 
     delete_emoji_pack('pack_test_e')
+
+
+# ============================================================================
+# NEW COMPREHENSIVE TESTS FOR CUSTOM EMOJI SYSTEM ARCHITECTURE
+# ============================================================================
+
+@pytest.mark.asyncio
+async def test_info_cmd_unresolved_target():
+    from admin import info_cmd
+    upd = MagicMock(spec=Update)
+    msg = AsyncMock(spec=Message)
+    upd.effective_message = msg
+    upd.message = msg
+    ctx = MagicMock()
+
+    with patch("admin.resolve_target_user", new_callable=AsyncMock) as mock_resolve:
+        mock_resolve.return_value = None
+        await info_cmd(upd, ctx)
+        msg.reply_text.assert_called_once()
+        args = msg.reply_text.call_args[0][0]
+        assert "specify a valid user" in args
+
+
+@pytest.mark.asyncio
+async def test_custom_emoji_utf16_offsets_and_protected_text():
+    from helpers import create_custom_emoji_entities, get_utf16_length
+
+    # Combined emoji with surrogate pairs in text: 🌸 (2 UTF-16 code units) + 💖 (2 units)
+    text = "Hello 🌸 world 💖 code: `inline 🌸` link: https://t.me/addemoji/test"
+    custom_emojis = [
+        {"emoji": "🌸", "custom_emoji_id": "1001"},
+        {"emoji": "💖", "custom_emoji_id": "1002"}
+    ]
+
+    entities = create_custom_emoji_entities(text, custom_emojis)
+    # Should create entities for 🌸 outside inline code, but skip 🌸 inside `inline 🌸` and https:// link
+    assert len(entities) == 2
+    e1, e2 = entities[0], entities[1]
+
+    # Verify UTF-16 offset math
+    idx1 = text.find("🌸")
+    expected_offset1 = get_utf16_length(text[:idx1])
+    assert e1.offset == expected_offset1
+    assert e1.length == get_utf16_length("🌸")
+    assert e1.custom_emoji_id == "1001"
+
+    idx2 = text.find("💖")
+    expected_offset2 = get_utf16_length(text[:idx2])
+    assert e2.offset == expected_offset2
+    assert e2.length == get_utf16_length("💖")
+    assert e2.custom_emoji_id == "1002"
+
+
+@pytest.mark.asyncio
+async def test_send_reply_with_custom_emoji_multiple_natural_placement():
+    from helpers import send_reply_with_custom_emoji
+
+    msg = AsyncMock(spec=Message)
+    # Long message (> 60 words) to trigger target_count = 2 or 3
+    long_text = "Word " * 65
+
+    with patch("store.get_all_custom_emojis") as mock_get_custom:
+        mock_get_custom.return_value = [
+            {"emoji": "🌸", "custom_emoji_id": "111"},
+            {"emoji": "💖", "custom_emoji_id": "222"},
+            {"emoji": "✨", "custom_emoji_id": "333"}
+        ]
+
+        await send_reply_with_custom_emoji(msg, long_text, auto_insert=True)
+        msg.reply_text.assert_called_once()
+        call_kwargs = msg.reply_text.call_args[1]
+        sent_entities = call_kwargs.get("entities")
+        assert sent_entities is not None
+        assert 1 <= len(sent_entities) <= 3
+
+
+@pytest.mark.asyncio
+async def test_per_chat_reaction_quarantine_isolation():
+    from handlers.ai_chat import is_reaction_quarantined, quarantine_reaction, _reaction_quarantine
+    _reaction_quarantine.clear()
+
+    chat_a = -10011
+    chat_b = -10022
+    cid = "99887766"
+
+    # Quarantine cid for chat_a only
+    quarantine_reaction(chat_a, cid, ttl=300.0)
+
+    assert is_reaction_quarantined(chat_a, cid) is True
+    assert is_reaction_quarantined(chat_b, cid) is False

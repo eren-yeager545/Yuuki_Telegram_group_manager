@@ -1,5 +1,6 @@
 import logging
 import random
+import re
 import uuid
 from telegram import MessageEntity
 from config import OWNER_IDS, SUDO_USERS
@@ -41,19 +42,54 @@ def get_utf16_length(text: str) -> int:
     return len(text.encode('utf-16-le')) // 2
 
 
+def _is_position_formatted_or_protected(text: str, char_idx: int) -> bool:
+    """
+    Returns True if char_idx in text is within code blocks, inline code, URLs,
+    commands, or HTML tags where custom emoji entities shouldn't be placed.
+    """
+    if char_idx < 0 or char_idx >= len(text):
+        return False
+
+    # Check backtick code blocks / inline code
+    # Count backticks before char_idx
+    backticks_before = text[:char_idx].count('`')
+    if backticks_before % 2 != 0:
+        return True
+
+    # Check HTML tags <code>...</code> or <pre>...</pre>
+    open_code = text.rfind('<code>', 0, char_idx)
+    close_code = text.rfind('</code>', 0, char_idx)
+    if open_code > close_code:
+        return True
+
+    open_pre = text.rfind('<pre>', 0, char_idx)
+    close_pre = text.rfind('</pre>', 0, char_idx)
+    if open_pre > close_pre:
+        return True
+
+    # Check URL boundaries
+    # Find all http:// or https:// or t.me/ links
+    url_pattern = re.compile(r'https?://\S+|t\.me/\S+')
+    for match in url_pattern.finditer(text):
+        if match.start() <= char_idx < match.end():
+            return True
+
+    return False
+
+
 def create_custom_emoji_entities(text: str, custom_emojis: list) -> list:
     """
     Creates MessageEntity objects for custom emojis in text.
     custom_emojis is a list of dicts: [{'emoji': '🌸', 'custom_emoji_id': '123456'}, ...]
-    Calculates exact UTF-16 offsets and lengths. Prevents duplicate entities at the same offset.
-    Sorts entities by offset and validates offset/length range bounds.
+    Calculates exact UTF-16 offsets and lengths. Prevents duplicate or overlapping entities.
+    Sorts entities by offset.
     """
     entities = []
     if not text or not custom_emojis:
         return entities
 
     total_utf16_len = get_utf16_length(text)
-    used_offsets = set()
+    used_spans = []  # list of (utf16_start, utf16_end)
 
     for item in custom_emojis:
         if isinstance(item, dict):
@@ -74,19 +110,28 @@ def create_custom_emoji_entities(text: str, custom_emojis: list) -> list:
             idx = text.find(emoji_str, start)
             if idx == -1:
                 break
-            utf16_offset = get_utf16_length(text[:idx])
-            utf16_len = get_utf16_length(emoji_str)
 
-            if utf16_offset not in used_offsets and (utf16_offset + utf16_len) <= total_utf16_len:
-                entities.append(
-                    MessageEntity(
-                        type=MessageEntity.CUSTOM_EMOJI,
-                        offset=utf16_offset,
-                        length=utf16_len,
-                        custom_emoji_id=cid_str
+            # Skip if inside code/url
+            if not _is_position_formatted_or_protected(text, idx):
+                utf16_offset = get_utf16_length(text[:idx])
+                utf16_len = get_utf16_length(emoji_str)
+                end_offset = utf16_offset + utf16_len
+
+                if end_offset <= total_utf16_len:
+                    overlap = any(
+                        not (end_offset <= s_start or utf16_offset >= s_end)
+                        for s_start, s_end in used_spans
                     )
-                )
-                used_offsets.add(utf16_offset)
+                    if not overlap:
+                        entities.append(
+                            MessageEntity(
+                                type=MessageEntity.CUSTOM_EMOJI,
+                                offset=utf16_offset,
+                                length=utf16_len,
+                                custom_emoji_id=cid_str
+                            )
+                        )
+                        used_spans.append((utf16_offset, end_offset))
 
             start = idx + len(emoji_str)
 
@@ -96,14 +141,17 @@ def create_custom_emoji_entities(text: str, custom_emojis: list) -> list:
 
 async def send_reply_with_custom_emoji(msg_obj, text: str, custom_emojis: list = None, auto_insert: bool = True, **kwargs):
     """
-    Replies to a message with text and optional custom emoji entities.
+    Replies to a message with text and custom emoji entities.
     If custom_emojis is not provided, automatically looks up custom emojis from store.get_all_custom_emojis().
-    Matches fallback Unicode emojis in text or reliably appends an available custom emoji when available.
-    If Telegram rejects the message with custom emoji entities, it logs the custom emoji ID and error,
-    then gracefully retries sending plain text with Unicode fallback emojis (without entities).
+    Selects 1-3 distinct custom emojis naturally depending on message length.
+    Calculates UTF-16 offsets and attaches MessageEntity.CUSTOM_EMOJI.
+    If Telegram rejects the message with custom emoji entities, logs a fallback warning
+    and gracefully retries sending plain text with Unicode fallback emojis.
     Does NOT disable custom emojis in DB upon message send failure.
     """
     import store
+
+    filtered_custom_emojis = []
 
     if custom_emojis is None:
         custom_emojis = []
@@ -115,20 +163,49 @@ async def send_reply_with_custom_emoji(msg_obj, text: str, custom_emojis: list =
             ]
 
             if valid_custom:
-                matching = [item for item in valid_custom if item.get('emoji') in text]
+                # Find emojis that already exist in text outside code/urls
+                matching = []
+                for item in valid_custom:
+                    e_char = str(item.get('emoji') or '').strip()
+                    if e_char in text:
+                        idx = text.find(e_char)
+                        if not _is_position_formatted_or_protected(text, idx):
+                            matching.append(item)
+
                 if matching:
                     custom_emojis.extend(matching)
 
-                if not custom_emojis and auto_insert:
-                    chosen = random.choice(valid_custom)
-                    emoji_char = str(chosen.get('emoji') or '').strip()
-                    text = f"{text} {emoji_char}".strip()
-                    custom_emojis.append(chosen)
+                if auto_insert:
+                    # Decide target number of custom emojis based on text length (1 to 3)
+                    word_count = len(text.split())
+                    if word_count < 20:
+                        target_count = 1
+                    elif word_count < 60:
+                        target_count = random.choice([1, 2])
+                    else:
+                        target_count = random.choice([2, 3])
+
+                    needed = max(0, target_count - len(custom_emojis))
+                    if needed > 0:
+                        # Pick random distinct custom emojis not yet selected
+                        used_cids = {str(item.get('custom_emoji_id')) for item in custom_emojis if item.get('custom_emoji_id')}
+                        candidates = [item for item in valid_custom if str(item.get('custom_emoji_id')) not in used_cids]
+                        if not candidates:
+                            candidates = valid_custom
+
+                        sample_size = min(needed, len(candidates))
+                        if sample_size > 0:
+                            chosen_items = random.sample(candidates, sample_size)
+                            for chosen in chosen_items:
+                                emoji_char = str(chosen.get('emoji') or '').strip()
+                                # Append emoji to text if not already present
+                                if emoji_char not in text:
+                                    text = f"{text} {emoji_char}".strip()
+                                custom_emojis.append(chosen)
+
         except Exception as e:
             logger.warning(f"Error resolving custom emojis from store: {e}")
 
-    # Filter custom_emojis parameter to valid items only
-    filtered_custom_emojis = []
     if custom_emojis:
         for item in custom_emojis:
             if isinstance(item, dict):
@@ -140,16 +217,12 @@ async def send_reply_with_custom_emoji(msg_obj, text: str, custom_emojis: list =
             else:
                 e_char, cid_val = '', ''
             if e_char and cid_val:
-                filtered_custom_emojis.append(item)
+                filtered_custom_emojis.append({'emoji': e_char, 'custom_emoji_id': cid_val})
 
     entities = create_custom_emoji_entities(text, filtered_custom_emojis) if filtered_custom_emojis else []
 
     if entities:
-        for ent in entities:
-            logger.debug(f"Custom emoji selected: emoji=<placeholder> custom_emoji_id={getattr(ent, 'custom_emoji_id', '')}")
-            logger.debug(f"Custom emoji entity: offset={ent.offset} length={ent.length}")
-        logger.debug("Sending custom emoji message")
-
+        logger.info("Custom emoji message sent")
         existing_entities = kwargs.pop('entities', None)
         if existing_entities:
             existing_list = list(existing_entities)
@@ -161,9 +234,7 @@ async def send_reply_with_custom_emoji(msg_obj, text: str, custom_emojis: list =
         try:
             return await msg_obj.reply_text(text, entities=combined_entities, **kwargs)
         except Exception as exc:
-            cids = [getattr(e, 'custom_emoji_id', '') for e in entities if getattr(e, 'custom_emoji_id', None)]
-            for cid in cids:
-                logger.error(f"Failed to send custom emoji message: custom_emoji_id={cid} error={exc}")
+            logger.warning("Custom emoji message fallback used")
             try:
                 return await msg_obj.reply_text(text, **kwargs)
             except Exception as e:

@@ -44,8 +44,8 @@ provider_manager = AIProviderManager(
 # _active_chatters: chat_id -> {'user_id': int, 'last_seen': float}
 _active_chatters = {}
 VALID_TELEGRAM_REACTION_EMOJIS = {e.value for e in ReactionEmoji}
-_quarantined_reactions = set()
-_recent_chat_reactions = {}
+_reaction_quarantine = {}  # (chat_id, custom_emoji_id) -> float (expiration timestamp)
+_recent_chat_reactions = {}  # chat_id -> list of reaction keys
 INTERACTION_TIMEOUT_SECONDS = 300.0  # 5 minutes inactivity timeout
 
 
@@ -76,136 +76,123 @@ def is_active_chatter(chat_id: int, user_id: int) -> bool:
     return active_uid == user_id
 
 
+def is_reaction_quarantined(chat_id: int, custom_emoji_id: str) -> bool:
+    """Checks if a custom emoji is currently quarantined for a given chat."""
+    if not chat_id or not custom_emoji_id:
+        return False
+    key = (chat_id, str(custom_emoji_id))
+    exp = _reaction_quarantine.get(key)
+    if exp is None:
+        return False
+    if time.time() > exp:
+        _reaction_quarantine.pop(key, None)
+        return False
+    return True
+
+
+def quarantine_reaction(chat_id: int, custom_emoji_id: str, ttl: float = 600.0):
+    """Quarantines a custom emoji for a specific chat for ttl seconds (default 10 mins)."""
+    if chat_id and custom_emoji_id:
+        _reaction_quarantine[(chat_id, str(custom_emoji_id))] = time.time() + ttl
+        logger.warning(f"Custom reaction temporarily quarantined: chat_id={chat_id} cid={custom_emoji_id}")
+
+
 async def try_react_to_message(msg: Message, chat_id: int):
     """
     Try to add a random valid reaction to a message.
-
-    Custom emoji reactions that Telegram rejects are quarantined
-    and permanently disabled in storage so they are not repeatedly retried.
+    Prefers custom emojis when permitted by Telegram and not quarantined for the chat.
+    Falls back automatically to Unicode reactions when custom reactions fail or are quarantined.
+    Quarantines failed custom reactions per-chat temporarily (TTL 10m) without globally disabling them in DB.
     """
     try:
         emojis = store.get_all_emojis()
-
         if not emojis:
             return
 
-        valid_items = []
-
+        candidates = []
         for item in emojis:
-            custom_id = str(
-                item.get("custom_emoji_id", "") or ""
-            ).strip()
+            cid = str(item.get("custom_emoji_id", "") or "").strip()
+            uni = str(item.get("emoji", "") or "").strip()
+            rx_enabled = item.get("reaction_enabled", True)
 
-            unicode_emoji = str(
-                item.get("emoji", "") or ""
-            ).strip()
+            # Check custom reaction candidate
+            if cid and rx_enabled and not is_reaction_quarantined(chat_id, cid):
+                candidates.append({
+                    "type": "custom",
+                    "id": cid,
+                    "unicode_fallback": uni if uni in VALID_TELEGRAM_REACTION_EMOJIS else None,
+                    "key": f"custom:{cid}"
+                })
 
-            reaction_enabled = item.get("reaction_enabled", True)
+            # Check unicode reaction candidate
+            if uni and uni in VALID_TELEGRAM_REACTION_EMOJIS:
+                candidates.append({
+                    "type": "emoji",
+                    "emoji": uni,
+                    "key": f"emoji:{uni}"
+                })
 
-            if custom_id and reaction_enabled:
-                key = f"custom:{custom_id}"
-
-                if key not in _quarantined_reactions:
-                    valid_items.append({
-                        "type": "custom",
-                        "id": custom_id,
-                        "key": key,
-                    })
-
-            if (
-                unicode_emoji
-                and unicode_emoji in VALID_TELEGRAM_REACTION_EMOJIS
-            ):
-                key = f"emoji:{unicode_emoji}"
-
-                if key not in _quarantined_reactions:
-                    valid_items.append({
-                        "type": "emoji",
-                        "emoji": unicode_emoji,
-                        "key": key,
-                    })
-
-        if not valid_items:
+        if not candidates:
             return
 
         recent = _recent_chat_reactions.get(chat_id, [])
+        fresh = [c for c in candidates if c["key"] not in recent]
+        pool = list(fresh if fresh else candidates)
 
-        fresh = [
-            item
-            for item in valid_items
-            if item["key"] not in recent
-        ]
-
-        candidates = list(fresh if fresh else valid_items)
-
-        while candidates:
-            chosen = random.choice(candidates)
+        while pool:
+            chosen = random.choice(pool)
+            pool.remove(chosen)
             key = chosen["key"]
 
-            try:
-                if chosen["type"] == "custom":
-                    cid = chosen["id"]
-                    if not cid or key in _quarantined_reactions:
-                        candidates.remove(chosen)
-                        continue
-
-                    reaction = ReactionTypeCustomEmoji(
-                        custom_emoji_id=cid
-                    )
-
-                    await msg.set_reaction(
-                        reaction=[reaction]
-                    )
-
-                else:
-                    reaction = ReactionTypeEmoji(
-                        emoji=chosen["emoji"]
-                    )
-
-                    await msg.set_reaction(
-                        reaction=[reaction]
-                    )
-
-                recent = _recent_chat_reactions.setdefault(chat_id, [])
-                recent.append(key)
-
-                if len(recent) > 5:
-                    recent.pop(0)
-
-                break
-
-            except Exception as exc:
-                error_text = str(exc)
-
-                if (
-                    chosen["type"] == "custom"
-                    and "Reaction_invalid" in error_text
-                ):
-                    cid = chosen["id"]
-                    _quarantined_reactions.add(key)
-                    store.disable_emoji_reaction(cid)
-
-                    logger.warning(
-                        "Custom emoji reaction disabled after Telegram rejected it: id=%s",
-                        cid,
-                    )
-
-                    candidates.remove(chosen)
+            if chosen["type"] == "custom":
+                cid = chosen["id"]
+                if is_reaction_quarantined(chat_id, cid):
                     continue
 
-                else:
-                    logger.warning(
-                        "Reaction failed: type=%s error=%s",
-                        chosen["type"],
-                        type(exc).__name__,
-                    )
-                    break
+                try:
+                    reaction = ReactionTypeCustomEmoji(custom_emoji_id=cid)
+                    await msg.set_reaction(reaction=[reaction])
+                    logger.info("Custom reaction sent")
+
+                    rec = _recent_chat_reactions.setdefault(chat_id, [])
+                    rec.append(key)
+                    if len(rec) > 5:
+                        rec.pop(0)
+                    return
+                except Exception as exc:
+                    quarantine_reaction(chat_id, cid, ttl=600.0)
+                    logger.warning(f"Custom reaction unavailable; Unicode fallback used: cid={cid} error={type(exc).__name__}")
+
+                    # Attempt immediate Unicode fallback if available on this item
+                    uni_fb = chosen.get("unicode_fallback")
+                    if uni_fb:
+                        try:
+                            reaction = ReactionTypeEmoji(emoji=uni_fb)
+                            await msg.set_reaction(reaction=[reaction])
+                            rec = _recent_chat_reactions.setdefault(chat_id, [])
+                            rec.append(f"emoji:{uni_fb}")
+                            if len(rec) > 5:
+                                rec.pop(0)
+                            return
+                        except Exception as fb_exc:
+                            logger.warning(f"Unicode fallback reaction also failed: {type(fb_exc).__name__}")
+
+            else:
+                uni = chosen["emoji"]
+                try:
+                    reaction = ReactionTypeEmoji(emoji=uni)
+                    await msg.set_reaction(reaction=[reaction])
+
+                    rec = _recent_chat_reactions.setdefault(chat_id, [])
+                    rec.append(key)
+                    if len(rec) > 5:
+                        rec.pop(0)
+                    return
+                except Exception as exc:
+                    logger.warning(f"Unicode reaction failed: {type(exc).__name__}")
 
     except Exception as exc:
-        logger.warning(
-            "Failed to process message reaction: %s",
-            type(exc).__name__,
-        )
+        logger.warning(f"Failed to process message reaction: {type(exc).__name__}")
 
 
 async def send_owner_ai_alert(message_text: str, context: Optional[ContextTypes.DEFAULT_TYPE] = None):
