@@ -664,6 +664,7 @@ async def test_addpack_cmd():
     chat = Chat(id=-1001, type="supergroup")
     user = User(id=123, first_name="User", is_bot=False)
     upd = MagicMock(spec=Update)
+    msg.reply_html = AsyncMock()
     upd.effective_message = msg
     upd.message = msg
     upd.effective_chat = chat
@@ -718,6 +719,7 @@ async def test_unban_cmd_enhanced():
     upd = MagicMock(spec=Update)
     upd.effective_chat = chat
     upd.effective_user = user
+    msg.reply_html = AsyncMock()
     upd.effective_message = msg
     upd.message = msg
     ctx = MagicMock()
