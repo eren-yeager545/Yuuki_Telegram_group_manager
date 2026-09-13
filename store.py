@@ -1826,6 +1826,70 @@ def get_all_emojis() -> list:
         return []
 
 
+def add_or_enable_reaction_emoji(custom_emoji_id: str, emoji: str = "", set_name: str = "custom_reactions", title: str = "Custom Reactions") -> bool:
+    """
+    Adds a custom emoji for reactions or enables reaction_enabled if it already exists.
+    Stores custom_emoji_id, fallback emoji, set_name/title, and marks reaction_enabled=True.
+    Returns True on success.
+    """
+    custom_id = str(custom_emoji_id or "").strip()
+    if not custom_id:
+        return False
+    now = _now()
+    emoji_char = str(emoji or "").strip()
+    set_name = str(set_name or "custom_reactions").strip()
+    title = str(title or "Custom Reactions").strip()
+
+    try:
+        if is_mongo():
+            db = get_mongo_db()
+            db["emoji_packs"].update_one(
+                {"set_name": set_name},
+                {"$setOnInsert": {"set_name": set_name, "title": title, "link": "", "count": 0, "updated_at": now}},
+                upsert=True
+            )
+            existing = db["emojis"].find_one({"custom_emoji_id": custom_id})
+            if existing:
+                update_fields = {"reaction_enabled": True}
+                if emoji_char:
+                    update_fields["emoji"] = emoji_char
+                db["emojis"].update_one({"custom_emoji_id": custom_id}, {"$set": update_fields})
+            else:
+                db["emojis"].insert_one({
+                    "set_name": set_name,
+                    "emoji": emoji_char,
+                    "custom_emoji_id": custom_id,
+                    "reaction_enabled": True
+                })
+            count = db["emojis"].count_documents({"set_name": set_name})
+            db["emoji_packs"].update_one({"set_name": set_name}, {"$set": {"count": count, "updated_at": now}})
+            return True
+        else:
+            with closing(conn()) as c:
+                c.execute(
+                    "INSERT OR IGNORE INTO emoji_packs(set_name, title, link, count, updated_at) VALUES(?,?,?,?,?)",
+                    (set_name, title, "", 0, now)
+                )
+                row = c.execute("SELECT id, emoji FROM emojis WHERE custom_emoji_id=?", (custom_id,)).fetchone()
+                if row:
+                    if emoji_char:
+                        c.execute("UPDATE emojis SET reaction_enabled=1, emoji=? WHERE custom_emoji_id=?", (emoji_char, custom_id))
+                    else:
+                        c.execute("UPDATE emojis SET reaction_enabled=1 WHERE custom_emoji_id=?", (custom_id,))
+                else:
+                    c.execute(
+                        "INSERT INTO emojis(set_name, emoji, custom_emoji_id, reaction_enabled) VALUES(?,?,?,1)",
+                        (set_name, emoji_char, custom_id)
+                    )
+                cnt = c.execute("SELECT COUNT(*) FROM emojis WHERE set_name=?", (set_name,)).fetchone()[0]
+                c.execute("UPDATE emoji_packs SET count=?, updated_at=? WHERE set_name=?", (cnt, now, set_name))
+                c.commit()
+                return True
+    except Exception as e:
+        logger.error(f"Error adding or enabling reaction emoji custom_emoji_id '{custom_id}': {e}")
+        return False
+
+
 def disable_emoji_reaction(custom_emoji_id: str) -> bool:
     """Disables reaction_enabled for all emoji records matching custom_emoji_id."""
     custom_id = str(custom_emoji_id or '').strip()

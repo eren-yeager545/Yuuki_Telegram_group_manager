@@ -841,12 +841,13 @@ def main():
         ('showquiz', showquiz_cmd, 'Quiz Commands', 'Show saved quizzes', '/showquiz'),
         ('delquiz', delquiz_cmd, 'Quiz Commands', 'Delete saved quiz', '/delquiz 1'),
         ('broadcast', broadcast_cmd, 'Owner Commands', 'Broadcast to all groups', '/broadcast hello all'),
+        ('emoji', emoji_cmd, 'Owner Commands', 'Configure custom emoji for reactions', '/emoji <custom_emoji_id>'),
     ]
     app.add_handler(TypeHandler(Update, track_profile_update_handler), group=-1)
     for spec in user_cmds + admin_cmds:
         add_registered_command(app, *spec)
     app.add_handler(CallbackQueryHandler(packs_callback_handler, pattern='^packs_page:'))
-    app.add_handler(CallbackQueryHandler(packsem_callback_handler, pattern='^packsem_page:'))
+    app.add_handler(CallbackQueryHandler(packsem_callback_handler, pattern='^packsem_'))
     app.add_handler(CallbackQueryHandler(kick_callback_handler, pattern='^kick_'))
     app.add_handler(CallbackQueryHandler(broadcast_callback_handler, pattern='^bcast_'))
     app.add_handler(CallbackQueryHandler(ttt_callback_handler, pattern='^ttt_'))

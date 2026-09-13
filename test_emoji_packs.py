@@ -2,7 +2,9 @@ import pytest
 import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
-from telegram import Update, Message, Chat, User, StickerSet, Sticker, ReactionTypeEmoji, ReactionTypeCustomEmoji
+from telegram import Update, Message, Chat, User, StickerSet, Sticker, ReactionTypeEmoji, ReactionTypeCustomEmoji, MessageEntity
+from telegram.error import TelegramError
+from config import OWNER_IDS
 
 from store import (
     save_emoji_pack,
@@ -441,9 +443,9 @@ async def test_packsem_cmd_features():
         msg.reply_text.reset_mock()
         await packsem_cmd(upd, ctx)
         resp = msg.reply_text.call_args[0][0]
-        assert "Stored Emoji Packs" in resp
-        assert "pack_sem_1" in resp
-        assert "pack_sem_2" in resp
+        assert "Emoji Packs" in resp
+        kb = msg.reply_text.call_args[1]["reply_markup"].inline_keyboard
+        assert kb[0][0].text == "📦 Packs"
 
     # 4. Non-owner callback query check
     query = AsyncMock()
@@ -654,6 +656,256 @@ async def test_mongo_backend_reaction_enabled_support():
         assert get_emoji_pack(pack_name) is None
 
     finally:
+        os.environ.pop('MONGO_URI', None)
+        import config
+        config.MONGO_URI = ''
         store.is_mongo = orig_is_mongo
         store._mongo_client = orig_client
         store._mongo_db = orig_db
+
+
+
+
+
+
+@pytest.mark.asyncio
+async def test_emoji_cmd_and_reaction_integration():
+    from admin import emoji_cmd
+    from store import get_emoji_pack, delete_emoji_pack, get_all_emojis
+
+    user_owner = User(id=OWNER_IDS[0] if OWNER_IDS else 111111111, first_name="Owner", is_bot=False)
+    user_normal = User(id=999888, first_name="NormalUser", is_bot=False)
+    chat = Chat(id=-1001, type="supergroup")
+
+    msg_normal = AsyncMock(spec=Message)
+    upd_normal = MagicMock(spec=Update)
+    upd_normal.effective_user = user_normal
+    upd_normal.effective_chat = chat
+    upd_normal.effective_message = msg_normal
+    upd_normal.message = msg_normal
+    ctx_normal = MagicMock()
+
+    # 15. Normal users cannot access /emoji
+    await emoji_cmd(upd_normal, ctx_normal)
+    msg_normal.reply_text.assert_called_with("Ehehe~ that's an owner-only command! 🥺💫")
+
+    # 1. /emoji can configure a reaction emoji (Owner user)
+    msg_owner = AsyncMock(spec=Message)
+    upd_owner = MagicMock(spec=Update)
+    upd_owner.effective_user = user_owner
+    upd_owner.effective_chat = chat
+    upd_owner.effective_message = msg_owner
+    upd_owner.message = msg_owner
+    ctx_owner = MagicMock()
+    ctx_owner.args = ["123456789", "🌸"]
+
+    with patch("admin.is_owner", return_value=True):
+        await emoji_cmd(upd_owner, ctx_owner)
+    msg_owner.reply_text.assert_called()
+
+    # Verify emoji was configured in DB
+    pack = get_emoji_pack("custom_reactions")
+    assert pack is not None
+    emojis = pack["emojis"]
+    matching = [e for e in emojis if e["custom_emoji_id"] == "123456789"]
+    assert len(matching) == 1
+    assert matching[0]["reaction_enabled"] is True
+    assert matching[0]["emoji"] == "🌸"
+
+    # 2. Configured emojis are actually used by the reaction system
+    msg_react = AsyncMock(spec=Message)
+    await try_react_to_message(msg_react, chat.id)
+    msg_react.set_reaction.assert_called_once()
+    reaction_args = msg_react.set_reaction.call_args[1]["reaction"]
+    assert len(reaction_args) == 1
+    assert getattr(reaction_args[0], "custom_emoji_id", None) == "123456789"
+
+    # Clean up DB
+    delete_emoji_pack("custom_reactions")
+
+
+@pytest.mark.asyncio
+async def test_reaction_rejection_does_not_disable_normal_messages():
+    # 3. One rejected reaction emoji does not disable other reaction emojis
+    # 4. A rejected reaction emoji remains available for normal-message use if otherwise valid
+    from store import disable_emoji_reaction, save_emoji_pack, get_emoji_pack, delete_emoji_pack
+
+    save_emoji_pack("test_pack", "Test Pack", [
+        {"emoji": "", "custom_emoji_id": "11111"}
+    ])
+
+    msg_react = AsyncMock(spec=Message)
+
+    async def mock_set_reaction(reaction):
+        cid = getattr(reaction[0], "custom_emoji_id", "")
+        if cid == "11111":
+            raise TelegramError("Reaction_invalid: Custom emoji invalid")
+
+    msg_react.set_reaction.side_effect = mock_set_reaction
+
+    # Reaction attempt fails for 11111
+    await try_react_to_message(msg_react, -1001)
+
+    # Verify 11111 is disabled for reactions in store
+    pack = get_emoji_pack("test_pack")
+    e1 = [e for e in pack["emojis"] if e["custom_emoji_id"] == "11111"][0]
+    assert e1["reaction_enabled"] is False
+
+    # But 11111 is STILL usable in normal bot messages!
+    from helpers import create_custom_emoji_entities
+    entities = create_custom_emoji_entities("Hello 🌸", [{"emoji": "🌸", "custom_emoji_id": "11111"}])
+    assert len(entities) == 1
+    assert entities[0].custom_emoji_id == "11111"
+
+    delete_emoji_pack("test_pack")
+
+
+@pytest.mark.asyncio
+async def test_normal_message_custom_emoji_utf16_and_fallback():
+    # 5. Yuki can send custom emojis inside normal messages with UTF-16 entity offset calculations and graceful fallback
+    from helpers import send_reply_with_custom_emoji
+
+    msg = AsyncMock(spec=Message)
+    text = "Konichiwa! 🌸 Yuki desu~ ✨"
+    custom_emojis = [
+        {"emoji": "🌸", "custom_emoji_id": "999888777"},
+        {"emoji": "✨", "custom_emoji_id": "666555444"}
+    ]
+
+    # Success sending with custom emoji entities
+    await send_reply_with_custom_emoji(msg, text, custom_emojis=custom_emojis)
+    msg.reply_text.assert_called_once()
+    call_args = msg.reply_text.call_args
+    assert call_args[0][0] == text
+    entities = call_args[1]["entities"]
+    assert len(entities) == 2
+    assert entities[0].type == MessageEntity.CUSTOM_EMOJI
+    assert entities[0].custom_emoji_id == "999888777"
+    assert entities[0].offset == 11
+    assert entities[0].length == 2
+
+    # Fallback testing when Telegram rejects custom emoji entity
+    msg_fail = AsyncMock(spec=Message)
+    msg_fail.reply_text.side_effect = [TelegramError("Entity custom_emoji_id invalid"), AsyncMock()]
+    await send_reply_with_custom_emoji(msg_fail, text, custom_emojis=custom_emojis)
+    assert msg_fail.reply_text.call_count == 2
+    # Second call (fallback) had no entities
+    assert "entities" not in msg_fail.reply_text.call_args_list[1][1]
+
+
+@pytest.mark.asyncio
+async def test_packsem_navigation_and_security():
+    from admin import packsem_cmd, packsem_callback_handler
+    from store import save_emoji_pack, delete_emoji_pack
+
+    owner_id = OWNER_IDS[0] if OWNER_IDS else 111111111
+
+    save_emoji_pack("anime_pack", "Anime Pack", [
+        {"emoji": "🌸", "custom_emoji_id": "1001"},
+        {"emoji": "💖", "custom_emoji_id": "1002"}
+    ])
+    save_emoji_pack("cute_pack", "Cute Pack", [
+        {"emoji": "🐱", "custom_emoji_id": "2001"}
+    ])
+
+    user_owner = User(id=owner_id, first_name="Owner", is_bot=False)
+    user_normal = User(id=888999, first_name="Hacker", is_bot=False)
+    chat = Chat(id=-1001, type="supergroup")
+
+    # 15. Normal user blocked from /packsem
+    msg_norm = AsyncMock(spec=Message)
+    upd_norm = MagicMock(spec=Update)
+    upd_norm.effective_user = user_normal
+    upd_norm.effective_chat = chat
+    upd_norm.effective_message = msg_norm
+    upd_norm.message = msg_norm
+    ctx_norm = MagicMock()
+
+    await packsem_cmd(upd_norm, ctx_norm)
+    msg_norm.reply_text.assert_called_with("Ehehe~ that's an owner-only command! 🥺💫")
+
+    # 16. Callback queries cannot be manipulated by non-owner
+    query_norm = AsyncMock()
+    query_norm.data = "packsem_mode:packs:0"
+    upd_norm.callback_query = query_norm
+    await packsem_callback_handler(upd_norm, ctx_norm)
+    query_norm.answer.assert_called_with("Ehehe~ that's an owner-only command! 🥺💫", show_alert=True)
+
+    # 6. /packsem opens main menu for owner
+    msg_owner = AsyncMock(spec=Message)
+    upd_owner = MagicMock(spec=Update)
+    upd_owner.effective_user = user_owner
+    upd_owner.effective_chat = chat
+    upd_owner.effective_message = msg_owner
+    upd_owner.message = msg_owner
+    ctx_owner = MagicMock()
+
+    with patch("admin.is_owner", return_value=True):
+        await packsem_cmd(upd_owner, ctx_owner)
+    msg_owner.reply_text.assert_called_once()
+    kb = msg_owner.reply_text.call_args[1]["reply_markup"].inline_keyboard
+    assert len(kb) == 2
+    assert kb[0][0].text == "📦 Packs"
+    assert kb[1][0].text == "😀 Individual"
+
+    # 7. /packsem -> Packs mode shows pack names as inline buttons
+    query_owner = AsyncMock()
+    query_owner.data = "packsem_mode:packs:0"
+    upd_owner.callback_query = query_owner
+    with patch("admin.is_owner", return_value=True):
+        await packsem_callback_handler(upd_owner, ctx_owner)
+    query_owner.edit_message_text.assert_called_once()
+    p_text = query_owner.edit_message_text.call_args[0][0]
+    assert "Select a Pack" in p_text
+    p_kb = query_owner.edit_message_text.call_args[1]["reply_markup"].inline_keyboard
+    pack_btns = [b[0].text for b in p_kb if b[0].text.startswith("📦")]
+    assert "📦 Anime Pack" in pack_btns
+    assert "📦 Cute Pack" in pack_btns
+
+    # 8. Selecting a pack shows full pack details
+    query_owner.reset_mock()
+    query_owner.data = "packsem_view_pack:anime_pack:0"
+    with patch("admin.is_owner", return_value=True):
+        await packsem_callback_handler(upd_owner, ctx_owner)
+    query_owner.edit_message_text.assert_called_once()
+    detail_text = query_owner.edit_message_text.call_args[0][0]
+    assert "Anime Pack" in detail_text
+    assert "anime_pack" in detail_text
+    assert "1001" in detail_text
+
+    # 9. /packsem -> Individual mode shows pack names as inline buttons
+    query_owner.reset_mock()
+    query_owner.data = "packsem_mode:indiv:0"
+    with patch("admin.is_owner", return_value=True):
+        await packsem_callback_handler(upd_owner, ctx_owner)
+    query_owner.edit_message_text.assert_called_once()
+    indiv_text = query_owner.edit_message_text.call_args[0][0]
+    assert "Select a Pack" in indiv_text
+    indiv_kb = query_owner.edit_message_text.call_args[1]["reply_markup"].inline_keyboard
+    indiv_pack_btns = [b[0].text for b in indiv_kb if b[0].text.startswith("😀")]
+    assert "😀 Anime Pack" in indiv_pack_btns
+
+    # 10, 11, 12. Selecting a pack in Individual mode shows individual emoji details
+    query_owner.reset_mock()
+    query_owner.data = "packsem_view_indiv:anime_pack:0"
+    with patch("admin.is_owner", return_value=True):
+        await packsem_callback_handler(upd_owner, ctx_owner)
+    query_owner.edit_message_text.assert_called_once()
+    e_detail_text = query_owner.edit_message_text.call_args[0][0]
+    assert "Custom Emoji" in e_detail_text
+    assert "ID: 1001" in e_detail_text or "1001" in e_detail_text
+    assert "Anime Pack" in e_detail_text
+    assert "<b>Pack ID:</b> <code>anime_pack</code>" in e_detail_text
+    assert "<b>Reaction:</b> Enabled" in e_detail_text
+
+    # 14. Back buttons work correctly
+    query_owner.reset_mock()
+    query_owner.data = "packsem_main"
+    with patch("admin.is_owner", return_value=True):
+        await packsem_callback_handler(upd_owner, ctx_owner)
+    query_owner.edit_message_text.assert_called_once()
+    main_text = query_owner.edit_message_text.call_args[0][0]
+    assert "Emoji Packs" in main_text
+
+    delete_emoji_pack("anime_pack")
+    delete_emoji_pack("cute_pack")
