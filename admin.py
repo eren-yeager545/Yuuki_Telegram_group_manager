@@ -1308,6 +1308,9 @@ async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = await resolve_target_user(update, context)
+    if not target:
+        await update.message.reply_text("🌸 Please reply to a user, tag (@username), or specify a valid user ID/username to get user info desu~ 💕")
+        return
     user_id = target.id
     first_name = getattr(target, 'first_name', 'User')
     username = getattr(target, 'username', None)
@@ -2182,8 +2185,8 @@ async def packem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     emojis = pack_data.get('emojis') or []
     count = pack_data.get('count', len(emojis))
 
-    sample_emojis = [e.get('emoji') for e in emojis if e.get('emoji')][:15]
-    sample_str = " ".join(sample_emojis) if sample_emojis else "Custom Emojis"
+    sample_items = [e for e in emojis if e.get('emoji') and e.get('custom_emoji_id')][:15]
+    sample_str = " ".join([e.get('emoji') for e in sample_items]) if sample_items else "Custom Emojis"
 
     text_lines = [
         f"📦 <b>Emoji Pack: {html.escape(title)}</b> 🌸",
@@ -2192,8 +2195,14 @@ async def packem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔢 <b>Items:</b> {count} emojis",
         f"✨ <b>Available Emojis:</b> {html.escape(sample_str)}"
     ]
+    full_text = "\n".join(text_lines)
+    from helpers import create_custom_emoji_entities
+    custom_entities = create_custom_emoji_entities(full_text, sample_items) if sample_items else None
 
-    await msg.reply_text("\n".join(text_lines), parse_mode="HTML")
+    if custom_entities:
+        await msg.reply_text(full_text, parse_mode="HTML", entities=custom_entities)
+    else:
+        await msg.reply_text(full_text, parse_mode="HTML")
 
 
 
@@ -2312,14 +2321,14 @@ async def emoji_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         log_admin_action(update.effective_chat.id, update.effective_user.id, 'emoji', details=cid)
         resp_lines = [
-            f"✨ <b>Custom Emoji Added to Reaction Pool!</b> 🌸",
+            f"✨ <b>Custom Emoji Added Successfully!</b> 🌸",
             f"🆔 <b>ID:</b> <code>{html.escape(cid)}</code>",
         ]
         if fallback_emoji:
             resp_lines.append(f"😀 <b>Fallback Emoji:</b> {html.escape(fallback_emoji)}")
         if set_name:
             resp_lines.append(f"📦 <b>Pack:</b> <code>{html.escape(set_name)}</code>")
-        resp_lines.append("Reaction pool status: <b>Enabled</b>")
+        resp_lines.append("✨ <b>Usage:</b> Available for custom emoji messages & reactions 💕")
 
         await msg.reply_text("\n".join(resp_lines), parse_mode="HTML")
     else:
