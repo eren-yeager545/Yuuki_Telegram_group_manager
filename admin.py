@@ -2089,9 +2089,9 @@ async def addem_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     emojis_data = []
 
     for item in sticker_set.stickers:
-        emoji_char = getattr(item, "emoji", "") or ""
-        custom_emoji_id = getattr(item, "custom_emoji_id", "") or ""
-        if emoji_char or custom_emoji_id:
+        emoji_char = str(getattr(item, "emoji", "") or "").strip()
+        custom_emoji_id = str(getattr(item, "custom_emoji_id", "") or "").strip()
+        if custom_emoji_id:
             emojis_data.append({
                 'emoji': emoji_char,
                 'custom_emoji_id': custom_emoji_id

@@ -976,3 +976,128 @@ async def test_custom_emoji_message_rejection_separation_from_reactions():
     assert pack['emojis'][0]['reaction_enabled'] is True
 
     delete_emoji_pack('pack_sep_test')
+
+
+@pytest.mark.asyncio
+async def test_custom_emoji_test_a_normal_ai_response():
+    # Test A — Normal AI response (Yuki responds to: @yuki_bot hi)
+    from helpers import send_reply_with_custom_emoji
+    from store import save_emoji_pack, delete_emoji_pack
+
+    save_emoji_pack('pack_test_a', 'Test A Pack', [
+        {'emoji': '🌸', 'custom_emoji_id': '111222333'}
+    ])
+
+    msg = AsyncMock(spec=Message)
+    text = "Konnichiwa! How can Yuki help you today?"
+    await send_reply_with_custom_emoji(msg, text)
+
+    msg.reply_text.assert_called_once()
+    call_args = msg.reply_text.call_args
+    sent_text = call_args[0][0]
+    entities = call_args[1].get('entities', [])
+
+    assert "🌸" in sent_text
+    assert len(entities) == 1
+    assert entities[0].type == MessageEntity.CUSTOM_EMOJI
+    assert entities[0].custom_emoji_id == '111222333'
+
+    delete_emoji_pack('pack_test_a')
+
+
+@pytest.mark.asyncio
+async def test_custom_emoji_test_b_response_with_unicode_emoji():
+    # Test B — Response containing normal Unicode emoji ("Aww~ that's nice 🌸")
+    from helpers import send_reply_with_custom_emoji
+    from store import save_emoji_pack, delete_emoji_pack
+
+    save_emoji_pack('pack_test_b', 'Test B Pack', [
+        {'emoji': '🌸', 'custom_emoji_id': '444555666'}
+    ])
+
+    msg = AsyncMock(spec=Message)
+    text = "Aww~ that's nice 🌸"
+    await send_reply_with_custom_emoji(msg, text)
+
+    msg.reply_text.assert_called_once()
+    call_args = msg.reply_text.call_args
+    sent_text = call_args[0][0]
+    entities = call_args[1].get('entities', [])
+
+    assert sent_text == text
+    assert len(entities) == 1
+    assert entities[0].type == MessageEntity.CUSTOM_EMOJI
+    assert entities[0].custom_emoji_id == '444555666'
+
+    delete_emoji_pack('pack_test_b')
+
+
+@pytest.mark.asyncio
+async def test_custom_emoji_test_c_no_custom_emojis_configured():
+    # Test C — No custom emojis configured
+    from helpers import send_reply_with_custom_emoji
+    from store import get_all_custom_emojis, delete_emoji_pack
+
+    # Ensure no custom emojis in store for this test
+    all_custom = get_all_custom_emojis()
+    for item in all_custom:
+        delete_emoji_pack(item['set_name'])
+
+    msg = AsyncMock(spec=Message)
+    text = "Hi there! No custom emojis here~"
+    await send_reply_with_custom_emoji(msg, text)
+
+    msg.reply_text.assert_called_once()
+    call_args = msg.reply_text.call_args
+    assert call_args[0][0] == text
+    assert call_args[1].get('entities') is None
+
+
+@pytest.mark.asyncio
+async def test_custom_emoji_test_d_invalid_custom_emoji_id():
+    # Test D — Invalid custom emoji ID
+    from helpers import send_reply_with_custom_emoji
+    from store import save_emoji_pack, get_emoji_pack, delete_emoji_pack
+    from telegram.error import TelegramError
+
+    save_emoji_pack('pack_test_d', 'Test D Pack', [
+        {'emoji': '⭐', 'custom_emoji_id': 'invalid_id_999'}
+    ])
+
+    msg = AsyncMock(spec=Message)
+    msg.reply_text.side_effect = [TelegramError("CUSTOM_EMOJI_INVALID"), AsyncMock()]
+
+    text = "Testing invalid custom emoji fallback ⭐"
+    await send_reply_with_custom_emoji(msg, text)
+
+    # Should attempt once with entities and once as plain text fallback
+    assert msg.reply_text.call_count == 2
+    assert "entities" not in msg.reply_text.call_args_list[1][1]
+
+    # Verify invalid custom emoji is NOT automatically deleted from store
+    pack = get_emoji_pack('pack_test_d')
+    assert pack is not None
+    assert len(pack['emojis']) == 1
+
+    delete_emoji_pack('pack_test_d')
+
+
+@pytest.mark.asyncio
+async def test_custom_emoji_test_e_emoji_reaction():
+    # Test E — Emoji reaction system works independently
+    from store import save_emoji_pack, delete_emoji_pack
+    from handlers.ai_chat import try_react_to_message
+
+    save_emoji_pack('pack_test_e', 'Test E Pack', [
+        {'emoji': '', 'custom_emoji_id': '888777666'}
+    ])
+
+    msg_react = AsyncMock(spec=Message)
+    await try_react_to_message(msg_react, 12345)
+
+    msg_react.set_reaction.assert_called_once()
+    reaction_args = msg_react.set_reaction.call_args[1]["reaction"]
+    assert len(reaction_args) == 1
+    assert getattr(reaction_args[0], "custom_emoji_id", None) == "888777666"
+
+    delete_emoji_pack('pack_test_e')
