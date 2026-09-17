@@ -1,5 +1,5 @@
 import asyncio
-from telegram.error import RetryAfter
+from telegram.error import RetryAfter, TelegramError
 import logging
 import html
 import re
@@ -1788,10 +1788,6 @@ async def tag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("😅 I couldn't find any members to tag right now.")
         return
 
-    CHUNK_SIZE = 10
-    total_eligible = len(eligible_members)
-    chunks = [eligible_members[i:i + CHUNK_SIZE] for i in range(0, total_eligible, CHUNK_SIZE)]
-
     header = f"""📢 <b>Attention everyone!</b>
 
 👤 <b>Called by:</b> {giver_name}
@@ -1799,6 +1795,24 @@ async def tag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💬 {custom_message}
 
 """
+
+    chunks = []
+    current_chunk = []
+    current_len = 0
+
+    for uid, clean_name, username in eligible_members:
+        mention = format_user_link(uid, clean_name)
+        mention_len = len(mention) + 1
+        base_len = len(header) if not chunks and not current_chunk else 0
+        if len(current_chunk) >= 10 or (current_len + mention_len + base_len > 3800 and current_chunk):
+            chunks.append(current_chunk)
+            current_chunk = [(uid, clean_name, username)]
+            current_len = mention_len
+        else:
+            current_chunk.append((uid, clean_name, username))
+            current_len += mention_len
+    if current_chunk:
+        chunks.append(current_chunk)
 
     partial_failure = False
 
@@ -1825,6 +1839,12 @@ async def tag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as retry_err:
                 logger.error(f"Failed sending tag batch after retry: {retry_err}")
                 partial_failure = True
+        except TelegramError as err:
+            logger.error(f"Failed sending tag batch due to TelegramError: {err}")
+            if idx == 0:
+                await msg.reply_text(f"🌸 I couldn't send the tag message because I'm missing permissions: {err}")
+                return
+            partial_failure = True
         except Exception as err:
             logger.error(f"Failed sending tag batch: {err}")
             partial_failure = True

@@ -328,3 +328,56 @@ async def test_tag_promoted_demoted_user(tmp_path, monkeypatch):
 
     await tag_cmd(update, context)
     context.bot.send_message.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_all_alias_command(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, 'DB_PATH', str(tmp_path / "test_tag.db"))
+    store.init_db()
+
+    store.upsert_user(101, "Member All", "m_all")
+    store.touch_member(-100123, 101)
+
+    update, context = create_mock_update_and_context(user_id=222, is_admin_status=True)
+    update.effective_message.text = "/all Hello team!"
+
+    await tag_cmd(update, context)
+
+    context.bot.send_message.assert_called_once()
+    send_args = context.bot.send_message.call_args[1]
+    assert "Hello team!" in send_args['text']
+    assert "Member All" in send_args['text']
+
+
+@pytest.mark.asyncio
+async def test_tag_permission_error_from_telegram(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, 'DB_PATH', str(tmp_path / "test_tag.db"))
+    store.init_db()
+
+    store.upsert_user(101, "Member Perm", "m_perm")
+    store.touch_member(-100123, 101)
+
+    update, context = create_mock_update_and_context(user_id=222, is_admin_status=True)
+    context.bot.send_message = AsyncMock(side_effect=TelegramError("Not enough rights"))
+
+    await tag_cmd(update, context)
+
+    update.effective_message.reply_text.assert_called_once()
+    reply_arg = update.effective_message.reply_text.call_args[0][0]
+    assert "missing permissions" in reply_arg
+
+
+@pytest.mark.asyncio
+async def test_tag_user_never_started_bot(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, 'DB_PATH', str(tmp_path / "test_tag.db"))
+    store.init_db()
+
+    # Touch member directly in DB without registering in UsersDB table
+    store.touch_member(-100123, 888)
+
+    update, context = create_mock_update_and_context(user_id=222, is_admin_status=True)
+    await tag_cmd(update, context)
+
+    context.bot.send_message.assert_called_once()
+    send_args = context.bot.send_message.call_args[1]
+    assert 'href="tg://user?id=888"' in send_args['text']
