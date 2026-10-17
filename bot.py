@@ -1,3 +1,6 @@
+import os
+from src.sticker_converter import parse_sticker_link, convert_and_bundle_pack
+import tempfile, io
 from helpers import is_owner, is_owner_or_sudo
 import asyncio
 import logging
@@ -744,6 +747,148 @@ def ensure_event_loop():
     return loop
 
 
+
+
+async def towhatsapp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not msg:
+        return
+
+    set_name = ""
+    if context.args:
+        set_name = parse_sticker_link(" ".join(context.args))
+
+    if not set_name and msg.reply_to_message and msg.reply_to_message.sticker:
+        set_name = msg.reply_to_message.sticker.set_name or ""
+
+    if not set_name:
+        await msg.reply_html(
+            "🌸 <b>Usage:</b> <code>/towhatsapp &lt;Telegram sticker pack link&gt;</code>\n"
+            "Or reply to a sticker with <code>/towhatsapp</code>! ✨\n"
+            "<i>Example: /towhatsapp https://t.me/addstickers/Animals</i>"
+        )
+        return
+
+    progress_msg = await msg.reply_text(f"⏳ Fetching Telegram sticker pack '{set_name}' desu~ 🌸")
+
+    try:
+        sticker_set = await context.bot.get_sticker_set(set_name)
+    except Exception as e:
+        logger.warning(f"Failed to fetch sticker set '{set_name}': {e}")
+        await progress_msg.edit_text(f"Uwaa~ I couldn't find or load the sticker pack '{set_name}'! 🥺 Please check the link and try again.")
+        return
+
+    if not sticker_set or not getattr(sticker_set, "stickers", None):
+        await progress_msg.edit_text("Uwaa~ That sticker pack appears to be empty! 🥺🌸")
+        return
+
+    stickers = sticker_set.stickers
+    total_count = len(stickers)
+    pack_title = getattr(sticker_set, "title", set_name) or set_name
+    publisher = f"{getattr(context.bot, 'first_name', 'Yuki Bot')} Bot"
+
+    await progress_msg.edit_text(f"📥 Downloading {total_count} stickers from '{pack_title}'... 🌸")
+
+    stickers_data = []
+    last_update_time = time.time()
+
+    for idx, s in enumerate(stickers, start=1):
+        try:
+            tg_file = await context.bot.get_file(s.file_id)
+            buf = io.BytesIO()
+            await tg_file.download_to_memory(buf)
+            raw_bytes = buf.getvalue()
+
+            is_anim = getattr(s, "is_animated", False)
+            is_vid = getattr(s, "is_video", False)
+            emoji_char = getattr(s, "emoji", "") or "🌸"
+
+            stickers_data.append({
+                "raw_bytes": raw_bytes,
+                "is_animated": is_anim,
+                "is_video": is_vid,
+                "emojis": [emoji_char] if emoji_char else ["🌸"]
+            })
+
+            now = time.time()
+            if now - last_update_time >= 3.0 or idx == total_count:
+                last_update_time = now
+                try:
+                    await progress_msg.edit_text(f"📥 Downloaded {idx}/{total_count} stickers from '{pack_title}'... 🌸")
+                except Exception:
+                    pass
+        except Exception as err:
+            logger.error(f"Error downloading sticker {idx} in set {set_name}: {err}")
+
+    if not stickers_data:
+        await progress_msg.edit_text("Uwaa~ Failed to download any stickers from that pack! 🥺")
+        return
+
+    await progress_msg.edit_text(f"⚙️ Converting stickers and bundling WhatsApp zip archives for '{pack_title}'... 🌸")
+
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            chunks_info, manifest_data = await asyncio.to_thread(
+                convert_and_bundle_pack,
+                pack_title,
+                publisher,
+                stickers_data,
+                temp_dir
+            )
+
+            if not chunks_info:
+                await progress_msg.edit_text("Uwaa~ Conversion produced no valid WhatsApp sticker chunks! 🥺")
+                return
+
+            await progress_msg.edit_text(f"📤 Uploading {len(chunks_info)} WhatsApp zip bundle(s)... 🌸")
+
+            for chunk in chunks_info:
+                zip_path = chunk["zip_path"]
+                zip_fname = chunk["zip_filename"]
+                caption_text = (
+                    f"📦 <b>WhatsApp Sticker Bundle (Part {chunk['chunk_index']})</b>\n"
+                    f"🏷️ <b>Title:</b> {html.escape(chunk['title'])}\n"
+                    f"🔢 <b>Stickers:</b> {chunk['sticker_count']}\n"
+                    f"✨ <b>Type:</b> {'Animated' if chunk['is_animated'] else 'Static'}"
+                )
+                with open(zip_path, "rb") as zf:
+                    await msg.reply_document(
+                        document=zf,
+                        filename=zip_fname,
+                        caption=caption_text,
+                        parse_mode="HTML"
+                    )
+
+            manifest_path = os.path.join(temp_dir, "manifest.json")
+            if os.path.exists(manifest_path):
+                with open(manifest_path, "rb") as mf:
+                    await msg.reply_document(
+                        document=mf,
+                        filename="manifest.json",
+                        caption="📄 <b>WhatsApp Sticker Pack Manifest (JSON)</b>",
+                        parse_mode="HTML"
+                    )
+
+            summary_msg = (
+                f"✨ <b>Conversion Complete!</b> 🌸\n\n"
+                f"📦 <b>Title:</b> {html.escape(pack_title)}\n"
+                f"🔢 <b>Total Stickers:</b> {total_count}\n"
+                f"📦 <b>Zip Bundles:</b> {len(chunks_info)}\n\n"
+                f"📱 <b>Important Android Note:</b>\n"
+                f"Direct import into WhatsApp requires the companion Android app "
+                f"(using <code>com.whatsapp.intent.action.ENABLE_STICKER_PACK</code>) installed on your device! 💕"
+            )
+            await msg.reply_html(summary_msg)
+            try:
+                await progress_msg.delete()
+            except Exception:
+                pass
+
+    except Exception as exc:
+        logger.error(f"Error during sticker conversion for set {set_name}: {exc}", exc_info=True)
+        await progress_msg.edit_text("☁️ Oopsie! Something went wrong during sticker conversion. Please try again later~ 💗")
+
+
 def main():
     ensure_event_loop()
     init_db()
@@ -779,6 +924,7 @@ def main():
         ('myfeds', myfeds_cmd, 'Users Commands', 'List your federations', '/myfeds'),
         ('ttt', ttt_cmd, 'Game Commands', 'Play Tic Tac Toe against bot or challenged user in reply', '/ttt'),
         ('afk', afk_cmd, 'Users Commands', 'Set your status to AFK with an optional reason', '/afk studying'),
+        ('towhatsapp', towhatsapp_cmd, 'Utility Commands', 'Convert Telegram sticker pack to WhatsApp format', '/towhatsapp https://t.me/addstickers/pack_name'),
     ]
     admin_cmds = [
         ('promote', promote_cmd, 'Group Management Commands', 'Promote a member to admin', '/promote'),
