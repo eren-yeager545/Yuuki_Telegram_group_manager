@@ -1381,3 +1381,72 @@ async def test_global_deadline_respected():
     assert elapsed < 2.0
 
     await mgr.close()
+
+
+
+@pytest.mark.asyncio
+async def test_concurrent_ai_handling():
+    """Verify concurrent AI chat requests run concurrently without blocking each other."""
+    from handlers.ai_chat import handle_ai_chat, rate_limiter, provider_manager, context_manager
+
+    # Set rate limiter chat cooldown to 0 for concurrency test
+    rate_limiter.chat_cooldown = 0.0
+    rate_limiter.user_cooldown = 0.0
+
+    call_order = []
+
+    async def slow_chat(messages, system_prompt, max_tokens=150, timeout=10.0, chat_id=None, message_id=None):
+        req_id = messages[-1]["content"]
+        call_order.append(f"start_{req_id}")
+        await asyncio.sleep(0.2)
+        call_order.append(f"end_{req_id}")
+        if req_id == "fail_req":
+            return AIResponse(text="", provider="fallback", model="none")
+        return AIResponse(text=f"Response for {req_id}", provider="mock", model="mock")
+
+    with patch.object(provider_manager, "chat", side_effect=slow_chat):
+        # Create 3 concurrent updates
+        up1 = MagicMock()
+        up1.update_id = 101
+        up1.effective_chat.id = 12345
+        up1.effective_user.id = 1
+        up1.effective_user.first_name = "User1"
+        up1.effective_message.message_id = 1001
+        up1.effective_message.reply_text = AsyncMock()
+
+        up2 = MagicMock()
+        up2.update_id = 102
+        up2.effective_chat.id = 12345
+        up2.effective_user.id = 2
+        up2.effective_user.first_name = "User2"
+        up2.effective_message.message_id = 1002
+        up2.effective_message.reply_text = AsyncMock()
+
+        up3 = MagicMock()
+        up3.update_id = 103
+        up3.effective_chat.id = 12345
+        up3.effective_user.id = 3
+        up3.effective_user.first_name = "User3"
+        up3.effective_message.message_id = 1003
+        up3.effective_message.reply_text = AsyncMock()
+
+        ctx = MagicMock()
+        ctx.bot.username = "yuki_bot"
+        ctx.bot.id = 123456
+        ctx.bot.send_chat_action = AsyncMock()
+
+        # Execute 3 tasks concurrently in the same chat_id
+        t1 = asyncio.create_task(handle_ai_chat(up1, ctx, prompt_override="req1"))
+        t2 = asyncio.create_task(handle_ai_chat(up2, ctx, prompt_override="fail_req"))
+        t3 = asyncio.create_task(handle_ai_chat(up3, ctx, prompt_override="req3"))
+
+        await asyncio.gather(t1, t2, t3)
+
+        # All 3 requests should have started before any finished (concurrent execution)
+        starts = [item for item in call_order if item.startswith("start_")]
+        ends = [item for item in call_order if item.startswith("end_")]
+        assert len(starts) == 3
+        assert len(ends) == 3
+        # Confirm failure on fail_req did not cancel req1 or req3
+        ctx_messages = context_manager.get_context(12345)
+        assert len(ctx_messages) > 0

@@ -445,64 +445,66 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
 
     # Acquire concurrency semaphore
     async with rate_limiter.semaphore:
-        # Acquire per-chat lock to preserve context history order per chat
+        # If user sent a sticker, try replying with a sticker from saved packs
+        sticker_obj = getattr(msg, "sticker", None)
+        if sticker_obj and type(sticker_obj).__name__ != "MagicMock":
+            user_emoji = getattr(sticker_obj, "emoji", None)
+            saved_sticker_file_id = get_random_sticker(user_emoji=user_emoji, chat_id=chat.id)
+            if saved_sticker_file_id:
+                try:
+                    await msg.reply_sticker(sticker=saved_sticker_file_id)
+                    return
+                except Exception as e:
+                    logger.warning(f"Failed to reply with sticker: {e}")
+
+        # Send typing action for text AI response
+        try:
+            await context.bot.send_chat_action(chat_id=chat.id, action="typing")
+        except Exception:
+            pass
+
+        # Read context safely under chat lock
         chat_lock = await context_manager.get_chat_lock(chat.id)
         async with chat_lock:
-            # If user sent a sticker, try replying with a sticker from saved packs
-            sticker_obj = getattr(msg, "sticker", None)
-            if sticker_obj and type(sticker_obj).__name__ != "MagicMock":
-                user_emoji = getattr(sticker_obj, "emoji", None)
-                saved_sticker_file_id = get_random_sticker(user_emoji=user_emoji, chat_id=chat.id)
-                if saved_sticker_file_id:
-                    try:
-                        await msg.reply_sticker(sticker=saved_sticker_file_id)
-                        return
-                    except Exception as e:
-                        logger.warning(f"Failed to reply with sticker: {e}")
-
-            # Send typing action for text AI response
-            try:
-                await context.bot.send_chat_action(chat_id=chat.id, action="typing")
-            except Exception:
-                pass
-
             user_display = user.first_name or "Friend"
             context_manager.add_message(chat.id, role="user", content=prompt, user_name=user_display)
             conversation_history = context_manager.get_context(chat.id)
 
-            # Call AI Provider Manager
-            ai_resp = await provider_manager.chat(
-                messages=conversation_history,
-                system_prompt=YUKI_PERSONA,
-                max_tokens=config.AI_MAX_OUTPUT_TOKENS,
-                timeout=config.AI_REQUEST_TIMEOUT,
-                chat_id=chat.id,
-                message_id=msg.message_id
-            )
+        # Call AI Provider Manager concurrently without holding chat lock
+        ai_resp = await provider_manager.chat(
+            messages=conversation_history,
+            system_prompt=YUKI_PERSONA,
+            max_tokens=config.AI_MAX_OUTPUT_TOKENS,
+            timeout=config.AI_REQUEST_TIMEOUT,
+            chat_id=chat.id,
+            message_id=msg.message_id
+        )
 
-            if ai_resp.provider == "fallback":
-                final_text = get_cute_fallback_response()
-            else:
-                # Format/shorten response if casual chatting
-                is_detailed_req = any(kw in prompt.lower() for kw in ["explain in detail", "detailed explanation", "essay", "full guide", "step by step"])
-                final_text = ai_resp.text if is_detailed_req else format_short_response(ai_resp.text, max_words=50)
+        if ai_resp.provider == "fallback":
+            final_text = get_cute_fallback_response()
+        else:
+            # Format/shorten response if casual chatting
+            is_detailed_req = any(kw in prompt.lower() for kw in ["explain in detail", "detailed explanation", "essay", "full guide", "step by step"])
+            final_text = ai_resp.text if is_detailed_req else format_short_response(ai_resp.text, max_words=50)
 
-                if not final_text:
-                    final_text = FALLBACK_YUKI_RESPONSE
+            if not final_text:
+                final_text = FALLBACK_YUKI_RESPONSE
 
+        # Write response back to context under chat lock
+        async with chat_lock:
             context_manager.add_message(chat.id, role="assistant", content=final_text)
 
-            try:
-                await send_reply_with_custom_emoji(msg, final_text)
-            except Exception as e:
-                logger.error(f"Error sending AI response: {type(e).__name__}")
+        try:
+            await send_reply_with_custom_emoji(msg, final_text)
+        except Exception as e:
+            logger.error(f"Error sending AI response: {type(e).__name__}")
 
-            # Optional randomized sticker response on Yuki interaction
-            sticker_chance = getattr(config, "YUKI_STICKER_CHANCE", 0.25)
-            if random.random() < sticker_chance:
-                stk_file_id = get_random_sticker(chat_id=chat.id)
-                if stk_file_id:
-                    try:
-                        await msg.reply_sticker(sticker=stk_file_id)
-                    except Exception as e:
-                        logger.warning(f"Failed to send random sticker: {e}")
+        # Optional randomized sticker response on Yuki interaction
+        sticker_chance = getattr(config, "YUKI_STICKER_CHANCE", 0.25)
+        if random.random() < sticker_chance:
+            stk_file_id = get_random_sticker(chat_id=chat.id)
+            if stk_file_id:
+                try:
+                    await msg.reply_sticker(sticker=stk_file_id)
+                except Exception as e:
+                    logger.warning(f"Failed to send random sticker: {e}")
