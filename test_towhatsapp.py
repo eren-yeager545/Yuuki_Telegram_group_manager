@@ -220,3 +220,62 @@ async def test_towhatsapp_cmd_execution_flow():
     assert update.effective_message.reply_document.call_count >= 2  # zip + manifest
     assert update.effective_message.reply_html.call_count >= 1
     assert "Conversion Complete!" in update.effective_message.reply_html.call_args[0][0]
+
+
+
+@pytest.mark.asyncio
+async def test_towhatsapp_tempfile_cleanup():
+    """Verify temporary directory and files are purged under success and failure scenarios."""
+    update = AsyncMock()
+    context = AsyncMock()
+    update.effective_message = AsyncMock()
+    progress_msg = AsyncMock()
+    update.effective_message.reply_text.return_value = progress_msg
+    context.args = ["https://t.me/addstickers/TestCleanupPack"]
+
+    fake_sticker = MagicMock()
+    fake_sticker.file_id = "stk_1"
+    fake_sticker.is_animated = False
+    fake_sticker.is_video = False
+    fake_sticker.emoji = "🌸"
+
+    fake_sticker_set = MagicMock()
+    fake_sticker_set.title = "Cleanup Pack"
+    fake_sticker_set.stickers = [fake_sticker] * 3
+    context.bot.get_sticker_set.return_value = fake_sticker_set
+
+    fake_file = AsyncMock()
+    dummy_png = create_dummy_png_bytes(200, 200)
+
+    async def mock_download_to_memory(buf):
+        buf.write(dummy_png)
+
+    fake_file.download_to_memory.side_effect = mock_download_to_memory
+    context.bot.get_file.return_value = fake_file
+
+    created_dirs = []
+    original_mkdtemp = tempfile.mkdtemp
+
+    def tracking_mkdtemp(*args, **kwargs):
+        d = original_mkdtemp(*args, **kwargs)
+        created_dirs.append(d)
+        return d
+
+    with patch("tempfile.mkdtemp", side_effect=tracking_mkdtemp):
+        await towhatsapp_cmd(update, context)
+
+    assert len(created_dirs) == 1
+    target_dir = created_dirs[0]
+    # Assert temporary directory was completely removed
+    assert not os.path.exists(target_dir)
+
+    # Test failure / exception scenario
+    created_dirs.clear()
+    update.effective_message.reply_document.side_effect = Exception("Telegram Upload Failed")
+
+    with patch("tempfile.mkdtemp", side_effect=tracking_mkdtemp):
+        await towhatsapp_cmd(update, context)
+
+    assert len(created_dirs) == 1
+    fail_dir = created_dirs[0]
+    assert not os.path.exists(fail_dir)
