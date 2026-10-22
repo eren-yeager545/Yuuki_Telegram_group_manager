@@ -1235,3 +1235,201 @@ def test_mybot_and_owner_commands_non_owner_restrictions(monkeypatch):
 
     asyncio.run(common.broadcast_cmd(bcast_up, context))
     assert "Only owner" in bcast_msg.reply_text.call_args[0][0] or "Owner" in bcast_msg.reply_text.call_args[0][0]
+
+
+def test_night_mode_complete_suite(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import User, Chat, Message, Update, MessageEntity
+    import admin
+    import bot as bot_module
+    import store
+    import config
+
+    owner_id = 99999
+    admin_id = 88888
+    user_id = 11111
+    chat_id = -100999
+    chat_id_other = -100888
+
+    monkeypatch.setattr(config, "OWNER_IDS", [owner_id])
+    monkeypatch.setattr(config, "OWNER_ID", owner_id)
+    monkeypatch.setattr(admin, "OWNER_IDS", [owner_id])
+
+    bot = AsyncMock()
+    bot.send_message = AsyncMock()
+    bot.get_chat_member = AsyncMock()
+
+    context = MagicMock()
+    context.bot = bot
+    context.args = []
+
+    def make_admin_update(args=None):
+        u = MagicMock(spec=Update)
+        u.effective_chat = Chat(id=chat_id, type="supergroup", title="Test Group A")
+        u.effective_user = User(id=admin_id, first_name="Admin", is_bot=False)
+        m = MagicMock(spec=Message)
+        m.reply_text = AsyncMock()
+        u.effective_message = m
+        u.message = m
+        u.edited_message = None
+        context.args = args or []
+        return u, m
+
+    async def mock_is_admin(update, ctx):
+        if update.effective_user and update.effective_user.id in (admin_id, owner_id):
+            return True
+        return False
+
+    monkeypatch.setattr(admin, "is_admin", mock_is_admin)
+    monkeypatch.setattr(bot_module, "is_admin", mock_is_admin)
+
+    # 1. Test /night on and /night off commands & status
+    up, msg = make_admin_update(["on"])
+    asyncio.run(admin.night_cmd(up, context))
+    assert store.get_setting(chat_id, "night_mode") == "on"
+    assert "enabled" in msg.reply_text.call_args[0][0]
+
+    up, msg = make_admin_update([])
+    asyncio.run(admin.night_cmd(up, context))
+    assert "ON" in msg.reply_text.call_args[0][0]
+
+    up, msg = make_admin_update(["off"])
+    asyncio.run(admin.night_cmd(up, context))
+    assert store.get_setting(chat_id, "night_mode") == "off"
+    assert "disabled" in msg.reply_text.call_args[0][0]
+
+    # Non-admin rejected
+    up, msg = make_admin_update(["on"])
+    up.effective_user = User(id=user_id, first_name="NormalUser", is_bot=False)
+    asyncio.run(admin.night_cmd(up, context))
+    assert store.get_setting(chat_id, "night_mode") == "off"
+    assert "Only group admins" in msg.reply_text.call_args[0][0]
+
+    # 2. Test Group Isolation & Persistence
+    store.set_setting(chat_id, "night_mode", "on")
+    store.set_setting(chat_id_other, "night_mode", "off")
+    assert store.get_setting(chat_id, "night_mode") == "on"
+    assert store.get_setting(chat_id_other, "night_mode") == "off"
+
+    # 3. Test Restricted Content Deletion & Owner DMs for ordinary user
+    bot.send_message.reset_mock()
+
+    def make_user_msg_update(chat_target_id=chat_id, is_edited=False):
+        u = MagicMock(spec=Update)
+        c = Chat(id=chat_target_id, type="supergroup", title="Test Group A")
+        usr = User(id=user_id, first_name="NormalUser", is_bot=False)
+        m = MagicMock(spec=Message)
+        m.message_id = 777
+        m.text = None
+        m.caption = None
+        m.sticker = None
+        m.photo = None
+        m.video = None
+        m.animation = None
+        m.audio = None
+        m.voice = None
+        m.video_note = None
+        m.document = None
+        m.entities = []
+        m.caption_entities = []
+        m.sender_chat = None
+        m.forward_from_chat = None
+        m.is_automatic_forward = False
+        m.delete = AsyncMock()
+
+        u.effective_chat = c
+        u.effective_user = usr
+        if is_edited:
+            u.message = None
+            u.edited_message = m
+            u.effective_message = m
+        else:
+            u.message = m
+            u.edited_message = None
+            u.effective_message = m
+        return u, m
+
+    # Sticker deletion
+    u, m = make_user_msg_update()
+    m.sticker = MagicMock(is_animated=False, is_video=False)
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
+    bot.send_message.assert_called_once()
+    assert "Sticker" in bot.send_message.call_args[1]["text"]
+
+    # Media deletion (photo)
+    bot.send_message.reset_mock()
+    u, m = make_user_msg_update()
+    m.photo = [MagicMock()]
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
+    bot.send_message.assert_called_once()
+    assert "Photo" in bot.send_message.call_args[1]["text"]
+
+    # Link in text
+    bot.send_message.reset_mock()
+    u, m = make_user_msg_update()
+    m.text = "Check out https://telegram.org!"
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
+    bot.send_message.assert_called_once()
+    assert "Link" in bot.send_message.call_args[1]["text"]
+
+    # Plain text (no media/sticker/link) -> NOT deleted
+    bot.send_message.reset_mock()
+    u, m = make_user_msg_update()
+    m.text = "Hello world! This is ordinary text."
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is False
+    m.delete.assert_not_called()
+    bot.send_message.assert_not_called()
+
+    # 4. Test Exemptions
+    # Admin/Safe user -> NOT deleted
+    bot.send_message.reset_mock()
+    u, m = make_user_msg_update()
+    u.effective_user = User(id=admin_id, first_name="AdminUser", is_bot=False)
+    m.sticker = MagicMock()
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is False
+    m.delete.assert_not_called()
+
+    # Bot user -> NOT deleted
+    bot.send_message.reset_mock()
+    u, m = make_user_msg_update()
+    u.effective_user = User(id=999, first_name="OtherBot", is_bot=True)
+    m.photo = [MagicMock()]
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is False
+    m.delete.assert_not_called()
+
+    # Connected channel -> NOT deleted
+    bot.send_message.reset_mock()
+    u, m = make_user_msg_update()
+    m.sender_chat = Chat(id=-100777, type="channel")
+    m.photo = [MagicMock()]
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is False
+    m.delete.assert_not_called()
+
+    # 5. Test Owner DM Failure Gracefulness
+    bot.send_message.reset_mock()
+    bot.send_message.side_effect = Exception("Owner blocked DM")
+    u, m = make_user_msg_update()
+    m.photo = [MagicMock()]
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
+
+    # 6. Test .safe Mode & Edited Message Independence
+    bot.send_message.side_effect = None
+    bot.send_message.reset_mock()
+    u, m = make_user_msg_update(is_edited=True)
+    m.sticker = MagicMock()
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is False
+    m.delete.assert_not_called()

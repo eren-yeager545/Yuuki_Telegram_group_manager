@@ -1,7 +1,7 @@
 import os
 from src.sticker_converter import parse_sticker_link, convert_and_bundle_pack
 import tempfile, io
-from helpers import is_owner, is_owner_or_sudo
+from helpers import is_owner, is_owner_or_sudo, is_admin
 import asyncio
 import logging
 import random
@@ -13,7 +13,8 @@ from collections import defaultdict, deque
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, ChatMemberHandler, TypeHandler, filters
 from logger_helper import log_user_started_event, log_group_added_event, log_group_removed_event, log_user_joined_group_event, send_logger_notification
-from config import BOT_TOKEN, LOG_CHANNEL_ID, QUIZ_INTERVAL_SECONDS, SEEN_UPDATE_COOLDOWN_SECONDS, PORT, WEBHOOK_URL, WEBHOOK_PATH, WEBHOOK_SECRET
+import config
+from config import BOT_TOKEN, OWNER_IDS, OWNER_ID, LOG_CHANNEL_ID, QUIZ_INTERVAL_SECONDS, SEEN_UPDATE_COOLDOWN_SECONDS, PORT, WEBHOOK_URL, WEBHOOK_PATH, WEBHOOK_SECRET
 from store import (
     init_db, get_active_groups, upsert_group, upsert_user, get_filters, get_setting,
     touch_member, update_member_status, get_note, get_random_quiz, get_buttons, list_blacklists,
@@ -488,6 +489,164 @@ async def track_profile_update_handler(update: Update, context: ContextTypes.DEF
         logger.error(f"Error in track_profile_update_handler: {e}")
 
 
+async def send_night_mode_owner_notification(context: ContextTypes.DEFAULT_TYPE, chat, user, msg, detected_type: str):
+    """
+    Sends a private DM notification to the bot owner(s) when Night Mode deletes a message.
+    Fails gracefully if owner DM is blocked or Telegram API returns an error.
+    """
+    group_name = html.escape(chat.title or "Unknown Group")
+    group_id = chat.id
+    sender_name = html.escape(user.full_name or user.first_name or "Unknown User") if user else "Unknown User"
+    sender_id = user.id if user else 0
+    message_id = msg.message_id
+    text_content = msg.text or msg.caption or None
+
+    content_preview = html.escape(text_content) if text_content else "<i>None</i>"
+    if len(content_preview) > 300:
+        content_preview = content_preview[:300] + "..."
+
+    notification_text = (
+        f"🌙 <b>Night Mode Message Deleted</b>\n\n"
+        f"<b>Group:</b> {group_name} (<code>{group_id}</code>)\n"
+        f"<b>Sender:</b> {sender_name} (<code>{sender_id}</code>)\n"
+        f"<b>Message ID:</b> <code>{message_id}</code>\n"
+        f"<b>Detected Content:</b> {html.escape(detected_type)}\n"
+        f"<b>Reason:</b> Night Mode active\n"
+        f"<b>Original Content:</b> {content_preview}"
+    )
+
+    owner_ids = getattr(config, 'OWNER_IDS', [])
+    if not owner_ids and getattr(config, 'OWNER_ID', None):
+        owner_ids = [config.OWNER_ID]
+
+    for owner_id in owner_ids:
+        if owner_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=owner_id,
+                    text=notification_text,
+                    parse_mode="HTML"
+                )
+            except Exception as err:
+                logger.warning(f"Could not send Night Mode DM to bot owner {owner_id}: {err}")
+
+
+async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Evaluates Night Mode rules for incoming group messages.
+    Deletes messages containing stickers, media, or links sent by non-exempt users when Night Mode is active.
+    Sends DM notification to bot owner on deletion.
+    Returns True if message was deleted by Night Mode, False otherwise.
+    """
+    if getattr(update, 'edited_message', None) or not update.message:
+        return False
+
+    msg = update.message
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not msg or not chat or chat.type not in ('group', 'supergroup'):
+        return False
+
+    if get_setting(chat.id, 'night_mode', 'off') not in ('on', 'true', '1'):
+        return False
+
+    if user and getattr(user, 'is_bot', False):
+        return False
+
+    if msg.sender_chat and (msg.sender_chat.type == 'channel' or msg.sender_chat.id == chat.id):
+        return False
+
+    if getattr(msg, 'is_automatic_forward', False):
+        return False
+
+    if msg.forward_from_chat and getattr(msg.forward_from_chat, 'type', '') == 'channel':
+        return False
+
+    log_chan_setting = get_setting(chat.id, 'log_channel', '') or get_setting(chat.id, 'logger_channel_id', '')
+    if log_chan_setting:
+        if msg.sender_chat and str(msg.sender_chat.id) == str(log_chan_setting):
+            return False
+        if msg.forward_from_chat and str(msg.forward_from_chat.id) == str(log_chan_setting):
+            return False
+
+    if user:
+        if is_owner_or_sudo(user.id):
+            return False
+        try:
+            if await is_admin(update, context):
+                return False
+        except Exception:
+            pass
+
+    detected_type = None
+
+    if msg.sticker:
+        if getattr(msg.sticker, 'is_animated', False):
+            detected_type = "Animated Sticker"
+        elif getattr(msg.sticker, 'is_video', False):
+            detected_type = "Video Sticker"
+        else:
+            detected_type = "Sticker"
+    elif msg.photo:
+        detected_type = "Photo"
+    elif msg.video:
+        detected_type = "Video"
+    elif msg.animation:
+        detected_type = "Animation (GIF)"
+    elif msg.audio:
+        detected_type = "Audio"
+    elif msg.voice:
+        detected_type = "Voice message"
+    elif msg.video_note:
+        detected_type = "Video note"
+    elif msg.document:
+        detected_type = "Document"
+
+    if not detected_type:
+        entities = (msg.entities or []) + (msg.caption_entities or [])
+        found_link = None
+        for ent in entities:
+            ent_type = getattr(ent, 'type', '')
+            if ent_type == 'url':
+                txt_src = msg.text or msg.caption or ''
+                found_link = txt_src[ent.offset:ent.offset + ent.length]
+                break
+            elif ent_type == 'text_link':
+                found_link = getattr(ent, 'url', 'Text Link')
+                break
+
+        if not found_link:
+            raw_text = msg.text or msg.caption or ''
+            match = re.search(r'(?:https?://|www\.|t\.me/)[^\s]+', raw_text, re.IGNORECASE)
+            if match:
+                found_link = match.group(0)
+
+        if found_link:
+            detected_type = f"Link ({found_link})"
+
+    if not detected_type:
+        return False
+
+    try:
+        await msg.delete()
+    except Exception as e:
+        logger.warning(f"Night Mode failed to delete message {msg.message_id} in chat {chat.id}: {e}")
+        return False
+
+    try:
+        log_admin_action(chat.id, user.id if user else 0, 'night_mode_delete', user.id if user else 0, details=detected_type)
+    except Exception as e:
+        logger.warning(f"Failed to log admin action for Night Mode deletion: {e}")
+
+    try:
+        await send_night_mode_owner_notification(context, chat, user, msg, detected_type)
+    except Exception as e:
+        logger.warning(f"Night Mode owner notification dispatch error: {e}")
+
+    return True
+
+
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     chat = update.effective_chat
@@ -527,6 +686,9 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_seen_cache[user.id] = now
         touch_member(chat.id, user.id, now, status='member')
         record_user_message(chat.id, user.id, msg.message_id)
+
+        if await process_night_mode(update, context):
+            return
 
         txt_check = (msg.text or msg.caption or '').strip()
         if txt_check and re.match(r'^@all(\s|$)', txt_check, re.IGNORECASE):
@@ -927,6 +1089,7 @@ def main():
         ('towhatsapp', towhatsapp_cmd, 'Utility Commands', 'Convert Telegram sticker pack to WhatsApp format', '/towhatsapp https://t.me/addstickers/pack_name'),
     ]
     admin_cmds = [
+        ('night', night_cmd, 'Group Management Commands', 'Toggle Night Mode in group', '/night on|off'),
         ('promote', promote_cmd, 'Group Management Commands', 'Promote a member to admin', '/promote'),
         ('tag', tag_cmd, 'Group Management Commands', 'Tag all eligible members in the group.', '/tag Good morning!'),
         ('all', tag_cmd, 'Group Management Commands', 'Tag all eligible members in the group.', '/all Good morning!'),

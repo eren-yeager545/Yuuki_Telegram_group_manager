@@ -1385,6 +1385,32 @@ async def cleanservice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f'Clean service set to {get_setting(update.effective_chat.id, "clean_service", "off")}.')
 
 
+async def night_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await admin_only(update, context):
+        return
+    chat_id = update.effective_chat.id
+    if context.args:
+        sub = context.args[0].lower().strip()
+        if sub == 'on':
+            set_setting(chat_id, 'night_mode', 'on')
+            await update.message.reply_text('🌙 Night Mode is now enabled for this group desu~! Media, stickers, and links sent by ordinary members will be automatically deleted. 🌸')
+            return
+        elif sub == 'off':
+            set_setting(chat_id, 'night_mode', 'off')
+            await update.message.reply_text('☀️ Night Mode is now disabled for this group! Members can send media, stickers, and links freely desu~ ✨')
+            return
+
+    current = get_setting(chat_id, 'night_mode', 'off')
+    status_str = "ON 🌙" if current in ('on', 'true', '1') else "OFF ☀️"
+    await update.message.reply_text(
+        f"🌙 <b>Night Mode Status:</b> {status_str}\n\n"
+        "Usage:\n"
+        "• <code>/night on</code> - Enable Night Mode in this group\n"
+        "• <code>/night off</code> - Disable Night Mode in this group",
+        parse_mode="HTML"
+    )
+
+
 async def zombies_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
