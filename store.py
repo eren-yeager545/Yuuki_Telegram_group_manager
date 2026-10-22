@@ -542,6 +542,56 @@ def get_setting(chat_id, key, default=None):
         return row[0] if row else default
 
 
+def get_safe_users(chat_id: int) -> list:
+    raw = get_setting(chat_id, 'safe_users', '')
+    if not raw:
+        return []
+    try:
+        import json
+        val = json.loads(raw)
+        if isinstance(val, list):
+            return [int(x) for x in val if str(x).lstrip('-').isdigit()]
+    except Exception:
+        pass
+    return [int(x.strip()) for x in str(raw).split(',') if x.strip().lstrip('-').isdigit()]
+
+
+def is_safe_user(chat_id: int, user_id: int) -> bool:
+    from config import OWNER_IDS, SUDO_USERS
+    if user_id in OWNER_IDS or user_id in SUDO_USERS:
+        return True
+    return user_id in get_safe_users(chat_id)
+
+
+def add_safe_user(chat_id: int, user_id: int) -> bool:
+    users = set(get_safe_users(chat_id))
+    users.add(user_id)
+    import json
+    set_setting(chat_id, 'safe_users', json.dumps(sorted(list(users))))
+    return True
+
+
+def remove_safe_user(chat_id: int, user_id: int) -> bool:
+    users = set(get_safe_users(chat_id))
+    users.discard(user_id)
+    import json
+    set_setting(chat_id, 'safe_users', json.dumps(sorted(list(users))))
+    return True
+
+
+def toggle_safe_user(chat_id: int, user_id: int) -> bool:
+    users = set(get_safe_users(chat_id))
+    if user_id in users:
+        users.remove(user_id)
+        is_added = False
+    else:
+        users.add(user_id)
+        is_added = True
+    import json
+    set_setting(chat_id, 'safe_users', json.dumps(sorted(list(users))))
+    return is_added
+
+
 def add_warn(chat_id, user_id, reason=''):
     if is_mongo():
         db = get_mongo_db()

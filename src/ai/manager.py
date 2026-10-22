@@ -1,3 +1,4 @@
+import config
 import logging
 import time
 import uuid
@@ -28,6 +29,7 @@ class AIProviderManager:
         openrouter_keys: List[str],
         key_cooldown_seconds: float = 300.0,
         gemini_model: Optional[str] = None,
+        groq_model: Optional[str] = None,
         openrouter_model: Optional[str] = None,
         owner_notifier_callback: Optional[Callable[[str], Any]] = None
     ):
@@ -38,7 +40,8 @@ class AIProviderManager:
         if gemini_keys:
             self.providers["gemini"] = GeminiProvider(gemini_keys, model=gemini_model)
         if groq_keys:
-            self.providers["groq"] = GroqProvider(groq_keys)
+            g_model = groq_model or getattr(config, "GROQ_MODEL", "openai/gpt-oss-120b")
+            self.providers["groq"] = GroqProvider(groq_keys, model=g_model)
         if openrouter_keys:
             self.providers["openrouter"] = OpenRouterProvider(openrouter_keys, model=openrouter_model)
 
