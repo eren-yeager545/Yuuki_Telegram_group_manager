@@ -1337,7 +1337,7 @@ def test_night_mode_complete_suite(monkeypatch):
         m.story = None
         m.paid_media = None
         m.sender_chat = None
-        m.forward_from_chat = None
+        m.forward_origin = None
         m.is_automatic_forward = False
         m.delete = AsyncMock()
 
@@ -1617,7 +1617,7 @@ def test_night_mode_handler_and_error_handling(monkeypatch):
     m.document = None
     m.entities = []
     m.sender_chat = None
-    m.forward_from_chat = None
+    m.forward_origin = None
     m.is_automatic_forward = False
     m.delete = AsyncMock()
 
@@ -1658,3 +1658,146 @@ def test_night_mode_handler_and_error_handling(monkeypatch):
         except ApplicationHandlerStop:
             pass
         m.delete.assert_called_once()
+
+
+def test_night_mode_forward_origins_and_content_regressions(monkeypatch):
+    import bot as bot_module
+    from unittest.mock import MagicMock, AsyncMock
+    import store
+    from telegram import Update, Chat, User, Message, MessageEntity, MessageOriginChannel, MessageOriginUser, MessageOriginChat, MessageOriginHiddenUser
+
+    chat_id = -100776655
+    store.set_setting(chat_id, "night_mode", "on")
+
+    context = MagicMock()
+    context.bot = AsyncMock()
+
+    def make_update():
+        u = MagicMock(spec=Update)
+        c = Chat(id=chat_id, type="supergroup", title="Night Group")
+        usr = User(id=998877, first_name="TestUser", is_bot=False)
+        m = MagicMock(spec=Message)
+        m.message_id = 555
+        m.chat = c
+        m.from_user = usr
+        m.text = None
+        m.caption = None
+        m.sticker = None
+        m.photo = None
+        m.video = None
+        m.animation = None
+        m.audio = None
+        m.voice = None
+        m.video_note = None
+        m.document = None
+        m.entities = []
+        m.caption_entities = []
+        m.story = None
+        m.paid_media = None
+        m.sender_chat = None
+        m.forward_origin = None
+        m.is_automatic_forward = False
+        m.delete = AsyncMock()
+
+        u.effective_chat = c
+        u.effective_user = usr
+        u.effective_message = m
+        u.message = m
+        u.edited_message = None
+        return u, m, c, usr
+
+    # 1. Channel origin forward -> EXEMPT
+    u, m, c, usr = make_update()
+    m.sticker = MagicMock(is_animated=False, is_video=False)
+    chan_chat = Chat(id=-100111222, type="channel", title="Channel Origin")
+    m.forward_origin = MessageOriginChannel(chat=chan_chat, message_id=10, date=None)
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is False
+    m.delete.assert_not_called()
+
+    # 2. User origin forward -> NOT exempt if contains media
+    u, m, c, usr = make_update()
+    m.photo = [MagicMock()]
+    m.forward_origin = MessageOriginUser(sender_user=usr, date=None)
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
+
+    # 3. Chat (supergroup) origin forward -> NOT exempt if contains media
+    u, m, c, usr = make_update()
+    group_chat = Chat(id=-100333444, type="supergroup", title="Another Group")
+    m.video = MagicMock()
+    m.forward_origin = MessageOriginChat(sender_chat=group_chat, date=None)
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
+
+    # 4. Hidden user origin forward -> NOT exempt if contains media
+    u, m, c, usr = make_update()
+    m.document = MagicMock()
+    m.forward_origin = MessageOriginHiddenUser(sender_user_name="Hidden", date=None)
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
+
+    # 5. Message without forward origin -> NOT exempt if contains media
+    u, m, c, usr = make_update()
+    m.animation = MagicMock()
+    m.forward_origin = None
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
+
+    # 6. Audio message -> Deleted when night mode on
+    u, m, c, usr = make_update()
+    m.audio = MagicMock()
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
+
+    # 7. Link message -> Deleted when night mode on
+    u, m, c, usr = make_update()
+    m.text = "Check out https://example.com"
+    m.entities = [MessageEntity(type=MessageEntity.URL, offset=10, length=19)]
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
+
+    # 8. Night mode OFF -> Media and Links NOT deleted
+    store.set_setting(chat_id, "night_mode", "off")
+    u, m, c, usr = make_update()
+    m.sticker = MagicMock(is_animated=False, is_video=False)
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is False
+    m.delete.assert_not_called()
+
+    # Reset night mode to ON for log channel tests
+    store.set_setting(chat_id, "night_mode", "on")
+
+    # 9. Configured log channel exemption via forward_origin
+    log_chan_id = "-100888999"
+    store.set_setting(chat_id, "log_channel", log_chan_id)
+    u, m, c, usr = make_update()
+    m.photo = [MagicMock()]
+    log_chat = Chat(id=int(log_chan_id), type="supergroup", title="Log Chan")
+    m.forward_origin = MessageOriginChat(sender_chat=log_chat, date=None)
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is False
+    m.delete.assert_not_called()
+
+    # 10. Configured log channel exemption via sender_chat
+    u, m, c, usr = make_update()
+    m.photo = [MagicMock()]
+    m.sender_chat = log_chat
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is False
+    m.delete.assert_not_called()
+
+    # 11. Safe user exemption (.safe list)
+    store.add_safe_user(chat_id, usr.id)
+    u, m, c, usr = make_update()
+    m.photo = [MagicMock()]
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is False
+    m.delete.assert_not_called()
+    store.remove_safe_user(chat_id, usr.id)

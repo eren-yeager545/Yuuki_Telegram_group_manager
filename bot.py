@@ -656,7 +656,11 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if getattr(msg, 'is_automatic_forward', False):
         return False
 
-    if msg.forward_from_chat and getattr(msg.forward_from_chat, 'type', '') == 'channel':
+    fwd_origin = getattr(msg, 'forward_origin', None)
+    fwd_chat = getattr(fwd_origin, 'chat', None) or getattr(fwd_origin, 'sender_chat', None)
+    fwd_type = getattr(fwd_origin, 'type', '')
+
+    if fwd_origin and (fwd_type == 'channel' or (fwd_chat and getattr(fwd_chat, 'type', '') == 'channel')):
         return False
 
     try:
@@ -664,7 +668,7 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if log_chan_setting:
             if msg.sender_chat and str(msg.sender_chat.id) == str(log_chan_setting):
                 return False
-            if msg.forward_from_chat and str(msg.forward_from_chat.id) == str(log_chan_setting):
+            if fwd_chat and str(fwd_chat.id) == str(log_chan_setting):
                 return False
     except Exception as e:
         logger.error(
