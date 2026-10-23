@@ -489,6 +489,67 @@ async def track_profile_update_handler(update: Update, context: ContextTypes.DEF
         logger.error(f"Error in track_profile_update_handler: {e}")
 
 
+async def get_group_owner_recipients(context: ContextTypes.DEFAULT_TYPE, chat) -> list:
+    recipients = []
+    setting_owner = get_setting(chat.id, 'group_owner_id', '') or get_setting(chat.id, 'owner_id', '')
+    if setting_owner and str(setting_owner).lstrip('-').isdigit():
+        recipients.append(int(setting_owner))
+
+    if not recipients:
+        grp = get_group_by_id(chat.id)
+        if grp and len(grp) >= 5 and grp[4]:
+            recipients.append(int(grp[4]))
+
+    if not recipients and context and getattr(context, 'bot', None):
+        try:
+            admins = await context.bot.get_chat_administrators(chat.id)
+            for adm in admins:
+                if getattr(adm, 'status', '') in ('creator', 'CREATOR'):
+                    recipients.append(int(adm.user.id))
+                    break
+        except Exception as e:
+            logger.warning(f"Failed to fetch chat admins to find group owner for {chat.id}: {e}")
+
+    if not recipients:
+        owner_ids = getattr(config, 'OWNER_IDS', [])
+        if not owner_ids and getattr(config, 'OWNER_ID', None):
+            owner_ids = [config.OWNER_ID]
+        recipients = [int(oid) for oid in owner_ids if oid]
+
+    res = []
+    for r in recipients:
+        if r not in res:
+            res.append(r)
+    return res
+
+
+async def send_night_mode_permission_error_notification(context: ContextTypes.DEFAULT_TYPE, chat, msg_id: int, exc_type: str, err_desc: str):
+    group_name = html.escape(chat.title or "Unknown Group")
+    group_id = chat.id
+
+    notification_text = (
+        "⚠️ <b>Night Mode Diagnostic Alert: Missing Permissions</b>\n\n"
+        f"<b>Group:</b> {group_name} (<code>{group_id}</code>)\n"
+        f"<b>Message ID:</b> <code>{msg_id}</code>\n"
+        f"<b>Exception Type:</b> <code>{html.escape(exc_type)}</code>\n"
+        f"<b>Error Description:</b> {html.escape(err_desc)}\n\n"
+        "<b>Diagnostic Notice:</b> Night Mode is enabled in this group, but the bot failed to delete a violating message because it lacks administrator permission to delete messages. "
+        "Please ensure the bot is an Administrator in the group with the 'Delete Messages' permission enabled."
+    )
+
+    recipients = await get_group_owner_recipients(context, chat)
+    for owner_id in recipients:
+        if owner_id:
+            try:
+                await context.bot.send_message(
+                    chat_id=owner_id,
+                    text=notification_text,
+                    parse_mode="HTML"
+                )
+            except Exception as err:
+                logger.warning(f"Could not send Night Mode permission error DM to group owner {owner_id}: {err}")
+
+
 async def send_night_mode_owner_notification(context: ContextTypes.DEFAULT_TYPE, chat, user, msg, detected_type: str):
     """
     Sends a private DM notification to the configured group owner when Night Mode deletes a message.
@@ -515,32 +576,7 @@ async def send_night_mode_owner_notification(context: ContextTypes.DEFAULT_TYPE,
         f"<b>Original Content:</b> {content_preview}"
     )
 
-    recipients = []
-    setting_owner = get_setting(chat.id, 'group_owner_id', '') or get_setting(chat.id, 'owner_id', '')
-    if setting_owner and str(setting_owner).lstrip('-').isdigit():
-        recipients.append(int(setting_owner))
-
-    if not recipients:
-        grp = get_group_by_id(chat.id)
-        if grp and len(grp) >= 5 and grp[4]:
-            recipients.append(grp[4])
-
-    if not recipients and context and getattr(context, 'bot', None):
-        try:
-            admins = await context.bot.get_chat_administrators(chat.id)
-            for adm in admins:
-                if getattr(adm, 'status', '') in ('creator', 'CREATOR'):
-                    recipients.append(adm.user.id)
-                    break
-        except Exception as e:
-            logger.warning(f"Failed to fetch chat admins to find group owner for {chat.id}: {e}")
-
-    if not recipients:
-        owner_ids = getattr(config, 'OWNER_IDS', [])
-        if not owner_ids and getattr(config, 'OWNER_ID', None):
-            owner_ids = [config.OWNER_ID]
-        recipients = [oid for oid in owner_ids if oid]
-
+    recipients = await get_group_owner_recipients(context, chat)
     for owner_id in recipients:
         if owner_id:
             try:
@@ -575,6 +611,15 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if user and getattr(user, 'is_bot', False):
         return False
+
+    # Do not delete Night Mode command/status messages or unrelated commands
+    txt_check = (msg.text or msg.caption or '').strip()
+    if txt_check.startswith('/') or txt_check.startswith('!'):
+        return False
+    if msg.entities:
+        for ent in msg.entities:
+            if getattr(ent, 'type', '') == 'bot_command' and ent.offset == 0:
+                return False
 
     if msg.sender_chat and (msg.sender_chat.type == 'channel' or msg.sender_chat.id == chat.id):
         return False
@@ -636,14 +681,20 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
         found_link = None
         txt_src = msg.text or msg.caption or ''
         for ent in entities:
-            ent_type = getattr(ent, 'type', '')
-            if ent_type == 'url':
+            ent_type = str(getattr(ent, 'type', ''))
+            if ent_type in ('url', 'MessageEntityType.URL') or ent_type == str(MessageEntity.URL):
                 try:
-                    found_link = txt_src[ent.offset:ent.offset + ent.length]
+                    if txt_src:
+                        b = txt_src.encode('utf-16-le')
+                        start = ent.offset * 2
+                        end = (ent.offset + ent.length) * 2
+                        found_link = b[start:end].decode('utf-16-le')
+                    else:
+                        found_link = "URL"
                 except Exception:
                     found_link = "URL"
                 break
-            elif ent_type == 'text_link':
+            elif ent_type in ('text_link', 'MessageEntityType.TEXT_LINK') or ent_type == str(MessageEntity.TEXT_LINK):
                 found_link = getattr(ent, 'url', None) or "Text Link"
                 break
 
@@ -661,7 +712,16 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         await msg.delete()
     except Exception as e:
-        logger.warning(f"Night Mode failed to delete message {msg.message_id} in chat {chat.id}: {e}")
+        exc_type = type(e).__name__
+        err_desc = str(e)
+        logger.error(
+            f"Night Mode failed to delete message ID {msg.message_id} in chat ID {chat.id} - "
+            f"ExceptionType: {exc_type}, Description: {err_desc}"
+        )
+        try:
+            await send_night_mode_permission_error_notification(context, chat, msg.message_id, exc_type, err_desc)
+        except Exception as notify_err:
+            logger.warning(f"Failed to dispatch Night Mode permission error notification to owner: {notify_err}")
         return False
 
     try:
@@ -1201,7 +1261,7 @@ def main():
     app.add_handler(CallbackQueryHandler(homepage_callback))
     app.add_handler(ChatMemberHandler(chat_member_router, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.StatusUpdate.ALL, service_router))
-    app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION | filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL | filters.ANIMATION | filters.VOICE | filters.AUDIO | filters.CONTACT, message_router))
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.StatusUpdate.ALL, message_router))
     if WEBHOOK_URL:
         url_path = WEBHOOK_PATH.lstrip('/')
         full_url = f"{WEBHOOK_URL.rstrip('/')}/{url_path}"
