@@ -9,7 +9,7 @@ from telegram.constants import ReactionEmoji
 from telegram.ext import ContextTypes
 import config
 import store
-from helpers import send_reply_with_custom_emoji
+from helpers import send_reply_with_custom_emoji, is_owner
 from store import get_all_stickers
 from src.ai import (
     YUKI_PERSONA,
@@ -467,7 +467,10 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
         # Read context safely under chat lock
         chat_lock = await context_manager.get_chat_lock(chat.id)
         async with chat_lock:
-            user_display = user.first_name or "Friend"
+            if is_owner(user.id, getattr(config, 'OWNER_IDS', [])):
+                user_display = "𓂀 𝑨𝒍𝒃𝒆𝒓𝒕 𝑰𝒏𝒇𝒆⃤𝒓𝒏𝒐 𓂀 (Creator/Owner)"
+            else:
+                user_display = user.first_name or "Friend"
             context_manager.add_message(chat.id, role="user", content=prompt, user_name=user_display)
             conversation_history = context_manager.get_context(chat.id)
 
