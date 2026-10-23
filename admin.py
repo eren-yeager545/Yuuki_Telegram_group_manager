@@ -2763,3 +2763,125 @@ async def packsem_callback_handler(update: Update, context: ContextTypes.DEFAULT
         except Exception:
             page = 0
         await send_packsem_packs_list(update, context, page=page, is_callback=True)
+
+
+async def normie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Command to remove a user from the group safe-users list.
+    Can be run as .normie or /normie.
+    Only group owner (creator status) or main bot owner can run this command.
+    """
+    if not update or not update.effective_chat or update.effective_chat.type not in ('group', 'supergroup'):
+        if update and update.effective_message:
+            await update.effective_message.reply_text('Gomen ne~ 🌸 This command can only be used inside group or supergroup chats desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
+        return
+
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user:
+        return
+
+    is_allowed = False
+    if is_owner(user.id, OWNER_IDS):
+        is_allowed = True
+    else:
+        try:
+            member = await context.bot.get_chat_member(chat.id, user.id)
+            if getattr(member, 'status', '') == 'creator':
+                is_allowed = True
+        except Exception:
+            is_allowed = False
+
+    if not is_allowed:
+        if update.effective_message:
+            await update.effective_message.reply_text('Gomen ne~ 🌸 Only the group owner or bot owner can manage safe users desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
+        return
+
+    target_user = await resolve_target_user(update, context)
+
+    if not target_user:
+        if update.effective_message:
+            await update.effective_message.reply_html(
+                '🌸 Please reply to a message, tag (@username), or specify a valid user ID/username to remove from safe users desu~ 💕'
+            )
+        return
+
+    target_id = target_user.id
+    target_name = getattr(target_user, 'first_name', None) or getattr(target_user, 'full_name', None) or str(target_id)
+    user_tag = format_user_tag(target_id, target_name)
+
+    if not is_safe_user(chat.id, target_id):
+        await update.effective_message.reply_html(
+            f'🌸 {user_tag} is not in the safe users list for this group desu~!'
+        )
+        return
+
+    try:
+        remove_safe_user(chat.id, target_id)
+        msg_str = f"🛡️ <b>Safe User Removed!</b> 🌸✨\n\n{user_tag} was removed from the safe users list in this group desu~! 💕"
+        await update.effective_message.reply_html(msg_str)
+    except Exception as e:
+        logger.error(f'Error removing safe user {target_id} in chat {chat.id}: {e}', exc_info=True)
+        await safe_reply_error(update.effective_message)
+
+
+async def slist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Command to display all safe users in the current group.
+    Can be run as .slist or /slist.
+    Only group owner (creator status) or main bot owner can run this command.
+    """
+    if not update or not update.effective_chat or update.effective_chat.type not in ('group', 'supergroup'):
+        if update and update.effective_message:
+            await update.effective_message.reply_text('Gomen ne~ 🌸 This command can only be used inside group or supergroup chats desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
+        return
+
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user:
+        return
+
+    is_allowed = False
+    if is_owner(user.id, OWNER_IDS):
+        is_allowed = True
+    else:
+        try:
+            member = await context.bot.get_chat_member(chat.id, user.id)
+            if getattr(member, 'status', '') == 'creator':
+                is_allowed = True
+        except Exception:
+            is_allowed = False
+
+    if not is_allowed:
+        if update.effective_message:
+            await update.effective_message.reply_text('Gomen ne~ 🌸 Only the group owner or bot owner can view safe users desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
+        return
+
+    try:
+        safe_uids = get_safe_users(chat.id)
+        if not safe_uids:
+            await update.effective_message.reply_html(
+                "🛡️ <b>Group Safe Users</b> 🌸✨\n\nThere are currently no safe users configured for this group."
+            )
+            return
+
+        lines = ["🛡️ <b>Group Safe Users List:</b> 🌸✨", ""]
+        for uid in safe_uids:
+            u_info = get_user_by_id(uid)
+            if u_info:
+                u_name = html.escape(u_info[1] or f"User {uid}")
+                u_uname = f" (@{u_info[2]})" if u_info[2] else ""
+            else:
+                u_name = f"User {uid}"
+                u_uname = ""
+            lines.append(f"• {u_name}{u_uname} (<code>{uid}</code>)")
+
+        out_text = "\n".join(lines)
+        if len(out_text) > 4000:
+            for i in range(0, len(out_text), 4000):
+                await update.effective_message.reply_html(out_text[i:i+4000], disable_web_page_preview=True)
+        else:
+            await update.effective_message.reply_html(out_text, disable_web_page_preview=True)
+    except Exception as e:
+        logger.error(f"Error listing safe users in chat {chat.id}: {e}", exc_info=True)
+        await safe_reply_error(update.effective_message)
