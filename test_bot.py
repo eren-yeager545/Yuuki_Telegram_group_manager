@@ -1503,7 +1503,7 @@ def test_night_mode_complete_suite(monkeypatch):
     m.photo = [MagicMock()]
     m.delete = AsyncMock(side_effect=Exception("Telegram permission denied"))
     res = asyncio.run(bot_module.process_night_mode(u, context))
-    assert res is True
+    assert res is False
     bot.send_message.assert_called_once()
     assert "Missing Permissions" in bot.send_message.call_args[1]["text"]
 
@@ -1580,3 +1580,81 @@ def test_night_mode_complete_suite(monkeypatch):
     res = asyncio.run(bot_module.process_night_mode(u, context))
     assert res is False
     m.delete.assert_not_called()
+
+
+
+def test_night_mode_handler_and_error_handling(monkeypatch):
+    import bot as bot_module
+    from unittest.mock import MagicMock, AsyncMock, patch
+    import store
+    from telegram.ext import ApplicationHandlerStop
+    from telegram import Update, Chat, User, Message
+
+    chat_id = -100998877
+    store.set_setting(chat_id, "night_mode", "on")
+
+    context = MagicMock()
+    bot = AsyncMock()
+    context.bot = bot
+
+    # 1. Test ApplicationHandlerStop raised when Night Mode deletes a message
+    u = MagicMock(spec=Update)
+    c = Chat(id=chat_id, type="supergroup", title="Test Group")
+    usr = User(id=12345, first_name="NormalUser", is_bot=False)
+    m = MagicMock(spec=Message)
+    m.message_id = 999
+    m.chat = c
+    m.from_user = usr
+    m.text = None
+    m.caption = None
+    m.sticker = MagicMock(is_animated=False, is_video=False)
+    m.photo = None
+    m.video = None
+    m.animation = None
+    m.audio = None
+    m.voice = None
+    m.video_note = None
+    m.document = None
+    m.entities = []
+    m.sender_chat = None
+    m.forward_from_chat = None
+    m.is_automatic_forward = False
+    m.delete = AsyncMock()
+
+    u.effective_chat = c
+    u.effective_user = usr
+    u.effective_message = m
+    u.message = m
+    u.edited_message = None
+
+    try:
+        asyncio.run(bot_module.night_mode_message_handler(u, context))
+        assert False, "Should have raised ApplicationHandlerStop"
+    except ApplicationHandlerStop:
+        pass
+    m.delete.assert_called_once()
+
+    # 2. Test DB failure during process_night_mode setting check
+    m.delete.reset_mock()
+    with patch("store.get_setting", side_effect=Exception("Database Connection Timeout")):
+        res = asyncio.run(bot_module.process_night_mode(u, context))
+        assert res is False
+        m.delete.assert_not_called()
+
+    # 3. Test NightModeError in error_handler suppresses group "Oopsie!" reply
+    err = bot_module.NightModeError("Test failure", chat_id=chat_id, message_id=999, stage="db_check")
+    context.error = err
+    reply_mock = AsyncMock()
+    m.reply_text = reply_mock
+
+    asyncio.run(bot_module.error_handler(u, context))
+    reply_mock.assert_not_called()
+
+    # 4. Test pre-message_router DB failure independence
+    m.delete.reset_mock()
+    with patch.object(bot_module, 'handle_broadcast_content', side_effect=RuntimeError('DB Error in broadcast')):
+        try:
+            asyncio.run(bot_module.night_mode_message_handler(u, context))
+        except ApplicationHandlerStop:
+            pass
+        m.delete.assert_called_once()
