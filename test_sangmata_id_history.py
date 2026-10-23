@@ -239,3 +239,174 @@ async def test_id_cmd():
 
     await admin.id_cmd(update, context)
     update.message.reply_text.assert_called_once_with("User ID: 777\nChat ID: -100999")
+
+
+import mongomock
+
+@pytest.mark.asyncio
+async def test_save_profile_snapshot_mongodb(monkeypatch):
+    client = mongomock.MongoClient()
+    mock_db = client['test_db']
+    monkeypatch.setattr(store, 'is_mongo', lambda: True)
+    monkeypatch.setattr(store, 'get_mongo_db', lambda: mock_db)
+
+    chat_id = -100888
+    user_id = 5555
+
+    # First save
+    store.save_profile_snapshot(chat_id, user_id, 'Alice', 'Mongo', 'alice_m')
+    snap = store.get_profile_snapshot(chat_id, user_id)
+    assert snap is not None
+    assert snap['first_name'] == 'Alice'
+    assert snap['last_name'] == 'Mongo'
+    assert snap['username'] == 'alice_m'
+
+    # Update save
+    store.save_profile_snapshot(chat_id, user_id, 'Alice', 'Updated', 'alice_m2')
+    snap2 = store.get_profile_snapshot(chat_id, user_id)
+    assert snap2['last_name'] == 'Updated'
+    assert snap2['username'] == 'alice_m2'
+
+
+@pytest.mark.asyncio
+async def test_track_profile_update_handler_exception_logging(monkeypatch):
+    chat = MagicMock(type='supergroup', id=-100123)
+    user = make_user(uid=111, is_bot=False)
+    update = MagicMock(spec=Update)
+    update.effective_chat = chat
+    update.effective_user = user
+    update.effective_message = MagicMock(new_chat_members=[])
+
+    context = make_context()
+
+    async def raise_err(*args, **kwargs):
+        raise RuntimeError("Database connection lost")
+
+    monkeypatch.setattr(bot, 'check_and_track_profile_change', raise_err)
+    logged_errors = []
+
+    def mock_log_error(msg, *args, **kwargs):
+        logged_errors.append((msg, kwargs.get('exc_info')))
+
+    monkeypatch.setattr(bot.logger, 'error', mock_log_error)
+
+    # Execution should NOT raise exception
+    await bot.track_profile_update_handler(update, context)
+
+    assert len(logged_errors) == 1
+    assert "Error in track_profile_update_handler" in logged_errors[0][0]
+    assert logged_errors[0][1] is True
+
+
+@pytest.mark.asyncio
+async def test_handler_registration_groups(monkeypatch):
+    recorded_handlers = []
+
+    class MockApp:
+        def __init__(self):
+            self.bot_data = {}
+        def add_handler(self, handler, group=0):
+            recorded_handlers.append((handler, group))
+
+    mock_app = MockApp()
+    monkeypatch.setattr(bot, 'add_registered_command', lambda *a, **kw: None)
+    monkeypatch.setattr(bot, 'register_help', lambda *a, **kw: None)
+
+    # Simulate setup in bot.py where handlers are registered
+    mock_app.add_handler(bot.MessageHandler(bot.filters.ALL & ~bot.filters.StatusUpdate.ALL, bot.night_mode_message_handler), group=-2)
+    mock_app.add_handler(bot.TypeHandler(bot.Update, bot.track_profile_update_handler), group=-1)
+
+    nm_handler = next(h for h, g in recorded_handlers if g == -2)
+    tp_handler = next(h for h, g in recorded_handlers if g == -1)
+
+    assert nm_handler.callback == bot.night_mode_message_handler
+    assert tp_handler.callback == bot.track_profile_update_handler
+
+
+@pytest.mark.asyncio
+async def test_night_mode_on_off_deletion_behavior(monkeypatch):
+    chat_id = -100777
+    user_id = 8888
+
+    # Ensure user is NOT safe user
+    monkeypatch.setattr(store, 'is_safe_user', lambda c, u: False)
+
+    context = make_context()
+
+    # 1. Enable Night Mode
+    store.set_setting(chat_id, 'night_mode', 'on')
+    assert store.get_setting(chat_id, 'night_mode') == 'on'
+
+    # Create message with sticker
+    msg_sticker = MagicMock()
+    msg_sticker.message_id = 101
+    msg_sticker.sticker = MagicMock(is_animated=False, is_video=False)
+    msg_sticker.photo = None
+    msg_sticker.video = None
+    msg_sticker.document = None
+    msg_sticker.animation = None
+    msg_sticker.audio = None
+    msg_sticker.voice = None
+    msg_sticker.video_note = None
+    msg_sticker.story = None
+    msg_sticker.paid_media = None
+    msg_sticker.sender_chat = None
+    msg_sticker.forward_from_chat = None
+    msg_sticker.is_automatic_forward = False
+    msg_sticker.text = None
+    msg_sticker.caption = None
+    msg_sticker.entities = []
+    msg_sticker.delete = AsyncMock()
+
+    up_sticker = MagicMock(spec=Update)
+    up_sticker.message = msg_sticker
+    up_sticker.edited_message = None
+    up_sticker.effective_chat = MagicMock(type='supergroup', id=chat_id)
+    up_sticker.effective_user = make_user(uid=user_id, is_bot=False)
+    up_sticker.effective_message = msg_sticker
+
+    deleted_sticker = await bot.process_night_mode(up_sticker, context)
+    assert deleted_sticker is True
+    msg_sticker.delete.assert_called_once()
+
+    # Create message with link
+    msg_link = MagicMock()
+    msg_link.message_id = 102
+    msg_link.sticker = None
+    msg_link.photo = None
+    msg_link.video = None
+    msg_link.document = None
+    msg_link.animation = None
+    msg_link.audio = None
+    msg_link.voice = None
+    msg_link.video_note = None
+    msg_link.story = None
+    msg_link.paid_media = None
+    msg_link.sender_chat = None
+    msg_link.forward_from_chat = None
+    msg_link.is_automatic_forward = False
+    msg_link.text = 'Check out https://example.com'
+    msg_link.caption = None
+    entity_url = MagicMock(type='url', offset=10, length=19)
+    msg_link.entities = [entity_url]
+    msg_link.delete = AsyncMock()
+
+    up_link = MagicMock(spec=Update)
+    up_link.message = msg_link
+    up_link.edited_message = None
+    up_link.effective_chat = MagicMock(type='supergroup', id=chat_id)
+    up_link.effective_user = make_user(uid=user_id, is_bot=False)
+    up_link.effective_message = msg_link
+
+    deleted_link = await bot.process_night_mode(up_link, context)
+    assert deleted_link is True
+    msg_link.delete.assert_called_once()
+
+    # 2. Disable Night Mode
+    store.set_setting(chat_id, 'night_mode', 'off')
+    assert store.get_setting(chat_id, 'night_mode') == 'off'
+
+    msg_sticker.delete.reset_mock()
+    deleted_off = await bot.process_night_mode(up_sticker, context)
+    assert deleted_off is False
+    msg_sticker.delete.assert_not_called()
