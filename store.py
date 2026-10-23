@@ -557,9 +557,6 @@ def get_safe_users(chat_id: int) -> list:
 
 
 def is_safe_user(chat_id: int, user_id: int) -> bool:
-    from config import OWNER_IDS, SUDO_USERS
-    if user_id in OWNER_IDS or user_id in SUDO_USERS:
-        return True
     return user_id in get_safe_users(chat_id)
 
 

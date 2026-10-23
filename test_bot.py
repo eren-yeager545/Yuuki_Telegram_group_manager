@@ -1391,15 +1391,23 @@ def test_night_mode_complete_suite(monkeypatch):
     m.delete.assert_not_called()
     bot.send_message.assert_not_called()
 
-    # 4. Test Exemptions
-    # Admin/Safe user -> NOT deleted
+    # 4. Test Admin & Privileged User Non-Exemption (Admin/Owner/Sudo without .safe MUST be deleted)
     bot.send_message.reset_mock()
     u, m = make_user_msg_update()
     u.effective_user = User(id=admin_id, first_name="AdminUser", is_bot=False)
-    m.sticker = MagicMock()
+    m.sticker = MagicMock(is_animated=False, is_video=False)
     res = asyncio.run(bot_module.process_night_mode(u, context))
-    assert res is False
-    m.delete.assert_not_called()
+    assert res is True
+    m.delete.assert_called_once()
+
+    # Bot Owner without .safe MUST be deleted
+    bot.send_message.reset_mock()
+    u, m = make_user_msg_update()
+    u.effective_user = User(id=owner_id, first_name="BotOwner", is_bot=False)
+    m.photo = [MagicMock()]
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
 
     # Bot user -> NOT deleted
     bot.send_message.reset_mock()
@@ -1473,6 +1481,17 @@ def test_night_mode_complete_suite(monkeypatch):
     assert res is False
     m.delete.assert_not_called()
 
+    # Group-specific safe list check: user is safe in chat_id but NOT in chat_id_other
+    assert store.is_safe_user(chat_id, user_id) is True
+    assert store.is_safe_user(chat_id_other, user_id) is False
+    store.set_setting(chat_id_other, "night_mode", "on")
+    u_other, m_other = make_user_msg_update()
+    u_other.effective_chat = Chat(id=chat_id_other, type="supergroup", title="Group B")
+    m_other.sticker = MagicMock(is_animated=False, is_video=False)
+    res_other = asyncio.run(bot_module.process_night_mode(u_other, context))
+    assert res_other is True
+    m_other.delete.assert_called_once()
+
     # Toggle safe user off
     asyncio.run(admin.safe_cmd(u_safe, context))
     assert store.is_safe_user(chat_id, user_id) is False
@@ -1484,7 +1503,7 @@ def test_night_mode_complete_suite(monkeypatch):
     m.photo = [MagicMock()]
     m.delete = AsyncMock(side_effect=Exception("Telegram permission denied"))
     res = asyncio.run(bot_module.process_night_mode(u, context))
-    assert res is False
+    assert res is True
     bot.send_message.assert_called_once()
     assert "Missing Permissions" in bot.send_message.call_args[1]["text"]
 

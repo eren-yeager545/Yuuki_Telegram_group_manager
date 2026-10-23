@@ -10,7 +10,7 @@ import time
 import uuid
 from typing import Optional
 from collections import defaultdict, deque
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, MessageEntity
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, ChatMemberHandler, TypeHandler, filters
 from logger_helper import log_user_started_event, log_group_added_event, log_group_removed_event, log_user_joined_group_event, send_logger_notification
 import config
@@ -614,7 +614,7 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # Do not delete Night Mode command/status messages or unrelated commands
     txt_check = (msg.text or msg.caption or '').strip()
-    if txt_check.startswith('/') or txt_check.startswith('!'):
+    if txt_check.startswith("/") or txt_check.startswith("!") or txt_check.startswith("."):
         return False
     if msg.entities:
         for ent in msg.entities:
@@ -638,13 +638,6 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return False
 
     if user:
-        if is_owner_or_sudo(user.id):
-            return False
-        try:
-            if await is_admin(update, context):
-                return False
-        except Exception:
-            pass
         if store.is_safe_user(chat.id, user.id):
             return False
 
@@ -716,13 +709,14 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
         err_desc = str(e)
         logger.error(
             f"Night Mode failed to delete message ID {msg.message_id} in chat ID {chat.id} - "
-            f"ExceptionType: {exc_type}, Description: {err_desc}"
+            f"ExceptionType: {exc_type}, Description: {err_desc}",
+            exc_info=True
         )
         try:
             await send_night_mode_permission_error_notification(context, chat, msg.message_id, exc_type, err_desc)
         except Exception as notify_err:
             logger.warning(f"Failed to dispatch Night Mode permission error notification to owner: {notify_err}")
-        return False
+        return True
 
     try:
         log_admin_action(chat.id, user.id if user else 0, 'night_mode_delete', user.id if user else 0, details=detected_type)
