@@ -68,3 +68,6 @@ class AIProvider:
         **kwargs
     ) -> AIResponse:
         raise NotImplementedError("Subclasses must implement generate_response")
+
+    async def close(self) -> None:
+        pass

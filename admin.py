@@ -16,7 +16,7 @@ from store import (
     list_notes, list_quizzes, list_warned_users, log_admin_action, remove_blacklist,
     reset_warns, save_buttons, save_filter, save_note, set_chat_federation, set_setting,
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
-    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members
+    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members, get_safe_users, is_safe_user, add_safe_user, remove_safe_user, toggle_safe_user
 )
 from helpers import is_admin, is_owner, is_owner_or_sudo, safe_reply_error, create_custom_emoji_entities, send_reply_with_custom_emoji
 logger = logging.getLogger(__name__)
@@ -1383,6 +1383,78 @@ async def cleanservice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     set_setting(update.effective_chat.id, 'clean_service', context.args[0] if context.args and context.args[0] in ('on', 'off') else 'on')
     await update.message.reply_text(f'Clean service set to {get_setting(update.effective_chat.id, "clean_service", "off")}.')
+
+
+async def safe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Command to manage group safe users exempt from Night Mode.
+    Can be run as .safe or /safe.
+    Only group owner (creator status) or bot owner (is_owner_or_sudo) can run this command.
+    """
+    if not update or not update.effective_chat or update.effective_chat.type not in ('group', 'supergroup'):
+        if update and update.effective_message:
+            await update.effective_message.reply_text('Gomen ne~ 🌸 This command can only be used inside group or supergroup chats desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
+        return
+
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user:
+        return
+
+    is_allowed = False
+    if is_owner_or_sudo(user.id):
+        is_allowed = True
+    else:
+        try:
+            member = await context.bot.get_chat_member(chat.id, user.id)
+            if getattr(member, 'status', '') == 'creator':
+                is_allowed = True
+        except Exception:
+            is_allowed = False
+
+    if not is_allowed:
+        if update.effective_message:
+            await update.effective_message.reply_text('Gomen ne~ 🌸 Only the group owner or bot owner can manage safe users desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
+        return
+
+    target_user = await resolve_target_user(update, context)
+
+    if target_user:
+        target_id = target_user.id
+        target_name = getattr(target_user, 'first_name', None) or getattr(target_user, 'full_name', None) or str(target_id)
+        user_tag = format_user_tag(target_id, target_name)
+
+        is_added = toggle_safe_user(chat.id, target_id)
+        if is_added:
+            await update.effective_message.reply_html(
+                f"🛡️ <b>Safe User Added!</b> 🌸✨\n\n"
+                f"{user_tag} is now marked as a safe user in this group and will be exempt from Night Mode restrictions desu~! 💕"
+            )
+        else:
+            await update.effective_message.reply_html(
+                f"🛡️ <b>Safe User Removed!</b> 🌸✨\n\n"
+                f"{user_tag} was removed from the safe users list in this group desu~! 💕"
+            )
+    else:
+        safe_uids = get_safe_users(chat.id)
+        if not safe_uids:
+            await update.effective_message.reply_html(
+                "🛡️ <b>Group Safe Users</b> 🌸✨\n\n"
+                "There are currently no safe users configured for this group.\n\n"
+                "<b>Usage:</b>\n"
+                "• <code>.safe @username</code> - Toggle safe status for user\n"
+                "• Reply to a message with <code>.safe</code> to toggle safe status"
+            )
+        else:
+            lines = ["🛡️ <b>Group Safe Users List:</b> 🌸✨", ""]
+            for uid in safe_uids:
+                u_info = get_user_by_id(uid)
+                u_name = u_info[1] if u_info else f"User {uid}"
+                u_uname = u_info[2] if u_info else None
+                tag = format_user_tag(uid, u_name, u_uname)
+                lines.append(f"• {tag} (<code>{uid}</code>)")
+            lines.append("\nUsage: Reply to a user or pass <code>@username</code> with <code>.safe</code> to toggle safe user status desu!")
+            await update.effective_message.reply_html("\n".join(lines))
 
 
 async def night_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

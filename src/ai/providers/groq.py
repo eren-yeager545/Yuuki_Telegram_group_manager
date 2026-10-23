@@ -50,7 +50,7 @@ def _classify_groq_error(status: int, err_detail: str) -> tuple[ProviderErrorCod
 class GroqProvider(AIProvider):
     name: str = "groq"
 
-    def __init__(self, api_keys: List[str], model: str = "llama-3.3-70b-versatile"):
+    def __init__(self, api_keys: List[str], model: str = "openai/gpt-oss-120b"):
         super().__init__(api_keys)
         self.model = model
 
@@ -173,3 +173,6 @@ class GroqProvider(AIProvider):
                 suggested_cooldown=cooldown,
                 raw_error=resp
             )
+
+    async def close(self) -> None:
+        pass

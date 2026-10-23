@@ -165,7 +165,7 @@ async def test_provider_manager_fallback_on_gemini_read_timeout():
 
     # Groq succeeds
     mgr.providers["groq"].generate_response_with_key = AsyncMock(
-        return_value=AIResponse(text="Success from Groq fallback!", provider="groq", model="llama-3.3-70b-versatile")
+        return_value=AIResponse(text="Success from Groq fallback!", provider="groq", model="openai/gpt-oss-120b")
     )
 
     resp = await mgr.chat(messages=[{"role": "user", "content": "hello"}], system_prompt="test")
@@ -1086,7 +1086,7 @@ async def test_provider_failover_after_openrouter_failure():
          patch.object(GroqProvider, "generate_response_with_key", new_callable=AsyncMock) as mock_groq:
 
         mock_openrouter.side_effect = AIProviderError("Empty response", error_code=ProviderErrorCode.EMPTY_RESPONSE)
-        mock_groq.return_value = AIResponse(text="Groq response desu!", provider="groq", model="llama-3.3-70b-versatile")
+        mock_groq.return_value = AIResponse(text="Groq response desu!", provider="groq", model="openai/gpt-oss-120b")
 
         resp = await manager.chat(messages=[{"role": "user", "content": "hello"}], system_prompt="")
 
@@ -1161,7 +1161,7 @@ async def test_gemini_timeout_failover_to_next_key_and_groq(caplog):
             AIProviderError("Gemini API timeout for model 'gemini-2.5-flash': ReadTimeout", error_code=ProviderErrorCode.TIMEOUT, suggested_cooldown=30.0),
             AIProviderError("Gemini API timeout for model 'gemini-2.5-flash': ReadTimeout", error_code=ProviderErrorCode.TIMEOUT, suggested_cooldown=30.0),
         ]
-        mock_groq.return_value = AIResponse(text="Groq response after Gemini timeout!", provider="groq", model="llama-3.3-70b-versatile")
+        mock_groq.return_value = AIResponse(text="Groq response after Gemini timeout!", provider="groq", model="openai/gpt-oss-120b")
 
         with caplog.at_level(logging.INFO):
             resp = await manager.chat(messages=[{"role": "user", "content": "hello"}], system_prompt="")
@@ -1264,7 +1264,7 @@ async def test_provider_failover_chain():
         side_effect=AIProviderError("ReadTimeout", error_code=ProviderErrorCode.TIMEOUT)
     )
     mgr.providers["groq"].generate_response_with_key = AsyncMock(
-        return_value=AIResponse(text="Success from Groq!", provider="groq", model="llama-3.3-70b-versatile")
+        return_value=AIResponse(text="Success from Groq!", provider="groq", model="openai/gpt-oss-120b")
     )
 
     resp = await mgr.chat(messages=[{"role": "user", "content": "hi"}], system_prompt="", timeout=10.0)
@@ -1360,7 +1360,7 @@ async def test_global_deadline_respected():
 
     async def mock_groq(api_key, timeout, **kwargs):
         passed_timeouts.append(("groq", timeout))
-        return AIResponse(text="Groq success", provider="groq", model="llama-3.3-70b-versatile")
+        return AIResponse(text="Groq success", provider="groq", model="openai/gpt-oss-120b")
 
     mgr.providers["openrouter"].generate_response_with_key = AsyncMock(side_effect=mock_or)
     mgr.providers["gemini"].generate_response_with_key = AsyncMock(side_effect=mock_gemini)
@@ -1450,3 +1450,94 @@ async def test_concurrent_ai_handling():
         # Confirm failure on fail_req did not cancel req1 or req3
         ctx_messages = context_manager.get_context(12345)
         assert len(ctx_messages) > 0
+
+
+@pytest.mark.asyncio
+async def test_groq_provider_success_and_payload():
+    secret_key = "gsk_test_secret_key_123"
+    provider = GroqProvider(api_keys=[secret_key], model="openai/gpt-oss-120b")
+    assert provider.model == "openai/gpt-oss-120b"
+
+    mock_response = MagicMock(spec=httpx.Response)
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello from Groq GPT-OSS 120B!"
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18}
+    }
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+
+        resp = await provider.generate_response_with_key(
+            api_key=secret_key,
+            messages=[{"role": "user", "content": "Hello!"}],
+            system_prompt="You are Yuki."
+        )
+
+        assert resp.text == "Hello from Groq GPT-OSS 120B!"
+        assert resp.provider == "groq"
+        assert resp.model == "openai/gpt-oss-120b"
+        assert resp.usage == {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18}
+
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args[1]
+        assert mock_post.call_args[0][0] == "https://api.groq.com/openai/v1/chat/completions"
+        assert call_kwargs["headers"]["Authorization"] == f"Bearer {secret_key}"
+        assert call_kwargs["json"]["model"] == "openai/gpt-oss-120b"
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_groq_provider_401_error_and_secret_redaction():
+    secret_key = "gsk_invalid_secret_key"
+    provider = GroqProvider(api_keys=[secret_key])
+    assert provider.model == "openai/gpt-oss-120b"
+
+    mock_response = MagicMock(spec=httpx.Response)
+    mock_response.status_code = 401
+    mock_response.text = f"Invalid API key provided: {secret_key}"
+    req_mock = MagicMock(spec=httpx.Request)
+    mock_response.request = req_mock
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_response
+
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key(
+                api_key=secret_key,
+                messages=[{"role": "user", "content": "hi"}],
+                system_prompt=""
+            )
+
+        err_str = str(exc_info.value)
+        assert secret_key not in err_str
+        assert "[REDACTED]" in err_str or "401" in err_str
+        assert exc_info.value.error_code == ProviderErrorCode.AUTHENTICATION_ERROR
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_groq_provider_timeout():
+    provider = GroqProvider(api_keys=["gsk_k1"])
+    req_mock = MagicMock(spec=httpx.Request)
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.side_effect = httpx.ReadTimeout("Read timeout", request=req_mock)
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key(
+                api_key="gsk_k1",
+                messages=[{"role": "user", "content": "hello"}],
+                system_prompt=""
+            )
+        assert exc_info.value.error_code == ProviderErrorCode.TIMEOUT
+
+    await provider.close()

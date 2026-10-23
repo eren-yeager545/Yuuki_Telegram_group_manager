@@ -32,6 +32,7 @@ raw_openrouter_keys = os.getenv('OPENROUTER_API_KEYS') or os.getenv('OPENROUTER_
 OPENROUTER_API_KEYS = [x.strip() for x in raw_openrouter_keys.split(',') if x.strip()]
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash').strip() or 'gemini-2.5-flash'
 OPENROUTER_MODEL = os.getenv('OPENROUTER_MODEL', 'openrouter/free').strip() or 'openrouter/free'
+GROQ_MODEL = os.getenv('GROQ_MODEL', 'openai/gpt-oss-120b').strip() or 'openai/gpt-oss-120b'
 
 AI_MAX_CONTEXT_MESSAGES = int(os.getenv('AI_MAX_CONTEXT_MESSAGES', '10') or 10)
 AI_MAX_OUTPUT_TOKENS = int(os.getenv('AI_MAX_OUTPUT_TOKENS', '150') or 150)

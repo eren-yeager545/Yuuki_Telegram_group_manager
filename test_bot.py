@@ -1283,6 +1283,7 @@ def test_night_mode_complete_suite(monkeypatch):
 
     monkeypatch.setattr(admin, "is_admin", mock_is_admin)
     monkeypatch.setattr(bot_module, "is_admin", mock_is_admin)
+    store.remove_safe_user(chat_id, user_id)
 
     # 1. Test /night on and /night off commands & status
     up, msg = make_admin_update(["on"])
@@ -1333,6 +1334,8 @@ def test_night_mode_complete_suite(monkeypatch):
         m.document = None
         m.entities = []
         m.caption_entities = []
+        m.story = None
+        m.paid_media = None
         m.sender_chat = None
         m.forward_from_chat = None
         m.is_automatic_forward = False
@@ -1425,7 +1428,65 @@ def test_night_mode_complete_suite(monkeypatch):
     assert res is True
     m.delete.assert_called_once()
 
-    # 6. Test .safe Mode & Edited Message Independence
+    # 6. Test .safe Command & Safe User Exemptions
+    bot.send_message.side_effect = None
+    bot.send_message.reset_mock()
+
+    # Non-owner running .safe command -> rejected
+    u_safe, msg_safe = make_admin_update([])
+    u_safe.effective_user = User(id=admin_id, first_name="Admin", is_bot=False)
+    async def mock_get_chat_member(c_id, u_id):
+        m = MagicMock()
+        m.status = "administrator" if u_id == admin_id else "member"
+        return m
+    bot.get_chat_member = AsyncMock(side_effect=mock_get_chat_member)
+    msg_safe.reply_text = AsyncMock()
+    msg_safe.reply_html = AsyncMock()
+    asyncio.run(admin.safe_cmd(u_safe, context))
+    msg_safe.reply_text.assert_called_once()
+    assert "Only the group owner" in msg_safe.reply_text.call_args[0][0]
+
+    # Group Creator running .safe command -> adds target as safe user
+    u_safe, msg_safe = make_admin_update([])
+    u_safe.effective_user = User(id=77777, first_name="GroupOwner", is_bot=False)
+    async def mock_get_creator(c_id, u_id):
+        m = MagicMock()
+        m.status = "creator" if u_id == 77777 else "member"
+        return m
+    bot.get_chat_member = AsyncMock(side_effect=mock_get_creator)
+    msg_safe.reply_html = AsyncMock()
+
+    safe_target = User(id=user_id, first_name="NormalUser", is_bot=False)
+    async def mock_resolve_target(up, ctx):
+        return safe_target
+    monkeypatch.setattr(admin, "resolve_target_user", mock_resolve_target)
+
+    asyncio.run(admin.safe_cmd(u_safe, context))
+    assert store.is_safe_user(chat_id, user_id) is True
+    msg_safe.reply_html.assert_called_once()
+    assert "Safe User Added" in msg_safe.reply_html.call_args[0][0]
+
+    # Safe user sending sticker in Night Mode -> NOT deleted
+    u, m = make_user_msg_update()
+    m.sticker = MagicMock(is_animated=False, is_video=False)
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is False
+    m.delete.assert_not_called()
+
+    # Toggle safe user off
+    asyncio.run(admin.safe_cmd(u_safe, context))
+    assert store.is_safe_user(chat_id, user_id) is False
+
+    # 7. Test Message Deletion Failure Handling
+    bot.send_message.reset_mock()
+    u, m = make_user_msg_update()
+    m.photo = [MagicMock()]
+    m.delete = AsyncMock(side_effect=Exception("Telegram permission denied"))
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is False
+    bot.send_message.assert_not_called()
+
+    # 8. Test Edited Message Independence
     bot.send_message.side_effect = None
     bot.send_message.reset_mock()
     u, m = make_user_msg_update(is_edited=True)
