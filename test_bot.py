@@ -1668,6 +1668,8 @@ def test_night_mode_forward_origins_and_content_regressions(monkeypatch):
 
     chat_id = -100776655
     store.set_setting(chat_id, "night_mode", "on")
+    store.set_setting(chat_id, "log_channel", "")
+    store.set_setting(chat_id, "logger_channel_id", "")
 
     context = MagicMock()
     context.bot = AsyncMock()
@@ -1706,14 +1708,14 @@ def test_night_mode_forward_origins_and_content_regressions(monkeypatch):
         u.edited_message = None
         return u, m, c, usr
 
-    # 1. Channel origin forward -> EXEMPT
+    # 1. Channel origin forward -> DELETED in Night Mode
     u, m, c, usr = make_update()
-    m.sticker = MagicMock(is_animated=False, is_video=False)
+    m.text = "Plain text channel forward"
     chan_chat = Chat(id=-100111222, type="channel", title="Channel Origin")
     m.forward_origin = MessageOriginChannel(chat=chan_chat, message_id=10, date=None)
     res = asyncio.run(bot_module.process_night_mode(u, context))
-    assert res is False
-    m.delete.assert_not_called()
+    assert res is True
+    m.delete.assert_called_once()
 
     # 2. User origin forward -> NOT exempt if contains media
     u, m, c, usr = make_update()
@@ -1801,3 +1803,100 @@ def test_night_mode_forward_origins_and_content_regressions(monkeypatch):
     assert res is False
     m.delete.assert_not_called()
     store.remove_safe_user(chat_id, usr.id)
+
+
+def test_normie_and_slist_commands(monkeypatch, tmp_path):
+    import store
+    import admin
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import Update, User, Chat, Message
+
+    db_file = str(tmp_path / "test_normie_slist.db")
+    monkeypatch.setattr(store, "DB_PATH", db_file)
+    store.init_db()
+
+    chat_id = -100555444
+    owner_id = 99999
+    group_owner_id = 88888
+    admin_id = 77777
+    user_id = 11111
+
+    monkeypatch.setattr(admin, "OWNER_IDS", [owner_id])
+    monkeypatch.setattr(admin, "is_owner", lambda uid, *a, **kw: uid == owner_id)
+
+    bot = AsyncMock()
+    async def mock_get_member(c_id, u_id):
+        m = MagicMock()
+        if u_id == group_owner_id:
+            m.status = "creator"
+        elif u_id == admin_id:
+            m.status = "administrator"
+        else:
+            m.status = "member"
+        return m
+    bot.get_chat_member = AsyncMock(side_effect=mock_get_member)
+
+    context = MagicMock()
+    context.bot = bot
+
+    # 1. Non-owner/non-creator running .normie / .slist -> REJECTED
+    normal_usr = User(id=admin_id, first_name="Admin", is_bot=False)
+    chat = Chat(id=chat_id, type="supergroup", title="Test Group")
+    msg1 = MagicMock(spec=Message)
+    msg1.reply_text = AsyncMock()
+    msg1.reply_html = AsyncMock()
+    up1 = MagicMock(spec=Update)
+    up1.effective_chat = chat
+    up1.effective_user = normal_usr
+    up1.effective_message = msg1
+
+    asyncio.run(admin.normie_cmd(up1, context))
+    msg1.reply_text.assert_called_once()
+    assert "Only the group owner" in msg1.reply_text.call_args[0][0]
+
+    msg1.reply_text.reset_mock()
+    asyncio.run(admin.slist_cmd(up1, context))
+    msg1.reply_text.assert_called_once()
+    assert "Only the group owner" in msg1.reply_text.call_args[0][0]
+
+    # 2. .slist when empty list
+    group_owner = User(id=group_owner_id, first_name="GroupCreator", is_bot=False)
+    up_owner = MagicMock(spec=Update)
+    up_owner.effective_chat = chat
+    up_owner.effective_user = group_owner
+    msg_owner = MagicMock(spec=Message)
+    msg_owner.reply_html = AsyncMock()
+    up_owner.effective_message = msg_owner
+
+    asyncio.run(admin.slist_cmd(up_owner, context))
+    msg_owner.reply_html.assert_called_once()
+    assert "no safe users configured" in msg_owner.reply_html.call_args[0][0]
+
+    # 3. Add safe user and list via .slist
+    store.add_safe_user(chat_id, user_id)
+    store.upsert_user(user_id, "Safe User Name", "safeusername")
+
+    msg_owner.reply_html.reset_mock()
+    asyncio.run(admin.slist_cmd(up_owner, context))
+    msg_owner.reply_html.assert_called_once()
+    slist_text = msg_owner.reply_html.call_args[0][0]
+    assert "Group Safe Users List" in slist_text
+    assert "Safe User Name" in slist_text
+    assert "@safeusername" in slist_text
+    assert str(user_id) in slist_text
+
+    # 4. Remove safe user via .normie
+    target_usr = User(id=user_id, first_name="Safe User Name", username="safeusername", is_bot=False)
+    monkeypatch.setattr(admin, "resolve_target_user", AsyncMock(return_value=target_usr))
+
+    msg_owner.reply_html.reset_mock()
+    asyncio.run(admin.normie_cmd(up_owner, context))
+    msg_owner.reply_html.assert_called_once()
+    assert "Safe User Removed" in msg_owner.reply_html.call_args[0][0]
+    assert store.is_safe_user(chat_id, user_id) is False
+
+    # 5. .normie on user already not in list
+    msg_owner.reply_html.reset_mock()
+    asyncio.run(admin.normie_cmd(up_owner, context))
+    msg_owner.reply_html.assert_called_once()
+    assert "not in the safe users list" in msg_owner.reply_html.call_args[0][0]

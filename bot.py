@@ -658,10 +658,6 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     fwd_origin = getattr(msg, 'forward_origin', None)
     fwd_chat = getattr(fwd_origin, 'chat', None) or getattr(fwd_origin, 'sender_chat', None)
-    fwd_type = getattr(fwd_origin, 'type', '')
-
-    if fwd_origin and (fwd_type == 'channel' or (fwd_chat and getattr(fwd_chat, 'type', '') == 'channel')):
-        return False
 
     try:
         log_chan_setting = get_setting(chat.id, 'log_channel', '') or get_setting(chat.id, 'logger_channel_id', '')
@@ -690,7 +686,9 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
     stage = "content_detection"
     detected_type = None
 
-    if msg.sticker:
+    if fwd_origin:
+        detected_type = "Forwarded message"
+    elif msg.sticker:
         if getattr(msg.sticker, 'is_animated', False):
             detected_type = "Animated Sticker"
         elif getattr(msg.sticker, 'is_video', False):
