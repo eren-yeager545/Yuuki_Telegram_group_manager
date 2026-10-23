@@ -11,7 +11,7 @@ import uuid
 from typing import Optional
 from collections import defaultdict, deque
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, MessageEntity
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, ChatMemberHandler, TypeHandler, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, ChatMemberHandler, TypeHandler, filters, ApplicationHandlerStop
 from logger_helper import log_user_started_event, log_group_added_event, log_group_removed_event, log_user_joined_group_event, send_logger_notification
 import config
 from config import BOT_TOKEN, OWNER_IDS, OWNER_ID, LOG_CHANNEL_ID, QUIZ_INTERVAL_SECONDS, SEEN_UPDATE_COOLDOWN_SECONDS, PORT, WEBHOOK_URL, WEBHOOK_PATH, WEBHOOK_SECRET
@@ -33,6 +33,16 @@ from handlers.afk import afk_cmd, format_afk_duration, extract_mentioned_afk_use
 
 import tornado.web
 from telegram.ext._utils.webhookhandler import WebhookAppClass
+
+class NightModeError(Exception):
+    def __init__(self, message: str, chat_id: Optional[int] = None, message_id: Optional[int] = None, stage: str = "unknown"):
+        super().__init__(message)
+        self.chat_id = chat_id
+        self.message_id = message_id
+        self.stage = stage
+        self.is_night_mode = True
+
+
 
 
 class HealthCheckHandler(tornado.web.RequestHandler):
@@ -61,6 +71,17 @@ active_quizzes = {}
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error('Exception while handling an update:', exc_info=context.error)
+    err = context.error
+    if getattr(err, 'is_night_mode', False) or isinstance(err, NightModeError):
+        chat_id = getattr(err, 'chat_id', None)
+        msg_id = getattr(err, 'message_id', None)
+        stage = getattr(err, 'stage', 'unknown')
+        logger.error(
+            f"Night Mode failure in error_handler - Chat ID: {chat_id}, Message ID: {msg_id}, Stage: {stage}, Error: {err}",
+            exc_info=err
+        )
+        return
+
     msg_obj = None
     if isinstance(update, Update):
         if update.effective_message:
@@ -594,7 +615,7 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
     Evaluates Night Mode rules for incoming group messages.
     Deletes messages containing stickers, media, or links sent by non-exempt users when Night Mode is active.
     Sends DM notification to configured group owner on deletion.
-    Returns True if message was deleted by Night Mode, False otherwise.
+    Returns True if message was successfully deleted by Night Mode, False otherwise.
     """
     if getattr(update, 'edited_message', None) or not update.message:
         return False
@@ -606,7 +627,15 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not msg or not chat or chat.type not in ('group', 'supergroup'):
         return False
 
-    if get_setting(chat.id, 'night_mode', 'off') not in ('on', 'true', '1'):
+    stage = "db_check"
+    try:
+        if get_setting(chat.id, 'night_mode', 'off') not in ('on', 'true', '1'):
+            return False
+    except Exception as e:
+        logger.error(
+            f"Night Mode DB check error - Chat ID: {chat.id}, Message ID: {msg.message_id}, Stage: {stage}, Error: {e}",
+            exc_info=True
+        )
         return False
 
     if user and getattr(user, 'is_bot', False):
@@ -630,17 +659,31 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if msg.forward_from_chat and getattr(msg.forward_from_chat, 'type', '') == 'channel':
         return False
 
-    log_chan_setting = get_setting(chat.id, 'log_channel', '') or get_setting(chat.id, 'logger_channel_id', '')
-    if log_chan_setting:
-        if msg.sender_chat and str(msg.sender_chat.id) == str(log_chan_setting):
-            return False
-        if msg.forward_from_chat and str(msg.forward_from_chat.id) == str(log_chan_setting):
-            return False
+    try:
+        log_chan_setting = get_setting(chat.id, 'log_channel', '') or get_setting(chat.id, 'logger_channel_id', '')
+        if log_chan_setting:
+            if msg.sender_chat and str(msg.sender_chat.id) == str(log_chan_setting):
+                return False
+            if msg.forward_from_chat and str(msg.forward_from_chat.id) == str(log_chan_setting):
+                return False
+    except Exception as e:
+        logger.error(
+            f"Night Mode log channel check error - Chat ID: {chat.id}, Message ID: {msg.message_id}, Stage: {stage}, Error: {e}",
+            exc_info=True
+        )
 
     if user:
-        if store.is_safe_user(chat.id, user.id):
+        try:
+            if store.is_safe_user(chat.id, user.id):
+                return False
+        except Exception as e:
+            logger.error(
+                f"Night Mode safe user check error - Chat ID: {chat.id}, Message ID: {msg.message_id}, Stage: {stage}, Error: {e}",
+                exc_info=True
+            )
             return False
 
+    stage = "content_detection"
     detected_type = None
 
     if msg.sticker:
@@ -702,6 +745,7 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not detected_type:
         return False
 
+    stage = "message_deletion"
     try:
         await msg.delete()
     except Exception as e:
@@ -709,26 +753,52 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
         err_desc = str(e)
         logger.error(
             f"Night Mode failed to delete message ID {msg.message_id} in chat ID {chat.id} - "
-            f"ExceptionType: {exc_type}, Description: {err_desc}",
+            f"Stage: {stage}, ExceptionType: {exc_type}, Description: {err_desc}",
             exc_info=True
         )
         try:
             await send_night_mode_permission_error_notification(context, chat, msg.message_id, exc_type, err_desc)
         except Exception as notify_err:
             logger.warning(f"Failed to dispatch Night Mode permission error notification to owner: {notify_err}")
-        return True
+        return False
 
+    stage = "admin_logging"
     try:
         log_admin_action(chat.id, user.id if user else 0, 'night_mode_delete', user.id if user else 0, details=detected_type)
     except Exception as e:
-        logger.warning(f"Failed to log admin action for Night Mode deletion: {e}")
+        logger.warning(f"Failed to log admin action for Night Mode deletion (Chat ID: {chat.id}, Message ID: {msg.message_id}, Stage: {stage}): {e}")
 
+    stage = "owner_notification"
     try:
         await send_night_mode_owner_notification(context, chat, user, msg, detected_type)
     except Exception as e:
-        logger.warning(f"Night Mode owner notification dispatch error: {e}")
+        logger.warning(f"Night Mode owner notification dispatch error (Chat ID: {chat.id}, Message ID: {msg.message_id}, Stage: {stage}): {e}")
 
     return True
+
+
+async def night_mode_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Dedicated handler for Night Mode enforcement.
+    Runs before general message routing and database tracking operations.
+    If Night Mode deletes a violating message, stops handler propagation to prevent downstream processing.
+    """
+    try:
+        deleted = await process_night_mode(update, context)
+        if deleted:
+            raise ApplicationHandlerStop()
+    except ApplicationHandlerStop:
+        raise
+    except Exception as e:
+        chat = update.effective_chat
+        msg = update.effective_message
+        chat_id = chat.id if chat else None
+        msg_id = msg.message_id if msg else None
+        stage = getattr(e, 'stage', 'handler_execution')
+        logger.error(
+            f"Night Mode handler exception - Chat ID: {chat_id}, Message ID: {msg_id}, Stage: {stage}, Error: {e}",
+            exc_info=True
+        )
 
 
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -770,9 +840,6 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_seen_cache[user.id] = now
         touch_member(chat.id, user.id, now, status='member')
         record_user_message(chat.id, user.id, msg.message_id)
-
-        if await process_night_mode(update, context):
-            return
 
         txt_check = (msg.text or msg.caption or '').strip()
         if txt_check and (txt_check.startswith('.safe') or txt_check.startswith('/safe')):
@@ -1245,6 +1312,7 @@ def main():
         ('emoji', emoji_cmd, 'Owner Commands', 'Configure custom emoji for reactions', '/emoji <custom_emoji_id>'),
     ]
     app.add_handler(TypeHandler(Update, track_profile_update_handler), group=-1)
+    app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, night_mode_message_handler), group=-1)
     for spec in user_cmds + admin_cmds:
         add_registered_command(app, *spec)
     app.add_handler(CallbackQueryHandler(packs_callback_handler, pattern='^packs_page:'))
