@@ -507,7 +507,7 @@ async def track_profile_update_handler(update: Update, context: ContextTypes.DEF
                 if member and not getattr(member, 'is_bot', False):
                     await check_and_track_profile_change(chat.id, member, context)
     except Exception as e:
-        logger.error(f"Error in track_profile_update_handler: {e}")
+        logger.error(f"Error in track_profile_update_handler: {e}", exc_info=True)
 
 
 async def get_group_owner_recipients(context: ContextTypes.DEFAULT_TYPE, chat) -> list:
@@ -1311,8 +1311,8 @@ def main():
         ('broadcast', broadcast_cmd, 'Owner Commands', 'Broadcast to all groups', '/broadcast hello all'),
         ('emoji', emoji_cmd, 'Owner Commands', 'Configure custom emoji for reactions', '/emoji <custom_emoji_id>'),
     ]
+    app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, night_mode_message_handler), group=-2)
     app.add_handler(TypeHandler(Update, track_profile_update_handler), group=-1)
-    app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, night_mode_message_handler), group=-1)
     for spec in user_cmds + admin_cmds:
         add_registered_command(app, *spec)
     app.add_handler(CallbackQueryHandler(packs_callback_handler, pattern='^packs_page:'))

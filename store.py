@@ -1698,7 +1698,7 @@ def save_profile_snapshot(chat_id, user_id, first_name, last_name, username):
         db = get_mongo_db()
         db['user_profile_snapshots'].update_one(
             {'chat_id': chat_id, 'user_id': user_id},
-            {'': {
+            {'$set': {
                 'first_name': fn,
                 'last_name': ln,
                 'username': un,
