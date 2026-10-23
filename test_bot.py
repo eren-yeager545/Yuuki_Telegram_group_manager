@@ -1477,20 +1477,87 @@ def test_night_mode_complete_suite(monkeypatch):
     asyncio.run(admin.safe_cmd(u_safe, context))
     assert store.is_safe_user(chat_id, user_id) is False
 
-    # 7. Test Message Deletion Failure Handling
+    # 7. Test Message Deletion Failure Handling and Owner Diagnostic DM
+    bot.send_message.side_effect = None
     bot.send_message.reset_mock()
     u, m = make_user_msg_update()
     m.photo = [MagicMock()]
     m.delete = AsyncMock(side_effect=Exception("Telegram permission denied"))
     res = asyncio.run(bot_module.process_night_mode(u, context))
     assert res is False
-    bot.send_message.assert_not_called()
+    bot.send_message.assert_called_once()
+    assert "Missing Permissions" in bot.send_message.call_args[1]["text"]
 
     # 8. Test Edited Message Independence
     bot.send_message.side_effect = None
     bot.send_message.reset_mock()
     u, m = make_user_msg_update(is_edited=True)
     m.sticker = MagicMock()
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is False
+    m.delete.assert_not_called()
+
+    # 9. Test All Media & Link Types (Video Note, Document, Voice, Animation, Text Link, UTF-16 Link)
+    # Video Note
+    bot.send_message.reset_mock()
+    u, m = make_user_msg_update()
+    m.video_note = MagicMock()
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
+    assert "Video note" in bot.send_message.call_args[1]["text"]
+
+    # Document
+    bot.send_message.reset_mock()
+    u, m = make_user_msg_update()
+    m.document = MagicMock()
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
+    assert "Document" in bot.send_message.call_args[1]["text"]
+
+    # Voice
+    bot.send_message.reset_mock()
+    u, m = make_user_msg_update()
+    m.voice = MagicMock()
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
+    assert "Voice message" in bot.send_message.call_args[1]["text"]
+
+    # Text Link entity
+    bot.send_message.reset_mock()
+    u, m = make_user_msg_update()
+    m.text = "Click here"
+    ent = MagicMock(spec=MessageEntity)
+    ent.type = "text_link"
+    ent.url = "https://customlink.com"
+    m.entities = [ent]
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
+    assert "https://customlink.com" in bot.send_message.call_args[1]["text"]
+
+    # Link with Emojis (UTF-16 decoding check)
+    bot.send_message.reset_mock()
+    u, m = make_user_msg_update()
+    m.text = "🌸 Visit https://emoji-link.org!"
+    ent = MagicMock(spec=MessageEntity)
+    ent.type = MessageEntity.URL
+    # '🌸 ' is 3 UTF-16 code units
+    ent.offset = 3
+    ent.length = 22
+    m.entities = [ent]
+    res = asyncio.run(bot_module.process_night_mode(u, context))
+    assert res is True
+    m.delete.assert_called_once()
+    assert "https://emoji-link.org!" in bot.send_message.call_args[1]["text"]
+
+    # Command messages should NOT be deleted
+    bot.send_message.reset_mock()
+    u, m = make_user_msg_update()
+    m.text = "/night on"
+    m.entities = [MagicMock(type="bot_command", offset=0, length=9)]
     res = asyncio.run(bot_module.process_night_mode(u, context))
     assert res is False
     m.delete.assert_not_called()
