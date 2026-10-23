@@ -1541,3 +1541,90 @@ async def test_groq_provider_timeout():
         assert exc_info.value.error_code == ProviderErrorCode.TIMEOUT
 
     await provider.close()
+
+
+def test_yuki_persona_content():
+    """Verify YUKI_PERSONA contains essential guidelines for personality, creator lore, and behaviors."""
+    assert "Yuki" in YUKI_PERSONA
+    assert "18" in YUKI_PERSONA
+    assert "Tokyo" in YUKI_PERSONA
+    assert "baddie energy" in YUKI_PERSONA
+    assert "𓂀 𝑨𝒍𝒃𝒆𝒓𝒕 𝑰𝒏𝒇𝒆⃤𝒓𝒏𝒐 𓂀" in YUKI_PERSONA
+    assert "Do NOT falsely treat other users as your creator" in YUKI_PERSONA
+    assert "SAVAGE COMBACKS" in YUKI_PERSONA
+    assert "HARMLESS TROLLING" in YUKI_PERSONA
+    assert "EMPATHY & SUPPORT" in YUKI_PERSONA
+    assert "Hinglish" in YUKI_PERSONA
+
+
+@pytest.mark.asyncio
+async def test_creator_vs_non_creator_identification():
+    """Verify handle_ai_chat correctly identifies creator vs non-creator user IDs."""
+    from handlers.ai_chat import context_manager, deduplicator, rate_limiter, provider_manager
+
+    # Setup context manager and mock provider_manager
+    chat_id = 99999
+    rate_limiter.chat_cooldown = 0.0
+    rate_limiter.user_cooldown = 0.0
+
+    # 1. Non-creator user (ID 123)
+    user_non_creator = User(id=123, first_name="Alice", is_bot=False)
+    chat = Chat(id=chat_id, type="private")
+    msg_non = MagicMock(spec=Message)
+    msg_non.message_id = 5001
+    msg_non.text = "Hi Yuki!"
+    msg_non.sticker = None
+    msg_non.reply_to_message = None
+    msg_non.entities = []
+
+    upd_non = MagicMock(spec=Update)
+    upd_non.update_id = 8001
+    upd_non.effective_message = msg_non
+    upd_non.effective_chat = chat
+    upd_non.effective_user = user_non_creator
+
+    ctx = MagicMock()
+    ctx.bot.username = "yuki_bot"
+    ctx.bot.id = 123456
+    ctx.bot.send_chat_action = AsyncMock()
+
+    with patch.object(config, 'OWNER_IDS', [999999]), \
+         patch.object(provider_manager, 'chat', new_callable=AsyncMock) as mock_chat, \
+         patch('handlers.ai_chat.send_reply_with_custom_emoji', new_callable=AsyncMock):
+
+        mock_chat.return_value = AIResponse(text="Hey Alice! ✨", provider="mock", model="mock")
+        await handle_ai_chat(upd_non, ctx, prompt_override="Hi Yuki!")
+
+        messages = context_manager.get_context(chat_id)
+        assert len(messages) >= 1
+        # Find user message
+        user_msgs = [m for m in messages if m.get("role") == "user"]
+        assert user_msgs[-1]["name"] == "Alice"
+
+    # 2. Creator user (ID 999999)
+    user_creator = User(id=999999, first_name="Albert", is_bot=False)
+    msg_creator = MagicMock(spec=Message)
+    msg_creator.message_id = 5002
+    msg_creator.text = "Hey Yuki!"
+    msg_creator.sticker = None
+    msg_creator.reply_to_message = None
+    msg_creator.entities = []
+
+    upd_creator = MagicMock(spec=Update)
+    upd_creator.update_id = 8002
+    upd_creator.effective_message = msg_creator
+    upd_creator.effective_chat = chat
+    upd_creator.effective_user = user_creator
+
+    context_manager.clear_context(chat_id)
+
+    with patch.object(config, 'OWNER_IDS', [999999]), \
+         patch.object(provider_manager, 'chat', new_callable=AsyncMock) as mock_chat, \
+         patch('handlers.ai_chat.send_reply_with_custom_emoji', new_callable=AsyncMock):
+
+        mock_chat.return_value = AIResponse(text="Hello my creator! 💕", provider="mock", model="mock")
+        await handle_ai_chat(upd_creator, ctx, prompt_override="Hey Yuki!")
+
+        messages = context_manager.get_context(chat_id)
+        user_msgs = [m for m in messages if m.get("role") == "user"]
+        assert "𓂀 𝑨𝒍𝒃𝒆𝒓𝒕 𝑰𝒏𝒇𝒆⃤𝒓𝒏𝒐 𓂀 (Creator/Owner)" in user_msgs[-1]["name"]
