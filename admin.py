@@ -1389,7 +1389,7 @@ async def safe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Command to manage group safe users exempt from Night Mode.
     Can be run as .safe or /safe.
-    Only group owner (creator status) or bot owner (is_owner_or_sudo) can run this command.
+    Only group owner (creator status) or main bot owner can run this command.
     """
     if not update or not update.effective_chat or update.effective_chat.type not in ('group', 'supergroup'):
         if update and update.effective_message:
@@ -1402,7 +1402,7 @@ async def safe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     is_allowed = False
-    if is_owner_or_sudo(user.id):
+    if is_owner(user.id, OWNER_IDS):
         is_allowed = True
     else:
         try:
@@ -1465,7 +1465,7 @@ async def night_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sub = context.args[0].lower().strip()
         if sub == 'on':
             set_setting(chat_id, 'night_mode', 'on')
-            await update.message.reply_text('🌙 Night Mode is now enabled for this group desu~! Media, stickers, and links sent by ordinary members will be automatically deleted. 🌸')
+            await update.message.reply_text('🌙 Night Mode is now enabled for this group desu~! Media, stickers, and links sent by non-safe members will be automatically deleted. 🌸')
             return
         elif sub == 'off':
             set_setting(chat_id, 'night_mode', 'off')
