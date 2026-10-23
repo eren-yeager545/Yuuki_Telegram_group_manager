@@ -351,7 +351,7 @@ async def test_night_mode_on_off_deletion_behavior(monkeypatch):
     msg_sticker.story = None
     msg_sticker.paid_media = None
     msg_sticker.sender_chat = None
-    msg_sticker.forward_from_chat = None
+    msg_sticker.forward_origin = None
     msg_sticker.is_automatic_forward = False
     msg_sticker.text = None
     msg_sticker.caption = None
@@ -383,7 +383,7 @@ async def test_night_mode_on_off_deletion_behavior(monkeypatch):
     msg_link.story = None
     msg_link.paid_media = None
     msg_link.sender_chat = None
-    msg_link.forward_from_chat = None
+    msg_link.forward_origin = None
     msg_link.is_automatic_forward = False
     msg_link.text = 'Check out https://example.com'
     msg_link.caption = None
