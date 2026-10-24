@@ -16,10 +16,33 @@ from store import (
     list_notes, list_quizzes, list_warned_users, log_admin_action, remove_blacklist,
     reset_warns, save_buttons, save_filter, save_note, set_chat_federation, set_setting,
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
-    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members, get_safe_users, is_safe_user, add_safe_user, remove_safe_user, toggle_safe_user
+    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members, get_safe_users, is_safe_user, add_safe_user, remove_safe_user, toggle_safe_user, get_group_by_id, upsert_user
 )
 from helpers import is_admin, is_owner, is_owner_or_sudo, safe_reply_error, create_custom_emoji_entities, send_reply_with_custom_emoji
 logger = logging.getLogger(__name__)
+
+
+async def is_bot_or_group_owner(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if is_owner(user_id, OWNER_IDS):
+        return True
+
+    setting_owner = get_setting(chat_id, 'group_owner_id', '') or get_setting(chat_id, 'owner_id', '')
+    if setting_owner and str(setting_owner).lstrip('-').isdigit() and int(setting_owner) == user_id:
+        return True
+
+    grp = get_group_by_id(chat_id)
+    if grp and len(grp) >= 5 and grp[4] and str(grp[4]).lstrip('-').isdigit() and int(grp[4]) == user_id:
+        return True
+
+    if context and getattr(context, 'bot', None):
+        try:
+            member = await context.bot.get_chat_member(chat_id, user_id)
+            if getattr(member, 'status', '') in ('creator', 'CREATOR'):
+                return True
+        except Exception as e:
+            logger.warning(f"Error checking chat member creator status for user {user_id} in {chat_id}: {e}")
+
+    return False
 
 
 async def is_target_admin(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -1387,7 +1410,7 @@ async def cleanservice_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def safe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Command to manage group safe users exempt from Night Mode.
+    Command to add a user to the group safe-users list.
     Can be run as .safe or /safe.
     Only group owner (creator status) or main bot owner can run this command.
     """
@@ -1401,60 +1424,41 @@ async def safe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         return
 
-    is_allowed = False
-    if is_owner(user.id, OWNER_IDS):
-        is_allowed = True
-    else:
-        try:
-            member = await context.bot.get_chat_member(chat.id, user.id)
-            if getattr(member, 'status', '') == 'creator':
-                is_allowed = True
-        except Exception:
-            is_allowed = False
-
-    if not is_allowed:
+    if not await is_bot_or_group_owner(chat.id, user.id, context):
         if update.effective_message:
             await update.effective_message.reply_text('Gomen ne~ 🌸 Only the group owner or bot owner can manage safe users desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
         return
 
     target_user = await resolve_target_user(update, context)
 
-    if target_user:
-        target_id = target_user.id
-        target_name = getattr(target_user, 'first_name', None) or getattr(target_user, 'full_name', None) or str(target_id)
-        user_tag = format_user_tag(target_id, target_name)
+    if not target_user:
+        if update.effective_message:
+            await update.effective_message.reply_html(
+                '🌸 Please reply to a message, tag (@username), or specify a valid user ID/username to add to safe users desu~ 💕'
+            )
+        return
 
-        is_added = toggle_safe_user(chat.id, target_id)
-        if is_added:
-            await update.effective_message.reply_html(
-                f"🛡️ <b>Safe User Added!</b> 🌸✨\n\n"
-                f"{user_tag} is now marked as a safe user in this group and will be exempt from Night Mode restrictions desu~! 💕"
-            )
-        else:
-            await update.effective_message.reply_html(
-                f"🛡️ <b>Safe User Removed!</b> 🌸✨\n\n"
-                f"{user_tag} was removed from the safe users list in this group desu~! 💕"
-            )
-    else:
-        safe_uids = get_safe_users(chat.id)
-        if not safe_uids:
-            await update.effective_message.reply_html(
-                "🛡️ <b>Group Safe Users</b> 🌸✨\n\n"
-                "There are currently no safe users configured for this group.\n\n"
-                "<b>Usage:</b>\n"
-                "• <code>.safe @username</code> - Toggle safe status for user\n"
-                "• Reply to a message with <code>.safe</code> to toggle safe status"
-            )
-        else:
-            lines = ["🛡️ <b>Group Safe Users List:</b> 🌸✨", ""]
-            for uid in safe_uids:
-                u_info = get_user_by_id(uid)
-                u_name = u_info[1] if u_info else f"User {uid}"
-                u_uname = u_info[2] if u_info else None
-                tag = format_user_tag(uid, u_name, u_uname)
-                lines.append(f"• {tag} (<code>{uid}</code>)")
-            lines.append("\nUsage: Reply to a user or pass <code>@username</code> with <code>.safe</code> to toggle safe user status desu!")
-            await update.effective_message.reply_html("\n".join(lines))
+    target_id = target_user.id
+    target_name = getattr(target_user, 'first_name', None) or getattr(target_user, 'full_name', None) or str(target_id)
+    user_tag = format_user_tag(target_id, target_name, getattr(target_user, 'username', None))
+
+    if is_safe_user(chat.id, target_id):
+        await update.effective_message.reply_html(
+            f'🌸 {user_tag} is already in the safe users list for this group desu~!'
+        )
+        return
+
+    try:
+        add_safe_user(chat.id, target_id)
+        if hasattr(target_user, 'first_name'):
+            upsert_user(target_id, getattr(target_user, 'full_name', target_name), getattr(target_user, 'username', None))
+        await update.effective_message.reply_html(
+            f"🛡️ <b>Safe User Added!</b> 🌸✨\n\n"
+            f"{user_tag} is now marked as a safe user in this group and will be exempt from Night Mode restrictions desu~! 💕"
+        )
+    except Exception as e:
+        logger.error(f'Error adding safe user {target_id} in chat {chat.id}: {e}', exc_info=True)
+        await safe_reply_error(update.effective_message)
 
 
 async def night_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2781,18 +2785,7 @@ async def normie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         return
 
-    is_allowed = False
-    if is_owner(user.id, OWNER_IDS):
-        is_allowed = True
-    else:
-        try:
-            member = await context.bot.get_chat_member(chat.id, user.id)
-            if getattr(member, 'status', '') == 'creator':
-                is_allowed = True
-        except Exception:
-            is_allowed = False
-
-    if not is_allowed:
+    if not await is_bot_or_group_owner(chat.id, user.id, context):
         if update.effective_message:
             await update.effective_message.reply_text('Gomen ne~ 🌸 Only the group owner or bot owner can manage safe users desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
         return
@@ -2808,7 +2801,7 @@ async def normie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     target_id = target_user.id
     target_name = getattr(target_user, 'first_name', None) or getattr(target_user, 'full_name', None) or str(target_id)
-    user_tag = format_user_tag(target_id, target_name)
+    user_tag = format_user_tag(target_id, target_name, getattr(target_user, 'username', None))
 
     if not is_safe_user(chat.id, target_id):
         await update.effective_message.reply_html(
@@ -2841,18 +2834,7 @@ async def slist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         return
 
-    is_allowed = False
-    if is_owner(user.id, OWNER_IDS):
-        is_allowed = True
-    else:
-        try:
-            member = await context.bot.get_chat_member(chat.id, user.id)
-            if getattr(member, 'status', '') == 'creator':
-                is_allowed = True
-        except Exception:
-            is_allowed = False
-
-    if not is_allowed:
+    if not await is_bot_or_group_owner(chat.id, user.id, context):
         if update.effective_message:
             await update.effective_message.reply_text('Gomen ne~ 🌸 Only the group owner or bot owner can view safe users desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
         return
@@ -2876,12 +2858,18 @@ async def slist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 u_uname = ""
             lines.append(f"• {u_name}{u_uname} (<code>{uid}</code>)")
 
-        out_text = "\n".join(lines)
-        if len(out_text) > 4000:
-            for i in range(0, len(out_text), 4000):
-                await update.effective_message.reply_html(out_text[i:i+4000], disable_web_page_preview=True)
-        else:
-            await update.effective_message.reply_html(out_text, disable_web_page_preview=True)
+        chunk = []
+        chunk_len = 0
+        for line in lines:
+            if chunk_len + len(line) + 1 > 3800 and chunk:
+                await update.effective_message.reply_html("\n".join(chunk), disable_web_page_preview=True)
+                chunk = [line]
+                chunk_len = len(line)
+            else:
+                chunk.append(line)
+                chunk_len += len(line) + 1
+        if chunk:
+            await update.effective_message.reply_html("\n".join(chunk), disable_web_page_preview=True)
     except Exception as e:
         logger.error(f"Error listing safe users in chat {chat.id}: {e}", exc_info=True)
         await safe_reply_error(update.effective_message)

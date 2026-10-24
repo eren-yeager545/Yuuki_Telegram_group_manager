@@ -709,9 +709,9 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
         detected_type = "Video note"
     elif msg.document:
         detected_type = "Document"
-    elif getattr(msg, 'story', None) and not isinstance(getattr(msg, 'story', None), MagicMock):
+    elif getattr(msg, 'story', None) and type(getattr(msg, 'story', None)).__name__ != 'MagicMock':
         detected_type = "Story"
-    elif getattr(msg, 'paid_media', None) and not isinstance(getattr(msg, 'paid_media', None), MagicMock):
+    elif getattr(msg, 'paid_media', None) and type(getattr(msg, 'paid_media', None)).__name__ != 'MagicMock':
         detected_type = "Paid media"
 
     if not detected_type:
@@ -844,11 +844,23 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         record_user_message(chat.id, user.id, msg.message_id)
 
         txt_check = (msg.text or msg.caption or '').strip()
-        if txt_check and (txt_check.startswith('.safe') or txt_check.startswith('/safe')):
-            if not context.args and len(txt_check.split()) > 1:
-                context.args = txt_check.split()[1:]
-            await safe_cmd(update, context)
-            return
+        if txt_check:
+            first_word = txt_check.split()[0].lower()
+            if first_word in ('.safe', '/safe'):
+                if not context.args and len(txt_check.split()) > 1:
+                    context.args = txt_check.split()[1:]
+                await safe_cmd(update, context)
+                return
+            elif first_word in ('.normie', '/normie'):
+                if not context.args and len(txt_check.split()) > 1:
+                    context.args = txt_check.split()[1:]
+                await normie_cmd(update, context)
+                return
+            elif first_word in ('.slist', '/slist'):
+                if not context.args and len(txt_check.split()) > 1:
+                    context.args = txt_check.split()[1:]
+                await slist_cmd(update, context)
+                return
 
         txt_check = (msg.text or msg.caption or '').strip()
         if txt_check and re.match(r'^@all(\s|$)', txt_check, re.IGNORECASE):
@@ -1249,7 +1261,9 @@ def main():
         ('towhatsapp', towhatsapp_cmd, 'Utility Commands', 'Convert Telegram sticker pack to WhatsApp format', '/towhatsapp https://t.me/addstickers/pack_name'),
     ]
     admin_cmds = [
-        ('safe', safe_cmd, 'Group Management Commands', 'Manage safe users exempt from Night Mode', '.safe or /safe'),
+        ('safe', safe_cmd, 'Group Management Commands', 'Add user to Night Mode safe list', '.safe or /safe'),
+        ('normie', normie_cmd, 'Group Management Commands', 'Remove user from Night Mode safe list', '.normie or /normie'),
+        ('slist', slist_cmd, 'Group Management Commands', 'List Night Mode safe users in group', '.slist or /slist'),
         ('night', night_cmd, 'Group Management Commands', 'Toggle Night Mode in group', '/night on|off'),
         ('promote', promote_cmd, 'Group Management Commands', 'Promote a member to admin', '/promote'),
         ('tag', tag_cmd, 'Group Management Commands', 'Tag all eligible members in the group.', '/tag Good morning!'),

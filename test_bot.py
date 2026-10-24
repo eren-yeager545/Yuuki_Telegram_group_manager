@@ -1492,8 +1492,14 @@ def test_night_mode_complete_suite(monkeypatch):
     assert res_other is True
     m_other.delete.assert_called_once()
 
-    # Toggle safe user off
+    # Running .safe command again on already safe user -> reported as already in safe users list
+    msg_safe.reply_html.reset_mock()
     asyncio.run(admin.safe_cmd(u_safe, context))
+    msg_safe.reply_html.assert_called_once()
+    assert "already in the safe users list" in msg_safe.reply_html.call_args[0][0]
+
+    # Remove safe user via .normie
+    asyncio.run(admin.normie_cmd(u_safe, context))
     assert store.is_safe_user(chat_id, user_id) is False
 
     # 7. Test Message Deletion Failure Handling and Owner Diagnostic DM
@@ -1900,3 +1906,173 @@ def test_normie_and_slist_commands(monkeypatch, tmp_path):
     asyncio.run(admin.normie_cmd(up_owner, context))
     msg_owner.reply_html.assert_called_once()
     assert "not in the safe users list" in msg_owner.reply_html.call_args[0][0]
+
+
+def test_six_command_forms_and_night_mode_exemption(monkeypatch, tmp_path):
+    import store
+    import admin
+    import bot as bot_module
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import Update, User, Chat, Message, MessageEntity
+
+    db_file = str(tmp_path / "test_six_cmd_forms.db")
+    monkeypatch.setattr(store, "DB_PATH", db_file)
+    store.init_db()
+
+    chat_id = -100999888
+    chat_id_other = -100999777
+    group_owner_id = 88888
+    target_user_id = 22222
+
+    bot = AsyncMock()
+    async def mock_get_member(c_id, u_id):
+        m = MagicMock()
+        m.status = "creator" if u_id == group_owner_id else "member"
+        return m
+    bot.get_chat_member = AsyncMock(side_effect=mock_get_member)
+
+    context = MagicMock()
+    context.bot = bot
+
+    group_owner = User(id=group_owner_id, first_name="GroupOwner", is_bot=False)
+    target_usr = User(id=target_user_id, first_name="TargetUser", username="targetuser", is_bot=False)
+    chat = Chat(id=chat_id, type="supergroup", title="Test Group")
+
+    monkeypatch.setattr(admin, "resolve_target_user", AsyncMock(return_value=target_usr))
+
+    # Enable Night Mode
+    store.set_setting(chat_id, "night_mode", "on")
+    store.set_setting(chat_id_other, "night_mode", "on")
+
+    # 1. Test .safe command form -> adds target
+    msg = MagicMock(spec=Message)
+    msg.text = ".safe 22222"
+    msg.reply_html = AsyncMock()
+    up = MagicMock(spec=Update)
+    up.effective_chat = chat
+    up.effective_user = group_owner
+    up.effective_message = msg
+
+    asyncio.run(admin.safe_cmd(up, context))
+    assert store.is_safe_user(chat_id, target_user_id) is True
+    assert store.is_safe_user(chat_id_other, target_user_id) is False
+
+    # Night Mode test: exempt in chat_id, not exempt in chat_id_other
+    u_msg_in_group = MagicMock(spec=Update)
+    u_msg_in_group.edited_message = None
+    u_msg_in_group.effective_chat = chat
+    u_msg_in_group.effective_user = target_usr
+    m_in_group = MagicMock(spec=Message)
+    m_in_group.text = "check link https://example.com"
+    m_in_group.caption = None
+    m_in_group.entities = [MessageEntity(type="url", offset=11, length=19)]
+    m_in_group.caption_entities = []
+    m_in_group.sticker = None
+    m_in_group.photo = None
+    m_in_group.video = None
+    m_in_group.animation = None
+    m_in_group.audio = None
+    m_in_group.voice = None
+    m_in_group.video_note = None
+    m_in_group.document = None
+    m_in_group.sender_chat = None
+    m_in_group.forward_origin = None
+    m_in_group.is_automatic_forward = False
+    m_in_group.delete = AsyncMock()
+    u_msg_in_group.message = m_in_group
+
+    deleted = asyncio.run(bot_module.process_night_mode(u_msg_in_group, context))
+    assert deleted is False
+    m_in_group.delete.assert_not_called()
+
+    # In other group, same user is deleted
+    u_msg_in_other = MagicMock(spec=Update)
+    u_msg_in_other.edited_message = None
+    u_msg_in_other.effective_chat = Chat(id=chat_id_other, type="supergroup", title="Other Group")
+    u_msg_in_other.effective_user = target_usr
+    m_in_other = MagicMock(spec=Message)
+    m_in_other.text = "check link https://example.com"
+    m_in_other.caption = None
+    m_in_other.entities = [MessageEntity(type="url", offset=11, length=19)]
+    m_in_other.caption_entities = []
+    m_in_other.sticker = None
+    m_in_other.photo = None
+    m_in_other.video = None
+    m_in_other.animation = None
+    m_in_other.audio = None
+    m_in_other.voice = None
+    m_in_other.video_note = None
+    m_in_other.document = None
+    m_in_other.sender_chat = None
+    m_in_other.forward_origin = None
+    m_in_other.is_automatic_forward = False
+    m_in_other.delete = AsyncMock()
+    u_msg_in_other.message = m_in_other
+
+    deleted_other = asyncio.run(bot_module.process_night_mode(u_msg_in_other, context))
+    assert deleted_other is True
+    m_in_other.delete.assert_called_once()
+
+    # 2. Test /normie command form -> removes target
+    msg_normie = MagicMock(spec=Message)
+    msg_normie.text = "/normie @targetuser"
+    msg_normie.reply_html = AsyncMock()
+    up_normie = MagicMock(spec=Update)
+    up_normie.effective_chat = chat
+    up_normie.effective_user = group_owner
+    up_normie.effective_message = msg_normie
+
+    asyncio.run(admin.normie_cmd(up_normie, context))
+    assert store.is_safe_user(chat_id, target_user_id) is False
+
+    # Verify user is now subject to Night Mode again in chat_id
+    deleted_after_normie = asyncio.run(bot_module.process_night_mode(u_msg_in_group, context))
+    assert deleted_after_normie is True
+    m_in_group.delete.assert_called_once()
+
+    # 3. Test /safe command form -> adds target back
+    msg_safe_slash = MagicMock(spec=Message)
+    msg_safe_slash.text = "/safe 22222"
+    msg_safe_slash.reply_html = AsyncMock()
+    up_safe_slash = MagicMock(spec=Update)
+    up_safe_slash.effective_chat = chat
+    up_safe_slash.effective_user = group_owner
+    up_safe_slash.effective_message = msg_safe_slash
+
+    asyncio.run(admin.safe_cmd(up_safe_slash, context))
+    assert store.is_safe_user(chat_id, target_user_id) is True
+
+    # 4. Test .normie command form -> removes target
+    msg_normie_dot = MagicMock(spec=Message)
+    msg_normie_dot.text = ".normie 22222"
+    msg_normie_dot.reply_html = AsyncMock()
+    up_normie_dot = MagicMock(spec=Update)
+    up_normie_dot.effective_chat = chat
+    up_normie_dot.effective_user = group_owner
+    up_normie_dot.effective_message = msg_normie_dot
+
+    asyncio.run(admin.normie_cmd(up_normie_dot, context))
+    assert store.is_safe_user(chat_id, target_user_id) is False
+
+    # 5. Test .slist and /slist command forms
+    msg_slist_dot = MagicMock(spec=Message)
+    msg_slist_dot.text = ".slist"
+    msg_slist_dot.reply_html = AsyncMock()
+    up_slist_dot = MagicMock(spec=Update)
+    up_slist_dot.effective_chat = chat
+    up_slist_dot.effective_user = group_owner
+    up_slist_dot.effective_message = msg_slist_dot
+
+    asyncio.run(admin.slist_cmd(up_slist_dot, context))
+    assert "no safe users configured" in msg_slist_dot.reply_html.call_args[0][0]
+
+    msg_slist_slash = MagicMock(spec=Message)
+    msg_slist_slash.text = "/slist"
+    msg_slist_slash.reply_html = AsyncMock()
+    up_slist_slash = MagicMock(spec=Update)
+    up_slist_slash.effective_chat = chat
+    up_slist_slash.effective_user = group_owner
+    up_slist_slash.effective_message = msg_slist_slash
+
+    asyncio.run(admin.slist_cmd(up_slist_slash, context))
+    assert "no safe users configured" in msg_slist_slash.reply_html.call_args[0][0]
