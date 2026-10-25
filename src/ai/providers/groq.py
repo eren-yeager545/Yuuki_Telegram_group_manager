@@ -26,7 +26,7 @@ def _redact_key(text: str, secret: str) -> str:
 def _classify_groq_error(status: int, err_detail: str) -> tuple[ProviderErrorCode, float]:
     detail_lower = err_detail.lower()
 
-    if "quota" in detail_lower or "resource_exhausted" in detail_lower or "rate limit" in detail_lower and "daily" in detail_lower:
+    if "quota" in detail_lower or "resource_exhausted" in detail_lower or ("rate limit" in detail_lower and "daily" in detail_lower):
         return ProviderErrorCode.QUOTA_EXCEEDED, DEFAULT_QUOTA_COOLDOWN
 
     if status == 429:
@@ -45,6 +45,26 @@ def _classify_groq_error(status: int, err_detail: str) -> tuple[ProviderErrorCod
         return ProviderErrorCode.SERVER_ERROR, DEFAULT_SERVER_ERROR_COOLDOWN
 
     return ProviderErrorCode.UNKNOWN, 60.0
+
+
+def _extract_content_text(content_val: Any) -> str:
+    """Safely extract textual content from string or structured content representations."""
+    if content_val is None:
+        return ""
+    if isinstance(content_val, str):
+        return content_val.strip()
+    if isinstance(content_val, list):
+        parts = []
+        for item in content_val:
+            if isinstance(item, dict):
+                if item.get("type") == "text" and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif "text" in item and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+            elif isinstance(item, str):
+                parts.append(item)
+        return "".join(parts).strip()
+    return str(content_val).strip()
 
 
 class GroqProvider(AIProvider):
@@ -131,13 +151,39 @@ class GroqProvider(AIProvider):
                 try:
                     data = resp.json()
                 except Exception as je:
+                    raw_text = getattr(resp, "text", "") or ""
+                    preview = _redact_key(raw_text[:200], api_key)
+                    logger.warning(
+                        f"Groq invalid JSON in 200 response: status=200 preview={preview}"
+                    )
                     raise AIProviderError(
                         message=f"Groq response is not valid JSON: {je}",
+                        status_code=200,
                         error_code=ProviderErrorCode.SERVER_ERROR,
-                        suggested_cooldown=DEFAULT_SERVER_ERROR_COOLDOWN
+                        suggested_cooldown=0.0
                     ) from je
 
                 if isinstance(data, dict):
+                    if "error" in data and data["error"]:
+                        err_obj = data["error"]
+                        err_msg = ""
+                        if isinstance(err_obj, dict):
+                            err_msg = err_obj.get("message", "") or str(err_obj)
+                        else:
+                            err_msg = str(err_obj)
+                        err_msg = _redact_key(err_msg, api_key)
+                        code, cooldown = _classify_groq_error(200, err_msg)
+                        logger.warning(
+                            f"Groq JSON Error in 200 Response: code={code.value} msg={err_msg}"
+                        )
+                        raise AIProviderError(
+                            message=f"Groq Provider Error: {err_msg}",
+                            status_code=200,
+                            error_code=code,
+                            suggested_cooldown=cooldown,
+                            raw_error=data
+                        )
+
                     choices = data.get("choices")
                     if isinstance(choices, list) and len(choices) > 0:
                         first_choice = choices[0]
@@ -145,16 +191,39 @@ class GroqProvider(AIProvider):
                             message_obj = first_choice.get("message")
                             if isinstance(message_obj, dict):
                                 content_val = message_obj.get("content")
-                                if content_val is not None:
-                                    text = str(content_val).strip()
-                                    if text:
-                                        usage = data.get("usage")
-                                        return AIResponse(text=text, provider=self.name, model=self.model, usage=usage)
+                                content_text = _extract_content_text(content_val)
+                                if content_text:
+                                    usage = data.get("usage")
+                                    return AIResponse(
+                                        text=content_text,
+                                        provider=self.name,
+                                        model=self.model,
+                                        usage=usage
+                                    )
+
+                resp_headers = getattr(resp, "headers", None) or {}
+                request_id = resp_headers.get("x-request-id") or resp_headers.get("x-groq-request-id") or resp_headers.get("req_id")
+                finish_reason = None
+                choices_len = 0
+                if isinstance(data, dict):
+                    choices = data.get("choices")
+                    if isinstance(choices, list):
+                        choices_len = len(choices)
+                        if choices_len > 0 and isinstance(choices[0], dict):
+                            finish_reason = choices[0].get("finish_reason")
+
+                raw_text = getattr(resp, "text", "") or ""
+                preview = _redact_key(raw_text[:200], api_key)
+                logger.warning(
+                    f"Groq empty/invalid response: status=200 request_id={request_id} finish_reason={finish_reason} choices_count={choices_len} preview={preview}"
+                )
 
                 raise AIProviderError(
                     message="Groq returned invalid or empty content response structure",
+                    status_code=200,
                     error_code=ProviderErrorCode.EMPTY_RESPONSE,
-                    suggested_cooldown=DEFAULT_SERVER_ERROR_COOLDOWN
+                    suggested_cooldown=0.0,
+                    raw_error=data if 'data' in locals() and isinstance(data, dict) else None
                 )
 
             err_body = getattr(resp, "text", "") or ""

@@ -228,7 +228,7 @@ class AIHealthTracker:
                 )
             else:
                 upstream_line = f"Upstream: {upstream_provider or 'temporarily unavailable'}\n" if is_upstream or upstream_provider else ""
-                status_display = str(status_code) if status_code else "500"
+                status_display = str(status_code) if status_code is not None else "Unknown"
                 alert_msg = (
                     "🚨 AI Provider Error\n\n"
                     f"Provider: {p.name.capitalize()}\n"
