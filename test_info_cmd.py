@@ -285,3 +285,40 @@ async def test_info_cmd_inaccessible_user_and_api_errors():
     await info_cmd(upd, ctx)
     reply_text_err = msg.reply_html.call_args[0][0]
     assert "<b>Status:</b> Not in group" in reply_text_err
+
+
+@pytest.mark.asyncio
+async def test_info_cmd_status_lookup_exceptions():
+    """Test that exceptions in is_approved_user and is_bot_or_group_owner do not prevent basic info return."""
+    chat = Chat(id=-100123456789, type="supergroup")
+    sender = User(id=111, first_name="RobustUser", username="robust_uname", is_bot=False)
+
+    upd = MagicMock(spec=Update)
+    msg = AsyncMock(spec=Message)
+    upd.effective_chat = chat
+    upd.effective_user = sender
+    upd.effective_message = msg
+    upd.message = msg
+    upd.message.entities = []
+    upd.message.reply_to_message = None
+
+    ctx = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+    ctx.args = []
+    ctx.bot = AsyncMock()
+
+    member_mock = MagicMock()
+    member_mock.status = "member"
+    ctx.bot.get_chat_member.return_value = member_mock
+
+    with patch("admin.is_approved_user", side_effect=Exception("DB Error in approved check")), \
+         patch("admin.is_bot_or_group_owner", side_effect=Exception("Error in owner check")):
+        await info_cmd(upd, ctx)
+
+        msg.reply_html.assert_called_once()
+        reply_text = msg.reply_html.call_args[0][0]
+        assert "111" in reply_text
+        assert "RobustUser" in reply_text
+        assert "@robust_uname" in reply_text
+        assert "<b>Approved status:</b> No" in reply_text
+        assert "<b>Group Owner:</b> No" in reply_text
+        assert "<b>Status:</b> Member" in reply_text

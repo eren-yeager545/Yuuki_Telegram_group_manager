@@ -65,6 +65,36 @@ async def test_chat_join_request_handler_notification():
 
 
 @pytest.mark.asyncio
+async def test_chat_join_request_fallback_to_owner_recipients():
+    """Test that when send_logger_notification returns False, get_group_owner_recipients is used."""
+    chat = Chat(id=-100123456789, title="Fallback Chat", type="supergroup")
+    user = User(id=123123, first_name="Visitor", is_bot=False)
+
+    req = MagicMock(spec=ChatJoinRequest)
+    req.chat = chat
+    req.user = user
+
+    upd = MagicMock(spec=Update)
+    upd.chat_join_request = req
+
+    ctx = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+    ctx.bot = AsyncMock()
+
+    with patch("logger_helper.send_logger_notification", new_callable=AsyncMock) as mock_send_logger, \
+         patch("logger_helper.get_group_owner_recipients", new_callable=AsyncMock) as mock_recipients:
+        mock_send_logger.return_value = False
+        mock_recipients.return_value = [55555, 66666]
+
+        await chat_join_request_handler(upd, ctx)
+
+        mock_send_logger.assert_called_once()
+        mock_recipients.assert_called_once_with(ctx, chat)
+        assert ctx.bot.send_message.call_count == 2
+        sent_chat_ids = [call.kwargs["chat_id"] for call in ctx.bot.send_message.call_args_list]
+        assert sent_chat_ids == [55555, 66666]
+
+
+@pytest.mark.asyncio
 async def test_chat_join_request_callback_accept_success():
     chat_id = -100123456782
     requester_id = 123456782

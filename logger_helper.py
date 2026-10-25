@@ -125,6 +125,40 @@ async def send_logger_notification(context: ContextTypes.DEFAULT_TYPE, message_t
     return sent_any
 
 
+async def get_group_owner_recipients(context: ContextTypes.DEFAULT_TYPE, chat) -> list:
+    recipients = []
+    setting_owner = get_setting(chat.id, 'group_owner_id', '') or get_setting(chat.id, 'owner_id', '')
+    if setting_owner and str(setting_owner).lstrip('-').isdigit():
+        recipients.append(int(setting_owner))
+
+    if not recipients:
+        grp = get_group_by_id(chat.id)
+        if grp and len(grp) >= 5 and grp[4]:
+            recipients.append(int(grp[4]))
+
+    if not recipients and context and getattr(context, 'bot', None):
+        try:
+            admins = await context.bot.get_chat_administrators(chat.id)
+            for adm in admins:
+                if getattr(adm, 'status', '') in ('creator', 'CREATOR'):
+                    recipients.append(int(adm.user.id))
+                    break
+        except Exception as e:
+            logger.warning(f"Failed to fetch chat admins to find group owner for {chat.id}: {e}")
+
+    if not recipients:
+        owner_ids = getattr(config, 'OWNER_IDS', [])
+        if not owner_ids and getattr(config, 'OWNER_ID', None):
+            owner_ids = [config.OWNER_ID]
+        recipients = [int(oid) for oid in owner_ids if oid]
+
+    res = []
+    for r in recipients:
+        if r not in res:
+            res.append(r)
+    return res
+
+
 async def get_group_link(chat: Chat, context: ContextTypes.DEFAULT_TYPE) -> str:
     username = getattr(chat, 'username', None)
     if username:

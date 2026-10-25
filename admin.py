@@ -425,14 +425,7 @@ async def purge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
     reply_msg = update.message.reply_to_message if update.message else None
-    if not reply_msg:
-        await update.message.reply_text("🌸 Please reply to a message to specify the starting point for purging desu~ 💕")
-        return
 
-    start_id = min(reply_msg.message_id, update.message.message_id)
-    end_id = max(reply_msg.message_id, update.message.message_id)
-
-    target_user = None
     has_target_arg = False
     if context and context.args:
         has_target_arg = True
@@ -442,48 +435,69 @@ async def purge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 has_target_arg = True
                 break
 
+    target_user = None
     if has_target_arg:
         target_user = await resolve_target_user(update, context)
 
-    if not target_user and reply_msg and reply_msg.from_user:
-        target_user = reply_msg.from_user
+    if not reply_msg:
+        if not target_user:
+            await update.message.reply_text("🌸 Please reply to a message or specify a user (@username or USER_ID) to purge desu~ 💕")
+            return
+        recorded_mids = get_user_messages(chat_id, target_user.id)
+        candidate_ids = set(recorded_mids)
+        if update.message and update.message.from_user and update.message.from_user.id == target_user.id:
+            candidate_ids.add(update.message.message_id)
+        candidate_list = sorted(list(candidate_ids))
+        is_range_purge = False
+    else:
+        if not target_user and reply_msg.from_user:
+            target_user = reply_msg.from_user
 
-    if not target_user:
-        await update.message.reply_text("🌸 Could not identify the target user to purge desu~ 💕")
-        return
+        if not target_user:
+            await update.message.reply_text("🌸 Could not identify the target user to purge desu~ 💕")
+            return
 
-    recorded_ids = set(get_user_message_ids_in_range(chat_id, target_user.id, start_id, end_id))
-    if reply_msg and reply_msg.from_user and reply_msg.from_user.id == target_user.id:
-        recorded_ids.add(reply_msg.message_id)
-    if update.message and update.message.from_user and update.message.from_user.id == target_user.id:
-        recorded_ids.add(update.message.message_id)
+        start_id = min(reply_msg.message_id, update.message.message_id)
+        end_id = max(reply_msg.message_id, update.message.message_id)
 
-    candidate_ids = sorted(list(recorded_ids))
+        recorded_ids = set(get_user_message_ids_in_range(chat_id, target_user.id, start_id, end_id))
+        if reply_msg.from_user and reply_msg.from_user.id == target_user.id:
+            recorded_ids.add(reply_msg.message_id)
+        if update.message and update.message.from_user and update.message.from_user.id == target_user.id:
+            recorded_ids.add(update.message.message_id)
+
+        candidate_list = sorted(list(recorded_ids))
+        is_range_purge = True
 
     uname = getattr(target_user, 'username', None)
     utag = f"@{uname.lstrip('@')}" if uname else format_user_link(target_user.id, getattr(target_user, 'first_name', 'User'))
 
-    if not candidate_ids:
-        await update.message.reply_html(f"🌸 No recorded messages from {utag} found in the specified purge range desu~")
+    if not candidate_list:
+        if is_range_purge:
+            await update.message.reply_html(f"🌸 No recorded messages from {utag} found in the specified purge range desu~")
+        else:
+            await update.message.reply_html(f"🌸 No recorded messages found for {utag} desu~")
         return
 
     deleted_count = 0
     failed_count = 0
     deleted_ids = []
 
-    for i in range(0, len(candidate_ids), 100):
-        batch = candidate_ids[i:i + 100]
+    for i in range(0, len(candidate_list), 100):
+        batch = candidate_list[i:i + 100]
         try:
             await context.bot.delete_messages(chat_id=chat_id, message_ids=batch)
             deleted_count += len(batch)
             deleted_ids.extend(batch)
-        except Exception:
+        except Exception as batch_err:
+            logger.warning(f"Batch delete_messages failed for chat {chat_id}: {batch_err}")
             for mid in batch:
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=mid)
                     deleted_count += 1
                     deleted_ids.append(mid)
-                except Exception:
+                except Exception as single_err:
+                    logger.warning(f"Failed to delete message {mid} in chat {chat_id}: {single_err}")
                     failed_count += 1
 
     if deleted_ids:
@@ -500,8 +514,8 @@ async def purge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_msg = await context.bot.send_message(chat_id=chat_id, text=confirm_text, parse_mode='HTML')
         if status_msg and hasattr(status_msg, 'message_id'):
             asyncio.create_task(delete_status_message_later(context.bot, chat_id, status_msg.message_id, 5))
-    except Exception:
-        pass
+    except Exception as send_err:
+        logger.warning(f"Failed sending purge confirmation status message in chat {chat_id}: {send_err}")
 
 
 async def dban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -557,12 +571,14 @@ Please reply to, tag, or provide the user ID/username of the member you actually
         try:
             await context.bot.delete_messages(chat_id=chat_id, message_ids=batch)
             deleted_ids.extend(batch)
-        except Exception:
+        except Exception as batch_err:
+            logger.warning(f"Batch delete_messages in dban_cmd failed for chat {chat_id}: {batch_err}")
             for mid in batch:
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=mid)
                     deleted_ids.append(mid)
-                except Exception:
+                except Exception as single_err:
+                    logger.warning(f"Failed to delete message {mid} during dban in chat {chat_id}: {single_err}")
                     failed_count += 1
 
     if deleted_ids:
@@ -1543,7 +1559,12 @@ async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    target = await resolve_target_user(update, context, fallback_to_sender=True)
+    try:
+        target = await resolve_target_user(update, context, fallback_to_sender=True)
+    except Exception as e:
+        logger.error(f"Error resolving target user in info_cmd: {e}", exc_info=True)
+        target = update.effective_user if update else None
+
     if not target or (getattr(target, 'id', 0) == 0 and not getattr(target, 'username', None)):
         if update.message:
             await update.message.reply_text("🌸 Please reply to a user, tag (@username), or specify a valid user ID/username to get user info desu~ 💕")
@@ -1551,7 +1572,12 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = getattr(target, 'id', 0)
     if user_id == 0 and getattr(target, 'username', None):
-        u_info = get_user_by_username(target.username)
+        try:
+            u_info = get_user_by_username(target.username)
+        except Exception as e:
+            logger.error(f"DB lookup failed for username {target.username} in info_cmd: {e}", exc_info=True)
+            u_info = None
+
         if u_info:
             user_id = u_info[0]
             first_name = u_info[1] or target.username
@@ -1565,12 +1591,15 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username = getattr(target, 'username', None)
 
     if user_id and (first_name == f"User {user_id}" or not username):
-        u_db = get_user_by_id(user_id)
-        if u_db:
-            if not username and u_db[2]:
-                username = u_db[2]
-            if first_name == f"User {user_id}" and u_db[1]:
-                first_name = u_db[1]
+        try:
+            u_db = get_user_by_id(user_id)
+            if u_db:
+                if not username and u_db[2]:
+                    username = u_db[2]
+                if first_name == f"User {user_id}" and u_db[1]:
+                    first_name = u_db[1]
+        except Exception as e:
+            logger.error(f"DB lookup failed for user ID {user_id} in info_cmd: {e}", exc_info=True)
 
     escaped_first_name = html.escape(first_name)
     username_str = f"@{html.escape(username.lstrip('@'))}" if username else "Not set"
@@ -1585,9 +1614,17 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat and chat.type in ('group', 'supergroup'):
         if user_id:
-            approved_status_str = "Yes" if is_approved_user(chat.id, user_id) else "No"
-            if await is_bot_or_group_owner(chat.id, user_id, context):
-                group_owner_status_str = "Yes"
+            try:
+                approved_status_str = "Yes" if is_approved_user(chat.id, user_id) else "No"
+            except Exception as e:
+                logger.error(f"Error checking approval status for user {user_id} in chat {chat.id}: {e}", exc_info=True)
+                approved_status_str = "No"
+
+            try:
+                if await is_bot_or_group_owner(chat.id, user_id, context):
+                    group_owner_status_str = "Yes"
+            except Exception as e:
+                logger.error(f"Error checking group owner status for user {user_id} in chat {chat.id}: {e}", exc_info=True)
 
             try:
                 member = await context.bot.get_chat_member(chat.id, user_id)
@@ -1630,7 +1667,7 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.message:
             await update.message.reply_html(info_text, disable_web_page_preview=True)
     except Exception as e:
-        logger.error(f"Error sending info response: {e}")
+        logger.error(f"Error sending info response: {e}", exc_info=True)
         if update.message:
             await update.message.reply_text("🌸 Could not send user information desu~ 💕")
 
@@ -3429,7 +3466,7 @@ async def chat_join_request_handler(update: Update, context: ContextTypes.DEFAUL
                         reply_markup=keyboard
                     )
                 except Exception as e:
-                    logger.warning(f"Failed to send join request notification to owner {owner_id}: {e}")
+                    logger.error(f"Failed to send join request notification to owner {owner_id}: {e}", exc_info=True)
 
 
 async def chat_join_request_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3483,7 +3520,7 @@ async def chat_join_request_callback_handler(update: Update, context: ContextTyp
             except Exception:
                 pass
         except Exception as e:
-            logger.warning(f"Failed to approve chat join request for user {requester_id} in {target_chat_id}: {e}")
+            logger.error(f"Failed to approve chat join request for user {requester_id} in {target_chat_id}: {e}", exc_info=True)
             await query.answer("Failed to approve request (it may have expired or already been decided).", show_alert=True)
     elif action == 'd':
         try:
@@ -3498,7 +3535,7 @@ async def chat_join_request_callback_handler(update: Update, context: ContextTyp
             except Exception:
                 pass
         except Exception as e:
-            logger.warning(f"Failed to decline chat join request for user {requester_id} in {target_chat_id}: {e}")
+            logger.error(f"Failed to decline chat join request for user {requester_id} in {target_chat_id}: {e}", exc_info=True)
             await query.answer("Failed to decline request (it may have expired or already been decided).", show_alert=True)
 
 
