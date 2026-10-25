@@ -3204,7 +3204,7 @@ async def chat_join_request_handler(update: Update, context: ContextTypes.DEFAUL
         return
 
     chat = req.chat
-    user = req.user
+    request.from_user
     if not chat or not user:
         return
 
