@@ -16,7 +16,7 @@ from store import (
     list_notes, list_quizzes, list_warned_users, log_admin_action, remove_blacklist,
     reset_warns, save_buttons, save_filter, save_note, set_chat_federation, set_setting,
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
-    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members, get_safe_users, is_safe_user, add_safe_user, remove_safe_user, toggle_safe_user, get_group_by_id, upsert_user
+    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members, get_safe_users, is_safe_user, add_safe_user, remove_safe_user, toggle_safe_user, get_group_by_id, upsert_user, get_approved_users, is_approved_user, add_approved_user, remove_approved_user
 )
 from helpers import is_admin, is_owner, is_owner_or_sudo, safe_reply_error, create_custom_emoji_entities, send_reply_with_custom_emoji
 logger = logging.getLogger(__name__)
@@ -1392,10 +1392,18 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status_str = "Member"
     banned_str = "No"
+    admin_status_str = "No"
+    group_owner_status_str = "No"
+    approved_status_str = "No"
 
-    if update.effective_chat and update.effective_chat.type in ('group', 'supergroup'):
+    chat = update.effective_chat
+    if chat and chat.type in ('group', 'supergroup'):
+        approved_status_str = "Yes" if is_approved_user(chat.id, user_id) else "No"
+        if await is_bot_or_group_owner(chat.id, user_id, context):
+            group_owner_status_str = "Yes"
+
         try:
-            member = await context.bot.get_chat_member(update.effective_chat.id, user_id)
+            member = await context.bot.get_chat_member(chat.id, user_id)
             st = member.status
             status_map = {
                 'creator': 'Owner',
@@ -1406,6 +1414,8 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'kicked': 'Kicked'
             }
             status_str = status_map.get(st, st.capitalize())
+            if st in ('administrator', 'creator'):
+                admin_status_str = "Yes"
             if st == 'kicked':
                 banned_str = "Yes"
         except Exception:
@@ -1418,9 +1428,142 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔹 Username: {username_str}\n"
         f"🔗 User Link: {user_link}\n"
         f"🛡 Status: {status_str}\n"
+        f"👮 Administrator: {admin_status_str}\n"
+        f"👑 Group Owner: {group_owner_status_str}\n"
+        f"✅ Approved status: {approved_status_str}\n"
         f"🚫 Banned: {banned_str}"
     )
     await update.message.reply_html(info_text, disable_web_page_preview=True)
+
+
+async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Command to approve a replied-to user or a specified user ID / @username.
+    Only authorized admins or permitted users can execute.
+    """
+    if not update or not update.effective_chat or update.effective_chat.type not in ('group', 'supergroup'):
+        if update and update.effective_message:
+            await update.effective_message.reply_text('Gomen ne~ 🌸 This command can only be used inside group or supergroup chats desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
+        return
+
+    chat = update.effective_chat
+    if not await is_admin(update, context):
+        await update.effective_message.reply_text('Gomen ne~ 🌸 Only group admins can approve users desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
+        return
+
+    target_user = await resolve_target_user(update, context)
+    if not target_user:
+        await update.effective_message.reply_html('🌸 Please reply to a message, tag (@username), or specify a valid user ID/username to approve desu~ 💕')
+        return
+
+    target_id = target_user.id
+    target_name = getattr(target_user, 'first_name', None) or getattr(target_user, 'full_name', None) or str(target_id)
+    user_tag = format_user_tag(target_id, target_name, getattr(target_user, 'username', None))
+
+    if is_approved_user(chat.id, target_id):
+        await update.effective_message.reply_html(f'🌸 {user_tag} is already approved in this group desu~!')
+        return
+
+    try:
+        add_approved_user(chat.id, target_id)
+        if hasattr(target_user, 'first_name'):
+            upsert_user(target_id, getattr(target_user, 'full_name', target_name), getattr(target_user, 'username', None))
+        log_admin_action(chat.id, update.effective_user.id, 'approve', target_id)
+        await update.effective_message.reply_html(
+            f"✨ <b>User Approved!</b> 🌸\n\n{user_tag} is now approved in this group and will bypass applicable locks, blacklists, and antiflood restrictions desu~! 💕"
+        )
+    except Exception as e:
+        logger.error(f'Error approving user {target_id} in chat {chat.id}: {e}', exc_info=True)
+        await safe_reply_error(update.effective_message)
+
+
+async def unapprove_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Command to revoke approval for a user in the current group.
+    Only authorized admins or permitted users can execute.
+    """
+    if not update or not update.effective_chat or update.effective_chat.type not in ('group', 'supergroup'):
+        if update and update.effective_message:
+            await update.effective_message.reply_text('Gomen ne~ 🌸 This command can only be used inside group or supergroup chats desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
+        return
+
+    chat = update.effective_chat
+    if not await is_admin(update, context):
+        await update.effective_message.reply_text('Gomen ne~ 🌸 Only group admins can revoke user approval desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
+        return
+
+    target_user = await resolve_target_user(update, context)
+    if not target_user:
+        await update.effective_message.reply_html('🌸 Please reply to a message, tag (@username), or specify a valid user ID/username to unapprove desu~ 💕')
+        return
+
+    target_id = target_user.id
+    target_name = getattr(target_user, 'first_name', None) or getattr(target_user, 'full_name', None) or str(target_id)
+    user_tag = format_user_tag(target_id, target_name, getattr(target_user, 'username', None))
+
+    if not is_approved_user(chat.id, target_id):
+        await update.effective_message.reply_html(f'🌸 {user_tag} is not currently approved in this group desu~!')
+        return
+
+    try:
+        remove_approved_user(chat.id, target_id)
+        log_admin_action(chat.id, update.effective_user.id, 'unapprove', target_id)
+        await update.effective_message.reply_html(
+            f"🌸 <b>Approval Revoked!</b> ✨\n\n{user_tag} is no longer an approved user in this group desu~! 💕"
+        )
+    except Exception as e:
+        logger.error(f'Error unapproving user {target_id} in chat {chat.id}: {e}', exc_info=True)
+        await safe_reply_error(update.effective_message)
+
+
+async def approved_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Command to list all approved users in the current group.
+    """
+    if not update or not update.effective_chat or update.effective_chat.type not in ('group', 'supergroup'):
+        if update and update.effective_message:
+            await update.effective_message.reply_text('Gomen ne~ 🌸 This command can only be used inside group or supergroup chats desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
+        return
+
+    chat = update.effective_chat
+    if not await is_admin(update, context):
+        await update.effective_message.reply_text('Gomen ne~ 🌸 Only group admins can view approved users desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)')
+        return
+
+    try:
+        approved_uids = get_approved_users(chat.id)
+        if not approved_uids:
+            await update.effective_message.reply_html(
+                "📋 <b>Approved Users</b> 🌸✨\n\nThere are currently no approved users configured for this group."
+            )
+            return
+
+        lines = ["📋 <b>Approved Users List:</b> 🌸✨", ""]
+        for uid in approved_uids:
+            u_info = get_user_by_id(uid)
+            if u_info:
+                u_name = html.escape(u_info[1] or f"User {uid}")
+                u_uname = f" (@{html.escape(u_info[2])})" if u_info[2] else ""
+            else:
+                u_name = f"User {uid}"
+                u_uname = ""
+            lines.append(f"• {u_name}{u_uname} (<code>{uid}</code>)")
+
+        chunk = []
+        chunk_len = 0
+        for line in lines:
+            if chunk_len + len(line) + 1 > 3800 and chunk:
+                await update.effective_message.reply_html("\n".join(chunk), disable_web_page_preview=True)
+                chunk = [line]
+                chunk_len = len(line)
+            else:
+                chunk.append(line)
+                chunk_len += len(line) + 1
+        if chunk:
+            await update.effective_message.reply_html("\n".join(chunk), disable_web_page_preview=True)
+    except Exception as e:
+        logger.error(f"Error listing approved users in chat {chat.id}: {e}", exc_info=True)
+        await safe_reply_error(update.effective_message)
 
 
 async def settitle_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -19,7 +19,7 @@ from store import (
     init_db, get_active_groups, upsert_group, upsert_user, get_filters, get_setting,
     touch_member, update_member_status, get_note, get_random_quiz, get_buttons, list_blacklists,
     get_chat_federation, get_fed_ban, get_expired_temp_actions, clear_temp_action, is_safe_user, get_group_by_id,
-    log_admin_action, delete_user_data, get_global_link, record_user_message,
+    log_admin_action, delete_user_data, get_global_link, record_user_message, is_approved_user,
 )
 from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd, feedback_cmd, mybot_cmd, build_mybot_keyboard, is_owner_category, is_admin_category
 from broadcast import broadcast_cmd, broadcast_callback_handler, handle_broadcast_content
@@ -962,42 +962,68 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
                 return
 
+        is_approved = is_approved_user(chat.id, user.id)
+
         has_link = bool('http://' in lower or 'https://' in lower or 't.me/' in lower)
         has_sticker = bool(msg.sticker)
         has_voice = bool(msg.voice)
 
-        lock_checks = {
-            'all': True,
-            'links': has_link,
-            'media': bool(msg.photo or msg.video or msg.document or msg.audio or msg.sticker or msg.voice),
-            'stickers': has_sticker,
-            'gifs': bool(msg.animation),
-            'polls': bool(msg.poll),
-            'forwards': bool(msg.forward_origin),
-            'bots': bool(user.is_bot),
-            'voice': has_voice,
-            'video_notes': bool(msg.video_note),
-            'documents': bool(msg.document),
-            'photos': bool(msg.photo),
-            'videos': bool(msg.video),
-            'audio': bool(msg.audio),
-            'commands': bool(msg.text and msg.text.startswith('/')),
-            'hashtags': '#' in lower,
-            'mentions': '@' in lower,
-            'inline': 'tg://user?id=' in lower,
-            'contact': bool(msg.contact),
-        }
-        for key, matched in lock_checks.items():
-            if matched and get_setting(chat.id, f'lock_{key}', 'off') == 'on':
-                if await maybe_delete(msg):
-                    log_admin_action(chat.id, user.id, f'lock_{key}_delete', user.id)
+        if not is_approved:
+            lock_checks = {
+                'all': True,
+                'links': has_link,
+                'media': bool(msg.photo or msg.video or msg.document or msg.audio or msg.sticker or msg.voice),
+                'stickers': has_sticker,
+                'gifs': bool(msg.animation),
+                'polls': bool(msg.poll),
+                'forwards': bool(msg.forward_origin),
+                'bots': bool(user.is_bot),
+                'voice': has_voice,
+                'video_notes': bool(msg.video_note),
+                'documents': bool(msg.document),
+                'photos': bool(msg.photo),
+                'videos': bool(msg.video),
+                'audio': bool(msg.audio),
+                'commands': bool(msg.text and msg.text.startswith('/')),
+                'hashtags': '#' in lower,
+                'mentions': '@' in lower,
+                'inline': 'tg://user?id=' in lower,
+                'contact': bool(msg.contact),
+            }
+            for key, matched in lock_checks.items():
+                if matched and get_setting(chat.id, f'lock_{key}', 'off') == 'on':
+                    if await maybe_delete(msg):
+                        log_admin_action(chat.id, user.id, f'lock_{key}_delete', user.id)
+                        return
+            for trigger, action in list_blacklists(chat.id):
+                if trigger and trigger in lower:
+                    await maybe_delete(msg)
+                    try:
+                        if action == 'warn':
+                            add_warn(chat.id, user.id, f'Blacklist: {trigger}')
+                        elif action == 'mute':
+                            await context.bot.restrict_chat_member(chat.id, user.id, permissions=ChatPermissions(can_send_messages=False))
+                        elif action == 'kick':
+                            await context.bot.ban_chat_member(chat.id, user.id)
+                            await context.bot.unban_chat_member(chat.id, user.id)
+                        elif action == 'ban':
+                            await context.bot.ban_chat_member(chat.id, user.id)
+                    except Exception:
+                        pass
+                    log_admin_action(chat.id, user.id, 'blacklist_trigger', user.id, f'{trigger}->{action}')
                     return
-        for trigger, action in list_blacklists(chat.id):
-            if trigger and trigger in lower:
+            key = (chat.id, user.id)
+            dq = message_cache[key]
+            dq.append(now)
+            while dq and now - dq[0] > 8:
+                dq.popleft()
+            if len(dq) >= int(get_setting(chat.id, 'flood_limit', '5')):
                 await maybe_delete(msg)
+                action = get_setting(chat.id, 'flood_action', 'delete')
+                duration = parse_duration_to_seconds(get_setting(chat.id, 'flood_time', '10m'))
                 try:
                     if action == 'warn':
-                        add_warn(chat.id, user.id, f'Blacklist: {trigger}')
+                        add_warn(chat.id, user.id, 'Flood')
                     elif action == 'mute':
                         await context.bot.restrict_chat_member(chat.id, user.id, permissions=ChatPermissions(can_send_messages=False))
                     elif action == 'kick':
@@ -1005,43 +1031,20 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.unban_chat_member(chat.id, user.id)
                     elif action == 'ban':
                         await context.bot.ban_chat_member(chat.id, user.id)
+                    elif action == 'tmute' and duration:
+                        until = int(time.time()) + duration
+                        await context.bot.restrict_chat_member(chat.id, user.id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
+                        from store import add_temp_action
+                        add_temp_action(chat.id, user.id, 'tmute', until)
+                    elif action == 'tban' and duration:
+                        until = int(time.time()) + duration
+                        await context.bot.ban_chat_member(chat.id, user.id, until_date=until)
+                        from store import add_temp_action
+                        add_temp_action(chat.id, user.id, 'tban', until)
                 except Exception:
                     pass
-                log_admin_action(chat.id, user.id, 'blacklist_trigger', user.id, f'{trigger}->{action}')
+                log_admin_action(chat.id, user.id, 'flood_trigger', user.id, action)
                 return
-        key = (chat.id, user.id)
-        dq = message_cache[key]
-        dq.append(now)
-        while dq and now - dq[0] > 8:
-            dq.popleft()
-        if len(dq) >= int(get_setting(chat.id, 'flood_limit', '5')):
-            await maybe_delete(msg)
-            action = get_setting(chat.id, 'flood_action', 'delete')
-            duration = parse_duration_to_seconds(get_setting(chat.id, 'flood_time', '10m'))
-            try:
-                if action == 'warn':
-                    add_warn(chat.id, user.id, 'Flood')
-                elif action == 'mute':
-                    await context.bot.restrict_chat_member(chat.id, user.id, permissions=ChatPermissions(can_send_messages=False))
-                elif action == 'kick':
-                    await context.bot.ban_chat_member(chat.id, user.id)
-                    await context.bot.unban_chat_member(chat.id, user.id)
-                elif action == 'ban':
-                    await context.bot.ban_chat_member(chat.id, user.id)
-                elif action == 'tmute' and duration:
-                    until = int(time.time()) + duration
-                    await context.bot.restrict_chat_member(chat.id, user.id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
-                    from store import add_temp_action
-                    add_temp_action(chat.id, user.id, 'tmute', until)
-                elif action == 'tban' and duration:
-                    until = int(time.time()) + duration
-                    await context.bot.ban_chat_member(chat.id, user.id, until_date=until)
-                    from store import add_temp_action
-                    add_temp_action(chat.id, user.id, 'tban', until)
-            except Exception:
-                pass
-            log_admin_action(chat.id, user.id, 'flood_trigger', user.id, action)
-            return
         quiz = active_quizzes.get(chat.id)
         if quiz and time.time() <= quiz.get('expires_at', 0) and not quiz.get('answered'):
             cleaned = ' '.join(txt.strip().lower().split())
@@ -1303,6 +1306,9 @@ def main():
         ('towhatsapp', towhatsapp_cmd, 'Utility Commands', 'Convert Telegram sticker pack to WhatsApp format', '/towhatsapp https://t.me/addstickers/pack_name'),
     ]
     admin_cmds = [
+        ('approve', approve_cmd, 'Group Management Commands', 'Approve a replied-to user or specified user ID to bypass moderation restrictions', '/approve'),
+        ('unapprove', unapprove_cmd, 'Group Management Commands', 'Revoke approval for a user in the group', '/unapprove'),
+        ('approved', approved_cmd, 'Group Management Commands', 'List all approved users in the group', '/approved'),
         ('safe', safe_cmd, 'Group Management Commands', 'Add user to Night Mode safe list', '.safe or /safe'),
         ('normie', normie_cmd, 'Group Management Commands', 'Remove user from Night Mode safe list', '.normie or /normie'),
         ('slist', slist_cmd, 'Group Management Commands', 'List Night Mode safe users in group', '.slist or /slist'),
