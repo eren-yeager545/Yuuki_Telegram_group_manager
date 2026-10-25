@@ -17,7 +17,7 @@ from store import (
     reset_warns, save_buttons, save_filter, save_note, set_chat_federation, set_setting,
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
     get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members, get_safe_users, is_safe_user, add_safe_user, remove_safe_user, toggle_safe_user, get_group_by_id, upsert_user, get_approved_users, is_approved_user, add_approved_user, remove_approved_user,
-    set_maintenance_mode, is_maintenance_mode
+    set_maintenance_mode, is_maintenance_mode, get_user_message_ids_in_range, delete_recorded_message_ids
 )
 from helpers import is_admin, is_owner, is_owner_or_sudo, safe_reply_error, create_custom_emoji_entities, send_reply_with_custom_emoji
 logger = logging.getLogger(__name__)
@@ -137,8 +137,19 @@ async def resolve_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not update or not update.message:
         return None
 
-    if update.message.reply_to_message and update.message.reply_to_message.from_user:
-        return update.message.reply_to_message.from_user
+    if context and context.args:
+        first_arg = context.args[0].strip()
+        if first_arg.startswith('@'):
+            u_info = get_user_by_username(first_arg)
+            if u_info:
+                return ResolvedUser(u_info[0], u_info[1], u_info[2])
+        elif first_arg.isdigit() or (first_arg.startswith('-') and first_arg[1:].isdigit()):
+            uid = int(first_arg)
+            u_info = get_user_by_id(uid)
+            if u_info:
+                return ResolvedUser(u_info[0], u_info[1], u_info[2])
+            else:
+                return ResolvedUser(uid, f'User {uid}', None)
 
     if update.message.entities:
         for entity in update.message.entities:
@@ -153,19 +164,8 @@ async def resolve_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE
                 if u_info:
                     return ResolvedUser(u_info[0], u_info[1], u_info[2])
 
-    if context and context.args:
-        first_arg = context.args[0].strip()
-        if first_arg.startswith('@'):
-            u_info = get_user_by_username(first_arg)
-            if u_info:
-                return ResolvedUser(u_info[0], u_info[1], u_info[2])
-        elif first_arg.isdigit() or (first_arg.startswith('-') and first_arg[1:].isdigit()):
-            uid = int(first_arg)
-            u_info = get_user_by_id(uid)
-            if u_info:
-                return ResolvedUser(u_info[0], u_info[1], u_info[2])
-            else:
-                return ResolvedUser(uid, f'User {uid}', None)
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        return update.message.reply_to_message.from_user
 
     return None
 
@@ -399,6 +399,97 @@ async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
+async def delete_status_message_later(bot, chat_id: int, message_id: int, delay: int = 5):
+    await asyncio.sleep(delay)
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+
+
+async def purge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await admin_only(update, context):
+        return
+
+    chat_id = update.effective_chat.id
+    reply_msg = update.message.reply_to_message if update.message else None
+    if not reply_msg:
+        await update.message.reply_text("🌸 Please reply to a message to specify the starting point for purging desu~ 💕")
+        return
+
+    start_id = min(reply_msg.message_id, update.message.message_id)
+    end_id = max(reply_msg.message_id, update.message.message_id)
+
+    target_user = None
+    has_target_arg = False
+    if context and context.args:
+        has_target_arg = True
+    elif update.message and update.message.entities:
+        for ent in update.message.entities:
+            if ent.type in ('mention', 'text_mention') and ent.offset > 0:
+                has_target_arg = True
+                break
+
+    if has_target_arg:
+        target_user = await resolve_target_user(update, context)
+
+    if target_user:
+        recorded_ids = set(get_user_message_ids_in_range(chat_id, target_user.id, start_id, end_id))
+        if reply_msg.from_user and reply_msg.from_user.id == target_user.id:
+            recorded_ids.add(reply_msg.message_id)
+        if update.message.from_user and update.message.from_user.id == target_user.id:
+            recorded_ids.add(update.message.message_id)
+        candidate_ids = sorted(list(recorded_ids))
+    else:
+        candidate_ids = list(range(start_id, end_id + 1))
+
+    if not candidate_ids:
+        if target_user:
+            uname = getattr(target_user, 'username', None)
+            utag = f"@{uname.lstrip('@')}" if uname else format_user_link(target_user.id, getattr(target_user, 'first_name', 'User'))
+            await update.message.reply_html(f"🌸 No messages from {utag} found in the specified purge range desu~")
+        else:
+            await update.message.reply_text("🌸 No messages found in the specified range desu~")
+        return
+
+    deleted_count = 0
+    deleted_ids = []
+
+    for i in range(0, len(candidate_ids), 100):
+        batch = candidate_ids[i:i + 100]
+        try:
+            await context.bot.delete_messages(chat_id=chat_id, message_ids=batch)
+            deleted_count += len(batch)
+            deleted_ids.extend(batch)
+        except Exception:
+            for mid in batch:
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+                    deleted_count += 1
+                    deleted_ids.append(mid)
+                except Exception:
+                    pass
+
+    if deleted_ids:
+        delete_recorded_message_ids(chat_id, deleted_ids)
+
+    log_admin_action(chat_id, update.effective_user.id, 'purge', target_user.id if target_user else 0, details=f"deleted={deleted_count}")
+
+    if target_user:
+        uname = getattr(target_user, 'username', None)
+        utag = f"@{uname.lstrip('@')}" if uname else format_user_link(target_user.id, getattr(target_user, 'first_name', 'User'))
+        confirm_text = f"🗑️ Purged {deleted_count} message(s) from {utag} desu~ 🌸"
+    else:
+        confirm_text = f"🗑️ Purged {deleted_count} message(s) desu~ 🌸"
+
+    try:
+        status_msg = await context.bot.send_message(chat_id=chat_id, text=confirm_text, parse_mode='HTML')
+        if status_msg and hasattr(status_msg, 'message_id'):
+            asyncio.create_task(delete_status_message_later(context.bot, chat_id, status_msg.message_id, 5))
+    except Exception:
+        pass
+
+
 async def dban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
@@ -415,6 +506,11 @@ async def dban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("😭 Nice try! You can't ban yourself. Pick another member, commander! 🫡")
         return
 
+    bot_id = context.bot.id if hasattr(context, 'bot') and hasattr(context.bot, 'id') else None
+    if (bot_id and target_id == bot_id) or (getattr(target, 'is_bot', False) and bot_id and target_id == bot_id):
+        await update.message.reply_text("🥺 Aww, please don't ban me! I'm here to help you manage the group desu~ 💕")
+        return
+
     if await is_target_admin(chat_id, target_id, context):
         await update.message.reply_text("""🛡️ Hey! This user is a group admin.
 Please reply to, tag, or provide the user ID/username of the member you actually want to ban. 👀""")
@@ -428,30 +524,41 @@ Please reply to, tag, or provide the user ID/username of the member you actually
 
     try:
         await context.bot.ban_chat_member(chat_id, target_id, revoke_messages=True)
-    except Exception as e:
-        await safe_reply_error(update.effective_message, "🌷 Aww, Telegram won't let me perform that action on this member.")
+    except Exception:
+        await safe_reply_error(update.effective_message, "🌷 Aww, Telegram won't let me perform that action on this member. Please check that I have administrator permissions to ban users!")
         return
 
-    mids = clear_user_messages(chat_id, target_id)
-    for mid in mids:
-        try:
-            await context.bot.delete_message(chat_id, mid)
-        except Exception:
-            pass
+    recorded_mids = clear_user_messages(chat_id, target_id)
+    candidate_mids = set(recorded_mids)
 
-    if update.message.reply_to_message:
+    if update.message.reply_to_message and update.message.reply_to_message.from_user and update.message.reply_to_message.from_user.id == target_id:
+        candidate_mids.add(update.message.reply_to_message.message_id)
+
+    deleted_count = 0
+    candidate_list = sorted(list(candidate_mids))
+
+    for i in range(0, len(candidate_list), 100):
+        batch = candidate_list[i:i + 100]
         try:
-            await context.bot.delete_message(chat_id, update.message.reply_to_message.message_id)
+            await context.bot.delete_messages(chat_id=chat_id, message_ids=batch)
+            deleted_count += len(batch)
         except Exception:
-            pass
+            for mid in batch:
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+                    deleted_count += 1
+                except Exception:
+                    pass
+
     try:
         await context.bot.delete_message(chat_id, update.message.message_id)
     except Exception:
         pass
 
-    log_admin_action(chat_id, commander_id, 'dban', target_id)
-    await update.effective_chat.send_message(
-        f"Banned and swept clean! 🔨🧹 {user_tag} has been banned and all their messages were purged from the group! Stay safe everyone~ 🌸 (⁠≧⁠∇⁠≦⁠)/",
+    log_admin_action(chat_id, commander_id, 'dban', target_id, details=f"deleted={deleted_count}")
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"Banned and swept clean! 🔨🧹 {user_tag} has been banned and {deleted_count} of their message(s) were purged from the group! Stay safe everyone~ 🌸 (⁠≧⁠∇⁠≦⁠)/",
         parse_mode='HTML'
     )
 
