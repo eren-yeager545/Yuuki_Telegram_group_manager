@@ -87,11 +87,11 @@ def parse_logger_target(raw_target: Union[int, str]) -> Optional[Union[int, str]
     return target_str
 
 
-async def send_logger_notification(context: ContextTypes.DEFAULT_TYPE, message_text: str, group_chat_id: Optional[int] = None):
+async def send_logger_notification(context: ContextTypes.DEFAULT_TYPE, message_text: str, group_chat_id: Optional[int] = None, reply_markup=None, parse_mode: Optional[str] = None) -> bool:
     logger_status = get_setting(0, 'logger_status', 'on').lower()
     if logger_status == 'off':
         logger.info("Logger notification skipped: logger is disabled (OFF).")
-        return
+        return False
 
     targets = []
 
@@ -108,13 +108,21 @@ async def send_logger_notification(context: ContextTypes.DEFAULT_TYPE, message_t
 
     if not targets:
         logger.info("Logger notification skipped: no LOG_CHANNEL_ID or logger link configured.")
-        return
+        return False
 
+    sent_any = False
     for target_id in targets:
         try:
-            await context.bot.send_message(chat_id=target_id, text=message_text, disable_web_page_preview=True)
+            kwargs = {'chat_id': target_id, 'text': message_text, 'disable_web_page_preview': True}
+            if reply_markup is not None:
+                kwargs['reply_markup'] = reply_markup
+            if parse_mode is not None:
+                kwargs['parse_mode'] = parse_mode
+            await context.bot.send_message(**kwargs)
+            sent_any = True
         except Exception as e:
             logger.warning("Failed sending logger notification to %s: %s", target_id, type(e).__name__)
+    return sent_any
 
 
 async def get_group_link(chat: Chat, context: ContextTypes.DEFAULT_TYPE) -> str:

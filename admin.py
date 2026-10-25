@@ -17,7 +17,8 @@ from store import (
     reset_warns, save_buttons, save_filter, save_note, set_chat_federation, set_setting,
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
     get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members, get_safe_users, is_safe_user, add_safe_user, remove_safe_user, toggle_safe_user, get_group_by_id, upsert_user, get_approved_users, is_approved_user, add_approved_user, remove_approved_user,
-    set_maintenance_mode, is_maintenance_mode, get_user_message_ids_in_range, delete_recorded_message_ids
+    set_maintenance_mode, is_maintenance_mode, get_user_message_ids_in_range, delete_recorded_message_ids,
+    save_join_request_decision, get_join_request_decision
 )
 from helpers import is_admin, is_owner, is_owner_or_sudo, safe_reply_error, create_custom_emoji_entities, send_reply_with_custom_emoji
 logger = logging.getLogger(__name__)
@@ -3322,6 +3323,123 @@ async def normie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f'Error removing safe user {target_id} in chat {chat.id}: {e}', exc_info=True)
         await safe_reply_error(update.effective_message)
+
+
+async def chat_join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    req = update.chat_join_request
+    if not req:
+        return
+
+    chat = req.chat
+    user = req.user
+    if not chat or not user:
+        return
+
+    display_name = html.escape(user.full_name or user.first_name or "User")
+    username_str = f"@{user.username}" if user.username else "Not set"
+    user_id_str = str(user.id)
+    chat_title = html.escape(chat.title or "our group")
+
+    msg_text = (
+        "🌸 Yuki noticed a new visitor!\n\n"
+        f"Someone wants to join {chat_title}. 💗\n\n"
+        f"👤 Name: {display_name}\n"
+        f"🪪 Username: {username_str}\n"
+        f"🆔 User ID: \"{user_id_str}\"\n\n"
+        "\"Should we welcome our new visitor into the lounge?\""
+    )
+
+    accept_btn = InlineKeyboardButton("💚 Accept", callback_data=f"cjr:a:{chat.id}:{user.id}", api_kwargs={'style': 'success'})
+    decline_btn = InlineKeyboardButton("❤️ Decline", callback_data=f"cjr:d:{chat.id}:{user.id}", api_kwargs={'style': 'danger'})
+    keyboard = InlineKeyboardMarkup([[accept_btn, decline_btn]])
+
+    from logger_helper import send_logger_notification
+    sent_to_logger = await send_logger_notification(context, msg_text, group_chat_id=chat.id, reply_markup=keyboard)
+
+    if not sent_to_logger:
+        # Fallback to group owner / admins DMs
+        from logger_helper import get_group_owner_recipients
+        recipients = await get_group_owner_recipients(context, chat)
+        for owner_id in recipients:
+            if owner_id:
+                try:
+                    await context.bot.send_message(
+                        chat_id=owner_id,
+                        text=msg_text,
+                        reply_markup=keyboard
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send join request notification to owner {owner_id}: {e}")
+
+
+async def chat_join_request_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data or not query.data.startswith("cjr:"):
+        return
+
+    acting_user = update.effective_user
+    if not acting_user:
+        return
+
+    parts = query.data.split(":")
+    if len(parts) < 4:
+        await query.answer("Invalid request data.", show_alert=True)
+        return
+
+    action, target_chat_id_str, requester_id_str = parts[1], parts[2], parts[3]
+    try:
+        target_chat_id = int(target_chat_id_str)
+        requester_id = int(requester_id_str)
+    except ValueError:
+        await query.answer("Invalid parameter formats.", show_alert=True)
+        return
+
+    # Validate acting administrator permissions in target chat
+    is_admin_user = await is_target_admin(target_chat_id, acting_user.id, context)
+    if not is_admin_user:
+        await query.answer("Gomen ne~ 🌸 Only group admins can manage join requests for this chat desu! 💕", show_alert=True)
+        return
+
+    # Prevent duplicate decisions
+    existing_decision = get_join_request_decision(target_chat_id, requester_id)
+    if existing_decision:
+        past_action, past_admin_id, _ = existing_decision
+        status_disp = "accepted" if past_action in ('a', 'accept', 'accepted') else "declined"
+        await query.answer(f"This join request has already been {status_disp}!", show_alert=True)
+        return
+
+    admin_disp = html.escape(acting_user.full_name or acting_user.first_name or f"Admin {acting_user.id}")
+
+    if action == 'a':
+        try:
+            await context.bot.approve_chat_join_request(chat_id=target_chat_id, user_id=requester_id)
+            save_join_request_decision(target_chat_id, requester_id, 'accepted', acting_user.id)
+            await query.answer("Join request accepted! 💚")
+
+            orig_text = query.message.text or ""
+            new_text = orig_text + f"\n\n✅ <b>Request Accepted</b> by {admin_disp}"
+            try:
+                await query.edit_message_text(new_text, parse_mode="HTML")
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"Failed to approve chat join request for user {requester_id} in {target_chat_id}: {e}")
+            await query.answer("Failed to approve request (it may have expired or already been decided).", show_alert=True)
+    elif action == 'd':
+        try:
+            await context.bot.decline_chat_join_request(chat_id=target_chat_id, user_id=requester_id)
+            save_join_request_decision(target_chat_id, requester_id, 'declined', acting_user.id)
+            await query.answer("Join request declined. ❤️")
+
+            orig_text = query.message.text or ""
+            new_text = orig_text + f"\n\n❌ <b>Request Declined</b> by {admin_disp}"
+            try:
+                await query.edit_message_text(new_text, parse_mode="HTML")
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"Failed to decline chat join request for user {requester_id} in {target_chat_id}: {e}")
+            await query.answer("Failed to decline request (it may have expired or already been decided).", show_alert=True)
 
 
 async def slist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -11,7 +11,7 @@ import uuid
 from typing import Optional
 from collections import defaultdict, deque
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, MessageEntity
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, ChatMemberHandler, TypeHandler, filters, ApplicationHandlerStop
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, ChatMemberHandler, ChatJoinRequestHandler, TypeHandler, filters, ApplicationHandlerStop
 from logger_helper import log_user_started_event, log_group_added_event, log_group_removed_event, log_user_joined_group_event, send_logger_notification
 import config
 from config import BOT_TOKEN, OWNER_IDS, OWNER_ID, LOG_CHANNEL_ID, QUIZ_INTERVAL_SECONDS, SEEN_UPDATE_COOLDOWN_SECONDS, PORT, WEBHOOK_URL, WEBHOOK_PATH, WEBHOOK_SECRET
@@ -1424,7 +1424,9 @@ def main():
     app.add_handler(CallbackQueryHandler(kick_callback_handler, pattern='^kick_'))
     app.add_handler(CallbackQueryHandler(broadcast_callback_handler, pattern='^bcast_'))
     app.add_handler(CallbackQueryHandler(ttt_callback_handler, pattern='^ttt_'))
+    app.add_handler(CallbackQueryHandler(chat_join_request_callback_handler, pattern='^cjr:'))
     app.add_handler(CallbackQueryHandler(homepage_callback))
+    app.add_handler(ChatJoinRequestHandler(chat_join_request_handler))
     app.add_handler(ChatMemberHandler(chat_member_router, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.StatusUpdate.ALL, service_router))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.StatusUpdate.ALL, message_router))
