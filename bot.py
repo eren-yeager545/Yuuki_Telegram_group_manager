@@ -12,7 +12,7 @@ from typing import Optional
 from collections import defaultdict, deque
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions, MessageEntity
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, ChatMemberHandler, ChatJoinRequestHandler, TypeHandler, filters, ApplicationHandlerStop
-from logger_helper import log_user_started_event, log_group_added_event, log_group_removed_event, log_user_joined_group_event, send_logger_notification
+from logger_helper import log_user_started_event, log_group_added_event, log_group_removed_event, log_user_joined_group_event, send_logger_notification, get_group_owner_recipients
 import config
 from config import BOT_TOKEN, OWNER_IDS, OWNER_ID, LOG_CHANNEL_ID, QUIZ_INTERVAL_SECONDS, SEEN_UPDATE_COOLDOWN_SECONDS, PORT, WEBHOOK_URL, WEBHOOK_PATH, WEBHOOK_SECRET
 from store import (
@@ -553,38 +553,6 @@ async def track_profile_update_handler(update: Update, context: ContextTypes.DEF
         logger.error(f"Error in track_profile_update_handler: {e}", exc_info=True)
 
 
-async def get_group_owner_recipients(context: ContextTypes.DEFAULT_TYPE, chat) -> list:
-    recipients = []
-    setting_owner = get_setting(chat.id, 'group_owner_id', '') or get_setting(chat.id, 'owner_id', '')
-    if setting_owner and str(setting_owner).lstrip('-').isdigit():
-        recipients.append(int(setting_owner))
-
-    if not recipients:
-        grp = get_group_by_id(chat.id)
-        if grp and len(grp) >= 5 and grp[4]:
-            recipients.append(int(grp[4]))
-
-    if not recipients and context and getattr(context, 'bot', None):
-        try:
-            admins = await context.bot.get_chat_administrators(chat.id)
-            for adm in admins:
-                if getattr(adm, 'status', '') in ('creator', 'CREATOR'):
-                    recipients.append(int(adm.user.id))
-                    break
-        except Exception as e:
-            logger.warning(f"Failed to fetch chat admins to find group owner for {chat.id}: {e}")
-
-    if not recipients:
-        owner_ids = getattr(config, 'OWNER_IDS', [])
-        if not owner_ids and getattr(config, 'OWNER_ID', None):
-            owner_ids = [config.OWNER_ID]
-        recipients = [int(oid) for oid in owner_ids if oid]
-
-    res = []
-    for r in recipients:
-        if r not in res:
-            res.append(r)
-    return res
 
 
 async def send_night_mode_permission_error_notification(context: ContextTypes.DEFAULT_TYPE, chat, msg_id: int, exc_type: str, err_desc: str):
