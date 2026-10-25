@@ -3222,27 +3222,25 @@ async def chat_join_request_handler(update: Update, context: ContextTypes.DEFAUL
         "\"Should we welcome our new visitor into the lounge?\""
     )
 
-    accept_btn = InlineKeyboardButton("💚 Accept", callback_data=f"cjr:a:{chat.id}:{user.id}", api_kwargs={'style': 'success'})
-    decline_btn = InlineKeyboardButton("❤️ Decline", callback_data=f"cjr:d:{chat.id}:{user.id}", api_kwargs={'style': 'danger'})
-    keyboard = InlineKeyboardMarkup([[accept_btn, decline_btn]])
+    approve_btn = InlineKeyboardButton("✅ Approve", callback_data=f"cjr:a:{chat.id}:{user.id}")
+    decline_btn = InlineKeyboardButton("❌ Decline", callback_data=f"cjr:d:{chat.id}:{user.id}")
+    keyboard = InlineKeyboardMarkup([[approve_btn, decline_btn]])
+
+    try:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=msg_text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Failed to send join request notification in group {chat.id}: {e}", exc_info=True)
 
     from logger_helper import send_logger_notification
-    sent_to_logger = await send_logger_notification(context, msg_text, group_chat_id=chat.id, reply_markup=keyboard)
-
-    if not sent_to_logger:
-        # Fallback to group owner / admins DMs
-        from logger_helper import get_group_owner_recipients
-        recipients = await get_group_owner_recipients(context, chat)
-        for owner_id in recipients:
-            if owner_id:
-                try:
-                    await context.bot.send_message(
-                        chat_id=owner_id,
-                        text=msg_text,
-                        reply_markup=keyboard
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send join request notification to owner {owner_id}: {e}", exc_info=True)
+    try:
+        await send_logger_notification(context, msg_text, group_chat_id=chat.id)
+    except Exception as e:
+        logger.warning(f"Logger notification for join request skipped/failed: {e}")
 
 
 async def chat_join_request_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3267,8 +3265,15 @@ async def chat_join_request_callback_handler(update: Update, context: ContextTyp
         await query.answer("Invalid parameter formats.", show_alert=True)
         return
 
-    # Validate acting administrator permissions in target chat
-    is_admin_user = await is_target_admin(target_chat_id, acting_user.id, context)
+    # Validate acting user's admin status strictly in the originating group
+    is_admin_user = False
+    try:
+        member = await context.bot.get_chat_member(target_chat_id, acting_user.id)
+        if getattr(member, 'status', None) in ('administrator', 'creator'):
+            is_admin_user = True
+    except Exception as e:
+        logger.warning(f"Error checking chat member status for user {acting_user.id} in chat {target_chat_id}: {e}")
+
     if not is_admin_user:
         await query.answer("Gomen ne~ 🌸 Only group admins can manage join requests for this chat desu! 💕", show_alert=True)
         return
@@ -3292,7 +3297,7 @@ async def chat_join_request_callback_handler(update: Update, context: ContextTyp
             orig_text = query.message.text or ""
             new_text = orig_text + f"\n\n✅ <b>Request Accepted</b> by {admin_disp}"
             try:
-                await query.edit_message_text(new_text, parse_mode="HTML")
+                await query.edit_message_text(new_text, parse_mode="HTML", reply_markup=None)
             except Exception:
                 pass
         except Exception as e:
@@ -3307,7 +3312,7 @@ async def chat_join_request_callback_handler(update: Update, context: ContextTyp
             orig_text = query.message.text or ""
             new_text = orig_text + f"\n\n❌ <b>Request Declined</b> by {admin_disp}"
             try:
-                await query.edit_message_text(new_text, parse_mode="HTML")
+                await query.edit_message_text(new_text, parse_mode="HTML", reply_markup=None)
             except Exception:
                 pass
         except Exception as e:
