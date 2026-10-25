@@ -16,7 +16,8 @@ from store import (
     list_notes, list_quizzes, list_warned_users, log_admin_action, remove_blacklist,
     reset_warns, save_buttons, save_filter, save_note, set_chat_federation, set_setting,
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
-    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members, get_safe_users, is_safe_user, add_safe_user, remove_safe_user, toggle_safe_user, get_group_by_id, upsert_user, get_approved_users, is_approved_user, add_approved_user, remove_approved_user
+    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members, get_safe_users, is_safe_user, add_safe_user, remove_safe_user, toggle_safe_user, get_group_by_id, upsert_user, get_approved_users, is_approved_user, add_approved_user, remove_approved_user,
+    set_maintenance_mode, is_maintenance_mode
 )
 from helpers import is_admin, is_owner, is_owner_or_sudo, safe_reply_error, create_custom_emoji_entities, send_reply_with_custom_emoji
 logger = logging.getLogger(__name__)
@@ -1682,6 +1683,41 @@ async def safe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f'Error adding safe user {target_id} in chat {chat.id}: {e}', exc_info=True)
         await safe_reply_error(update.effective_message)
+
+
+async def maintenance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+
+    if not is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS):
+        await update.effective_message.reply_text("Gomen ne~ 🌸 Only my owner and sudo users can view or manage maintenance mode desu! (⁠◕⁠‿⁠◕⁠✿⁠)")
+        return
+
+    args = context.args or []
+    if args:
+        sub = args[0].lower().strip()
+        if sub in ('on', 'off', 'enable', 'disable'):
+            if not is_owner(user.id, OWNER_IDS):
+                await update.effective_message.reply_text("Gomen ne~ 🌸 Only my owner can turn maintenance mode on or off desu! (⁠◕⁠‿⁠◕⁠✿⁠)")
+                return
+            if sub in ('on', 'enable'):
+                set_maintenance_mode(True)
+                await update.effective_message.reply_text("🛠️ Maintenance mode is now **ON** desu~! Only owner and sudo users can use me right now 🌸💕", parse_mode="Markdown")
+            else:
+                set_maintenance_mode(False)
+                await update.effective_message.reply_text("✨ Maintenance mode is now **OFF** desu~! Everyone can talk to me again 💕 (⁠≧⁠▽⁠≦⁠)", parse_mode="Markdown")
+            return
+
+    status = "ON 🛠️" if is_maintenance_mode() else "OFF ✨"
+    await update.effective_message.reply_text(
+        f"🌸 **Maintenance Mode Status:** {status}\n\n"
+        "Usage:\n"
+        "• `/maintenance on` - Turn maintenance mode ON (Owner only)\n"
+        "• `/maintenance off` - Turn maintenance mode OFF (Owner only)\n"
+        "• `/maintenance` - Display current maintenance status",
+        parse_mode="Markdown"
+    )
 
 
 async def night_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
