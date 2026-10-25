@@ -231,14 +231,15 @@ async def test_id_cmd():
     update.message.reply_to_message = None
     update.message.entities = []
     update.effective_user.id = 777
+    update.effective_user.username = "testuser"
     update.effective_chat.id = -100999
-    update.message.reply_text = AsyncMock()
+    update.message.reply_html = AsyncMock()
 
     context = MagicMock()
     context.args = []
 
     await admin.id_cmd(update, context)
-    update.message.reply_text.assert_called_once_with("User ID: 777\nChat ID: -100999")
+    update.message.reply_html.assert_called_once_with("User ID: <code>777</code>\nUsername: @testuser\nChat ID: <code>-100999</code>")
 
 
 import mongomock

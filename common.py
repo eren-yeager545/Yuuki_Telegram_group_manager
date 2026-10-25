@@ -28,6 +28,33 @@ def format_uptime(seconds: float) -> str:
     return " ".join(parts)
 
 
+import html
+
+def is_owner_category(category: str) -> bool:
+    cat_lower = category.lower()
+    return 'owner' in cat_lower or 'sudo' in cat_lower or 'quiz' in cat_lower
+
+
+def is_admin_category(category: str) -> bool:
+    cat_lower = category.lower()
+    return 'moderation' in cat_lower or 'management' in cat_lower or 'notes' in cat_lower or 'federation' in cat_lower
+
+
+def get_allowed_categories(registry: dict, user_id: int = 0, is_admin_user: bool = True) -> list:
+    is_owner_user = is_owner_or_sudo(user_id) if user_id else False
+    allowed = []
+    for cat in sorted(registry.keys()):
+        if is_owner_category(cat):
+            if is_owner_user:
+                allowed.append(cat)
+        elif is_admin_category(cat):
+            if is_admin_user or is_owner_user:
+                allowed.append(cat)
+        else:
+            allowed.append(cat)
+    return allowed
+
+
 def build_help_text(registry: dict) -> str:
     order = [
         'Users Commands',
@@ -53,11 +80,18 @@ def build_help_text(registry: dict) -> str:
     return '\n'.join(lines)
 
 
-def build_help_category_keyboard(registry: dict):
+def build_help_category_keyboard(registry: dict, user_id: int = 0, is_admin_user: bool = True):
+    allowed_categories = get_allowed_categories(registry, user_id, is_admin_user)
     rows = []
-    for category in sorted(registry.keys()):
+    row = []
+    for category in allowed_categories:
         key = f'helpcat:{category}'[:64]
-        rows.append([InlineKeyboardButton(category, callback_data=key)])
+        row.append(InlineKeyboardButton(category, callback_data=key))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
     return InlineKeyboardMarkup(rows) if rows else None
 
 
@@ -71,10 +105,14 @@ def build_start_keyboard(registry: dict):
 
 def build_category_help_text(registry: dict, category: str) -> str:
     items = registry.get(category, [])
-    lines = [f'📚 {category}', '']
+    if not items:
+        return 'No commands in this category.'
+    lines = [f'📚 <b>{html.escape(category)}</b>\n']
     for item in items:
-        lines.append(f"{item['command']}\nUse: {item['usage']}\nExample: {item['example']}\n")
-    return '\n'.join(lines) if items else 'No commands in this category.'
+        lines.append(f"<b>{html.escape(item['command'])}</b>")
+        lines.append(f"• <b>Usage:</b> <code>{html.escape(item['usage'])}</code>")
+        lines.append(f"• <b>Example:</b> <code>{html.escape(item['example'])}</code>\n")
+    return '\n'.join(lines)
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -89,7 +127,63 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     registry = context.application.bot_data.get('help_registry', {})
-    await update.message.reply_text(build_help_text(registry), reply_markup=build_help_category_keyboard(registry))
+    user = update.effective_user
+    user_id = user.id if user else 0
+    chat = update.effective_chat
+    is_admin_user = True
+    if chat and chat.type in ('group', 'supergroup'):
+        from admin import is_target_admin
+        is_admin_user = await is_target_admin(chat.id, user_id, context)
+
+    if context.args:
+        arg = ' '.join(context.args).strip().lower()
+        for cat in registry.keys():
+            if cat.lower() == arg or cat.lower().startswith(arg):
+                if is_owner_category(cat) and not is_owner_or_sudo(user_id):
+                    await update.message.reply_text("Gomen ne~ This category is for bot owners only desu! 🌸")
+                    return
+                if is_admin_category(cat) and not is_admin_user:
+                    await update.message.reply_text("Gomen ne~ This category is for group admins only desu! 🌸")
+                    return
+                back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Categories", callback_data="home:help")]])
+                await update.message.reply_html(build_category_help_text(registry, cat), reply_markup=back_kb)
+                return
+
+        cmd_arg = arg if arg.startswith('/') else f'/{arg}'
+        found_item = None
+        found_cat = None
+        for cat, items in registry.items():
+            for item in items:
+                if item['command'].lower() == cmd_arg:
+                    found_item = item
+                    found_cat = cat
+                    break
+            if found_item:
+                break
+
+        if found_item and found_cat:
+            if is_owner_category(found_cat) and not is_owner_or_sudo(user_id):
+                await update.message.reply_text("Gomen ne~ This command is for bot owners only desu! 🌸")
+                return
+            if is_admin_category(found_cat) and not is_admin_user:
+                await update.message.reply_text("Gomen ne~ This command is for group admins only desu! 🌸")
+                return
+            text = (
+                f"📖 <b>Command Help: {html.escape(found_item['command'])}</b>\n\n"
+                f"• <b>Category:</b> {html.escape(found_cat)}\n"
+                f"• <b>Usage:</b> <code>{html.escape(found_item['usage'])}</code>\n"
+                f"• <b>Example:</b> <code>{html.escape(found_item['example'])}</code>"
+            )
+            back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Categories", callback_data="home:help")]])
+            await update.message.reply_html(text, reply_markup=back_kb)
+            return
+
+    kb = build_help_category_keyboard(registry, user_id=user_id, is_admin_user=is_admin_user)
+    text = (
+        "🌸 <b>Yuki Command Help Menu</b> 🌸\n\n"
+        "Choose a category below to explore my commands desu~! 💕"
+    )
+    await update.message.reply_html(text, reply_markup=kb)
 
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
