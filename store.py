@@ -1397,6 +1397,39 @@ def clear_user_messages(chat_id, user_id):
     return msg_ids
 
 
+def get_user_message_ids_in_range(chat_id, user_id, start_msg_id, end_msg_id):
+    min_id = min(start_msg_id, end_msg_id)
+    max_id = max(start_msg_id, end_msg_id)
+    if is_mongo():
+        db = get_mongo_db()
+        docs = list(db['user_messages'].find({
+            'chat_id': chat_id,
+            'user_id': user_id,
+            'message_id': {'$gte': min_id, '$lte': max_id}
+        }).sort('message_id', 1))
+        return [d['message_id'] for d in docs]
+    else:
+        with closing(conn()) as c:
+            rows = c.execute(
+                'SELECT message_id FROM user_messages WHERE chat_id=? AND user_id=? AND message_id>=? AND message_id<=? ORDER BY message_id ASC',
+                (chat_id, user_id, min_id, max_id)
+            ).fetchall()
+            return [r[0] for r in rows]
+
+
+def delete_recorded_message_ids(chat_id, message_ids):
+    if not message_ids:
+        return
+    mids = list(message_ids)
+    if is_mongo():
+        db = get_mongo_db()
+        db['user_messages'].delete_many({'chat_id': chat_id, 'message_id': {'$in': mids}})
+    else:
+        with closing(conn()) as c:
+            c.executemany('DELETE FROM user_messages WHERE chat_id=? AND message_id=?', [(chat_id, mid) for mid in mids])
+            c.commit()
+
+
 # ============================================================================
 # STICKER PACK MANAGEMENT
 # ============================================================================
