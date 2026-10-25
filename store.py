@@ -118,6 +118,7 @@ def init_db():
         db['emojis'].create_index('set_name')
         db['afk'].create_index('user_id', unique=True)
         db['user_profile_snapshots'].create_index([('chat_id', 1), ('user_id', 1)], unique=True)
+        db['join_request_decisions'].create_index([('chat_id', 1), ('user_id', 1)], unique=True)
         return
 
     with closing(conn()) as c:
@@ -160,6 +161,7 @@ def init_db():
         cur.execute('CREATE TABLE IF NOT EXISTS emojis (id INTEGER PRIMARY KEY AUTOINCREMENT, set_name TEXT, emoji TEXT, custom_emoji_id TEXT, reaction_enabled INTEGER DEFAULT 1)')
         cur.execute('CREATE TABLE IF NOT EXISTS afk (user_id INTEGER PRIMARY KEY, reason TEXT, afk_since INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS user_profile_snapshots (chat_id INTEGER, user_id INTEGER, first_name TEXT, last_name TEXT, username TEXT, updated_at INTEGER, PRIMARY KEY(chat_id, user_id))')
+        cur.execute('CREATE TABLE IF NOT EXISTS join_request_decisions (chat_id INTEGER, user_id INTEGER, action TEXT, admin_id INTEGER, created_at INTEGER, PRIMARY KEY(chat_id, user_id))')
 
         # Schema migrations for existing SQLite databases
         cur.execute("PRAGMA table_info(emojis)")
@@ -2079,6 +2081,39 @@ def disable_emoji_reaction(custom_emoji_id: str) -> bool:
     except Exception as e:
         logger.error(f"Error disabling emoji reaction for custom_emoji_id '{custom_id}': {e}")
         return False
+
+
+def save_join_request_decision(chat_id: int, user_id: int, action: str, admin_id: int):
+    now = _now()
+    if is_mongo():
+        db = get_mongo_db()
+        db['join_request_decisions'].update_one(
+            {'chat_id': chat_id, 'user_id': user_id},
+            {'$set': {'action': action, 'admin_id': admin_id, 'created_at': now}},
+            upsert=True
+        )
+        return
+    with get_conn() as c:
+        c.execute(
+            'INSERT INTO join_request_decisions(chat_id, user_id, action, admin_id, created_at) '
+            'VALUES(?,?,?,?,?) ON CONFLICT(chat_id, user_id) DO UPDATE SET action=excluded.action, admin_id=excluded.admin_id, created_at=excluded.created_at',
+            (chat_id, user_id, action, admin_id, now)
+        )
+        c.commit()
+
+
+def get_join_request_decision(chat_id: int, user_id: int):
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['join_request_decisions'].find_one({'chat_id': chat_id, 'user_id': user_id})
+        if doc:
+            return doc.get('action'), doc.get('admin_id'), doc.get('created_at', 0)
+        return None
+    with get_conn() as c:
+        row = c.execute('SELECT action, admin_id, created_at FROM join_request_decisions WHERE chat_id=? AND user_id=?', (chat_id, user_id)).fetchone()
+        if row:
+            return row[0], row[1], row[2]
+        return None
 
 
 def delete_emoji_pack(set_name: str) -> bool:
