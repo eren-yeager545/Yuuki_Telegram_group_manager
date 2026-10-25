@@ -241,12 +241,13 @@ class OpenRouterProvider(AIProvider):
                     raw_text = getattr(resp, "text", "") or ""
                     preview = _redact_secrets(raw_text[:200], api_key)
                     logger.warning(
-                        f"OpenRouter empty/invalid response: status={resp.status_code} upstream=none response_preview={preview}"
+                        f"OpenRouter empty/invalid response: status=200 upstream=none response_preview={preview}"
                     )
                     raise AIProviderError(
                         message=f"OpenRouter response is not valid JSON: {je}",
+                        status_code=200,
                         error_code=ProviderErrorCode.SERVER_ERROR,
-                        suggested_cooldown=DEFAULT_SERVER_ERROR_COOLDOWN
+                        suggested_cooldown=0.0
                     ) from je
 
                 if isinstance(data, dict):
@@ -269,7 +270,7 @@ class OpenRouterProvider(AIProvider):
                             err_msg = str(err_obj)
 
                         err_msg = _redact_secrets(err_msg, api_key)
-                        status_for_class = int(err_code_val) if isinstance(err_code_val, int) and err_code_val >= 400 else 400
+                        status_for_class = int(err_code_val) if isinstance(err_code_val, int) and err_code_val >= 400 else 200
                         is_upstream = bool(provider_name or "provider" in err_msg.lower())
                         code, cooldown = _classify_openrouter_error(status_for_class, err_msg, is_upstream)
 
@@ -305,16 +306,25 @@ class OpenRouterProvider(AIProvider):
                                         usage=usage
                                     )
 
+                finish_reason = None
+                choices_len = 0
+                if isinstance(data, dict):
+                    choices = data.get("choices")
+                    if isinstance(choices, list):
+                        choices_len = len(choices)
+                        if choices_len > 0 and isinstance(choices[0], dict):
+                            finish_reason = choices[0].get("finish_reason")
+
                 raw_text = getattr(resp, "text", "") or ""
                 preview = _redact_secrets(raw_text[:200], api_key)
                 logger.warning(
-                    f"OpenRouter empty/invalid response: status={resp.status_code} upstream=none response_preview={preview}"
+                    f"OpenRouter empty/invalid response: status=200 request_id={request_id} finish_reason={finish_reason} choices_count={choices_len} response_preview={preview}"
                 )
                 raise AIProviderError(
                     message="OpenRouter returned invalid or empty content response structure",
                     status_code=200,
                     error_code=ProviderErrorCode.EMPTY_RESPONSE,
-                    suggested_cooldown=DEFAULT_SERVER_ERROR_COOLDOWN,
+                    suggested_cooldown=0.0,
                     raw_error=data if 'data' in locals() and isinstance(data, dict) else None
                 )
 

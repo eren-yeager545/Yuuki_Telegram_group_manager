@@ -166,6 +166,13 @@ class AIProviderManager:
                         max_tokens=max_tokens,
                         timeout=remaining_timeout
                     )
+                    if not (response and response.text and response.text.strip()):
+                        raise AIProviderError(
+                            message=f"Provider '{provider_name}' returned empty response text",
+                            status_code=200,
+                            error_code=ProviderErrorCode.EMPTY_RESPONSE,
+                            suggested_cooldown=0.0
+                        )
                     duration = round(time.time() - start_time, 3)
                     logger.info(
                         f"AI Response Completed | provider={provider_name} key_index={key_idx} correlation_id={corr_id} duration={duration}s"

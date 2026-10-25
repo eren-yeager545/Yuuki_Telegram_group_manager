@@ -1628,3 +1628,197 @@ async def test_creator_vs_non_creator_identification():
         messages = context_manager.get_context(chat_id)
         user_msgs = [m for m in messages if m.get("role") == "user"]
         assert "𓂀 𝑨𝒍𝒃𝒆𝒓𝒕 𝑰𝒏𝒇𝒆⃤𝒓𝒏𝒐 𓂀 (Creator/Owner)" in user_msgs[-1]["name"]
+
+
+# ==========================================
+# Regression Tests for AI Error Handling & Failover
+# ==========================================
+
+@pytest.mark.asyncio
+async def test_groq_empty_response_preserves_status_code_200():
+    provider = GroqProvider(api_keys=["gsk_test"], model="openai/gpt-oss-120b")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = {"x-request-id": "groq-req-123"}
+    mock_resp.json.return_value = {"choices": []}
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("gsk_test", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.status_code == 200
+        assert err.error_code == ProviderErrorCode.EMPTY_RESPONSE
+        assert err.suggested_cooldown == 0.0
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_groq_invalid_json_preserves_status_code_200():
+    provider = GroqProvider(api_keys=["gsk_test"], model="openai/gpt-oss-120b")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+    mock_resp.json.side_effect = ValueError("Corrupted JSON")
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("gsk_test", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.status_code == 200
+        assert err.error_code == ProviderErrorCode.SERVER_ERROR
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_groq_http_500_preserves_status_code_500():
+    provider = GroqProvider(api_keys=["gsk_test"], model="openai/gpt-oss-120b")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 500
+    mock_resp.text = "Internal Server Error"
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("gsk_test", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.status_code == 500
+        assert err.error_code == ProviderErrorCode.SERVER_ERROR
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_groq_structured_content_extraction():
+    provider = GroqProvider(api_keys=["gsk_test"], model="openai/gpt-oss-120b")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Structured Groq response!"}]
+                }
+            }
+        ]
+    }
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        resp = await provider.generate_response_with_key("gsk_test", [{"role": "user", "content": "hi"}], "")
+        assert resp.text == "Structured Groq response!"
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_empty_response_preserves_status_code_200():
+    provider = OpenRouterProvider(api_keys=["sk-or-test"], model="openrouter/free")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = {"x-request-id": "or-req-456"}
+    mock_resp.json.return_value = {"choices": [{"message": {"content": "   "}}]}
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("sk-or-test", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.status_code == 200
+        assert err.error_code == ProviderErrorCode.EMPTY_RESPONSE
+        assert err.suggested_cooldown == 0.0
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_http_500_preserves_status_code_500():
+    provider = OpenRouterProvider(api_keys=["sk-or-test"], model="openrouter/free")
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 500
+    mock_resp.headers = {}
+    mock_resp.json.return_value = {"error": {"message": "Internal Server Error"}}
+
+    with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(AIProviderError) as exc_info:
+            await provider.generate_response_with_key("sk-or-test", [{"role": "user", "content": "hi"}], "")
+
+        err = exc_info.value
+        assert err.status_code == 500
+        assert err.error_code == ProviderErrorCode.SERVER_ERROR
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_failover_on_groq_empty_response_to_openrouter():
+    manager = AIProviderManager(
+        provider_order=["groq", "openrouter"],
+        gemini_keys=[],
+        groq_keys=["groq_k1"],
+        openrouter_keys=["or_k1"]
+    )
+
+    with patch.object(GroqProvider, "generate_response_with_key", new_callable=AsyncMock) as mock_groq, \
+         patch.object(OpenRouterProvider, "generate_response_with_key", new_callable=AsyncMock) as mock_openrouter:
+
+        mock_groq.side_effect = AIProviderError(
+            "Groq returned invalid or empty content response structure",
+            status_code=200,
+            error_code=ProviderErrorCode.EMPTY_RESPONSE,
+            suggested_cooldown=0.0
+        )
+        mock_openrouter.return_value = AIResponse(
+            text="OpenRouter response after Groq empty response!",
+            provider="openrouter",
+            model="openrouter/free"
+        )
+
+        resp = await manager.chat(messages=[{"role": "user", "content": "hi"}], system_prompt="")
+        assert resp.text == "OpenRouter response after Groq empty response!"
+        assert resp.provider == "openrouter"
+
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_health_tracker_status_display_unknown_and_actual_status():
+    from src.ai.health import AIHealthTracker
+
+    alerts = []
+    def notifier(msg):
+        alerts.append(msg)
+
+    tracker = AIHealthTracker(notification_cooldown=300.0, owner_notifier_callback=notifier)
+    tracker.register_provider("groq", "openai/gpt-oss-120b")
+    tracker.register_provider("openrouter", "openrouter/free")
+    tracker.register_provider("gemini", "gemini-2.5-flash")
+
+    # 1. Generic Exception without status_code -> "Status: Unknown"
+    tracker.record_failure("groq", "openai/gpt-oss-120b", ValueError("Network cable pulled"))
+    await asyncio.sleep(0.02)
+    assert len(alerts) == 1
+    assert "Status: Unknown" in alerts[0]
+
+    # 2. status_code=200 -> "Status: 200"
+    err_200 = AIProviderError("Empty content", status_code=200, error_code=ProviderErrorCode.EMPTY_RESPONSE)
+    tracker.record_failure("openrouter", "openrouter/free", err_200)
+    await asyncio.sleep(0.02)
+    assert len(alerts) == 2
+    assert "Status: 200" in alerts[1]
+
+    # 3. status_code=500 -> "Status: 500"
+    err_500 = AIProviderError("Server error", status_code=500, error_code=ProviderErrorCode.SERVER_ERROR)
+    tracker.record_failure("gemini", "gemini-2.5-flash", err_500)
+    await asyncio.sleep(0.02)
+    assert len(alerts) == 3
+    assert "Status: 500" in alerts[2]
