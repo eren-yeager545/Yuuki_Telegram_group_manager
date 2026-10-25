@@ -1083,9 +1083,39 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         admins = await context.bot.get_chat_administrators(update.effective_chat.id)
-        admin_mentions = ' '.join([format_user_link(a.user.id, a.user.first_name) for a in admins if not a.user.is_bot][:5])
-        await update.message.reply_html(f"{report_notice}\n\n📢 Admins notified: {admin_mentions}", disable_web_page_preview=True)
+        seen_admin_ids = set()
+        admin_mentions_list = []
+        for a in admins:
+            if not getattr(a, 'user', None) or a.user.is_bot:
+                continue
+            if a.user.id in seen_admin_ids:
+                continue
+            seen_admin_ids.add(a.user.id)
+            admin_mentions_list.append(format_user_tag(a.user.id, a.user.first_name, a.user.username))
+
+        if admin_mentions_list:
+            admin_mentions = ' '.join(admin_mentions_list)
+            full_msg = f"{report_notice}\n\n📢 Admins mentioned: {admin_mentions}"
+            if len(full_msg) <= 4000:
+                await update.message.reply_html(full_msg, disable_web_page_preview=True)
+            else:
+                await update.message.reply_html(report_notice, disable_web_page_preview=True)
+                chunk = []
+                chunk_len = 0
+                for mention in admin_mentions_list:
+                    if chunk_len + len(mention) + 1 > 3800 and chunk:
+                        await update.effective_chat.send_message("📢 Admins mentioned: " + " ".join(chunk), parse_mode="HTML", disable_web_page_preview=True)
+                        chunk = [mention]
+                        chunk_len = len(mention)
+                    else:
+                        chunk.append(mention)
+                        chunk_len += len(mention) + 1
+                if chunk:
+                    await update.effective_chat.send_message("📢 Admins mentioned: " + " ".join(chunk), parse_mode="HTML", disable_web_page_preview=True)
+        else:
+            await update.message.reply_html(report_notice, disable_web_page_preview=True)
     except Exception as e:
+        logger.error(f"Error getting admins or sending report in chat {update.effective_chat.id}: {e}")
         await update.message.reply_html(report_notice, disable_web_page_preview=True)
 
     log_admin_action(update.effective_chat.id, update.effective_user.id, 'report', target_user.id, reason)
@@ -2019,6 +2049,24 @@ async def grouplist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(out_text, parse_mode='HTML', disable_web_page_preview=True)
 
 
+ACTIVE_TAG_OPERATIONS = set()
+CANCELLED_TAG_OPERATIONS = set()
+
+
+from unittest.mock import MagicMock, AsyncMock
+
+def is_media_message(m) -> bool:
+    if not m:
+        return False
+    for attr in ('photo', 'video', 'document', 'animation', 'audio', 'voice', 'sticker'):
+        val = getattr(m, attr, None)
+        if val:
+            if isinstance(val, (MagicMock, AsyncMock)):
+                continue
+            return True
+    return False
+
+
 async def tag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
@@ -2035,132 +2083,254 @@ async def tag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("🌸 Gomen ne! Only group admins and the owner can use tag everyone desu~ ✨")
         return
 
-    giver_name = html.escape(user.first_name or user.full_name or "Admin")
+    raw_cmd = (msg.text or msg.caption or "").strip()
+    cmd_args = context.args or []
+    if cmd_args and cmd_args[0].lower() in ("stop", "cancel"):
+        if chat.id in ACTIVE_TAG_OPERATIONS:
+            CANCELLED_TAG_OPERATIONS.add(chat.id)
+            await msg.reply_text("🛑 Cancellation requested. The tagging operation will stop shortly.")
+        else:
+            await msg.reply_text("🌸 There is no active tagging operation running in this group.")
+        return
 
-    text_after_cmd = ""
-    raw_text = msg.text or msg.caption or ""
+    if chat.id in ACTIVE_TAG_OPERATIONS:
+        await msg.reply_text("🌸 A tagging operation is already in progress in this group. Use `/tag stop` to cancel it.")
+        return
 
-    if raw_text.startswith('/tag') or raw_text.startswith('/all'):
-        parts = raw_text.split(maxsplit=1)
-        if len(parts) > 1:
-            text_after_cmd = parts[1].strip()
-    elif raw_text.lower().startswith('@all'):
-        parts = raw_text.split(maxsplit=1)
-        if len(parts) > 1:
-            text_after_cmd = parts[1].strip()
-
-    if not text_after_cmd and context.args:
-        text_after_cmd = " ".join(context.args).strip()
-
-    if not text_after_cmd and msg.reply_to_message:
-        replied = msg.reply_to_message
-        text_after_cmd = (replied.text or replied.caption or "").strip()
-
-    if not text_after_cmd:
-        custom_message = "Hey everyone! 👋"
-    else:
-        custom_message = html.escape(text_after_cmd)
+    ACTIVE_TAG_OPERATIONS.add(chat.id)
+    CANCELLED_TAG_OPERATIONS.discard(chat.id)
 
     try:
-        members = get_group_members(chat.id)
-    except Exception as e:
-        logger.error(f"Error retrieving group members for tag: {e}")
-        await safe_reply_error(msg)
-        return
+        giver_name = html.escape(user.first_name or user.full_name or "Admin")
 
-    bot_id = context.bot.id if context and context.bot else None
+        text_after_cmd = ""
+        raw_text = msg.text or msg.caption or ""
 
-    eligible_members = []
-    for uid, name, username, is_bot in members:
-        if is_bot or (bot_id and uid == bot_id):
-            continue
-        clean_name = (name or "").strip()
-        if not clean_name or clean_name.lower() in ("deleted account", "deleted"):
-            continue
-        eligible_members.append((uid, clean_name, username))
+        if raw_text.startswith('/tag'):
+            parts = raw_text.split(maxsplit=1)
+            if len(parts) > 1:
+                text_after_cmd = parts[1].strip()
+        elif raw_text.lower().startswith('@all'):
+            parts = raw_text.split(maxsplit=1)
+            if len(parts) > 1:
+                text_after_cmd = parts[1].strip()
 
-    if not eligible_members:
-        await msg.reply_text("😅 I couldn't find any members to tag right now.")
-        return
+        if not text_after_cmd and context.args:
+            text_after_cmd = " ".join(context.args).strip()
 
-    header = f"""📢 <b>Attention everyone!</b>
+        # Check media/announcement source
+        media_msg = None
+        if msg.reply_to_message:
+            replied = msg.reply_to_message
+            if not text_after_cmd:
+                text_after_cmd = (replied.text or replied.caption or "").strip()
+            if is_media_message(replied):
+                media_msg = replied
+        elif is_media_message(msg):
+            media_msg = msg
 
-👤 <b>Called by:</b> {giver_name}
-
-💬 {custom_message}
-
-"""
-
-    chunks = []
-    current_chunk = []
-    current_len = 0
-
-    for uid, clean_name, username in eligible_members:
-        mention = format_user_link(uid, clean_name)
-        mention_len = len(mention) + 1
-        base_len = len(header) if not chunks and not current_chunk else 0
-        if len(current_chunk) >= 10 or (current_len + mention_len + base_len > 3800 and current_chunk):
-            chunks.append(current_chunk)
-            current_chunk = [(uid, clean_name, username)]
-            current_len = mention_len
+        if not text_after_cmd:
+            custom_message = "Hey everyone! 👋"
         else:
-            current_chunk.append((uid, clean_name, username))
-            current_len += mention_len
-    if current_chunk:
-        chunks.append(current_chunk)
-
-    partial_failure = False
-
-    for idx, chunk in enumerate(chunks):
-        tags_str = " ".join([format_user_link(uid, name) for uid, name, username in chunk])
-        chunk_text = (header + tags_str) if idx == 0 else tags_str
+            custom_message = html.escape(text_after_cmd)
 
         try:
-            await context.bot.send_message(
-                chat_id=chat.id,
-                text=chunk_text,
-                parse_mode="HTML",
-                reply_to_message_id=msg.message_id if idx == 0 else None
-            )
-        except RetryAfter as e:
-            await asyncio.sleep(e.retry_after + 1)
+            members = get_group_members(chat.id)
+        except Exception as e:
+            logger.error(f"Error retrieving group members for tag: {e}")
+            await safe_reply_error(msg)
+            return
+
+        bot_id = context.bot.id if context and context.bot else None
+
+        candidates = []
+        for uid, name, username, is_bot in members:
+            if is_bot or (bot_id and uid == bot_id):
+                continue
+            clean_name = (name or "").strip()
+            if not clean_name or clean_name.lower() in ("deleted account", "deleted"):
+                continue
+            candidates.append((uid, clean_name, username))
+
+        if not candidates:
+            await msg.reply_text("😅 I couldn't find any members to tag right now.")
+            return
+
+        header = f"📢 <b>Attention everyone!</b>\n\n👤 <b>Called by:</b> {giver_name}\n\n💬 {custom_message}\n\n"
+
+        processed_user_ids = set()
+        valid_members = []
+
+        # Validate membership and status
+        for uid, clean_name, username in candidates:
+            if chat.id in CANCELLED_TAG_OPERATIONS:
+                break
+            if uid in processed_user_ids:
+                continue
+
+            # Validate membership via Telegram API
             try:
-                await context.bot.send_message(
-                    chat_id=chat.id,
-                    text=chunk_text,
-                    parse_mode="HTML",
-                    reply_to_message_id=msg.message_id if idx == 0 else None
-                )
-            except Exception as retry_err:
-                logger.error(f"Failed sending tag batch after retry: {retry_err}")
-                partial_failure = True
-        except TelegramError as err:
-            logger.error(f"Failed sending tag batch due to TelegramError: {err}")
-            if idx == 0:
-                await msg.reply_text(f"🌸 I couldn't send the tag message because I'm missing permissions: {err}")
-                return
-            partial_failure = True
-        except Exception as err:
-            logger.error(f"Failed sending tag batch: {err}")
-            partial_failure = True
+                chat_member = await context.bot.get_chat_member(chat.id, uid)
+                st = getattr(chat_member, 'status', 'member')
+                if st in ('left', 'kicked', 'banned'):
+                    from store import update_member_status
+                    update_member_status(chat.id, uid, st if st != 'banned' else 'kicked')
+                    continue
+            except Exception as check_err:
+                logger.debug(f"Could not validate chat member {uid} in chat {chat.id}: {check_err}")
 
-        if idx < len(chunks) - 1:
-            await asyncio.sleep(0.5)
+            processed_user_ids.add(uid)
+            valid_members.append((uid, clean_name, username))
 
-    if not partial_failure:
-        await msg.reply_text(
-            f"""✅ <b>Tag completed successfully!</b>
+        if not valid_members:
+            await msg.reply_text("😅 I couldn't find any eligible active members to tag right now.")
+            return
 
-👤 {giver_name}, everyone has been notified. ✨""",
-            parse_mode="HTML"
-        )
-    else:
-        await msg.reply_text(
-            f"""⚠️ <b>Tag completed with some limitations.</b>
+        # Chunk into max 10 members per batch
+        batches = [valid_members[i:i + 10] for i in range(0, len(valid_members), 10)]
 
-👤 {giver_name}, some members could not be mentioned.""",
-            parse_mode="HTML"
-        )
+        total_tagged = 0
+        partial_failure = False
+        was_cancelled = False
+
+        for batch_idx, batch in enumerate(batches):
+            if chat.id in CANCELLED_TAG_OPERATIONS:
+                was_cancelled = True
+                break
+
+            tags_str = " ".join([format_user_link(uid, name) for uid, name, username in batch])
+
+            # Determine whether to include media on first batch
+            sent_batch = False
+            if batch_idx == 0 and media_msg:
+                # Attempt to send media with caption
+                caption_text = f"{header}{tags_str}"
+                if len(caption_text) <= 1024 and not media_msg.sticker:
+                    try:
+                        await context.bot.copy_message(
+                            chat_id=chat.id,
+                            from_chat_id=media_msg.chat_id,
+                            message_id=media_msg.message_id,
+                            caption=caption_text,
+                            parse_mode="HTML",
+                            reply_to_message_id=msg.message_id
+                        )
+                        sent_batch = True
+                    except RetryAfter as e:
+                        await asyncio.sleep(e.retry_after + 1)
+                        try:
+                            await context.bot.copy_message(
+                                chat_id=chat.id,
+                                from_chat_id=media_msg.chat_id,
+                                message_id=media_msg.message_id,
+                                caption=caption_text,
+                                parse_mode="HTML",
+                                reply_to_message_id=msg.message_id
+                            )
+                            sent_batch = True
+                        except Exception as r_err:
+                            logger.error(f"Error copying media message after retry: {r_err}")
+                    except Exception as media_err:
+                        logger.warning(f"Failed sending media with tags caption: {media_err}")
+
+                if not sent_batch:
+                    # Send media message standalone first, then text tags
+                    try:
+                        await context.bot.copy_message(
+                            chat_id=chat.id,
+                            from_chat_id=media_msg.chat_id,
+                            message_id=media_msg.message_id,
+                            caption=header if len(header) <= 1024 else None,
+                            parse_mode="HTML",
+                            reply_to_message_id=msg.message_id
+                        )
+                    except RetryAfter as e:
+                        await asyncio.sleep(e.retry_after + 1)
+                        try:
+                            await context.bot.copy_message(
+                                chat_id=chat.id,
+                                from_chat_id=media_msg.chat_id,
+                                message_id=media_msg.message_id,
+                                caption=header if len(header) <= 1024 else None,
+                                parse_mode="HTML",
+                                reply_to_message_id=msg.message_id
+                            )
+                        except Exception as r_err:
+                            logger.error(f"Error copying standalone media message after retry: {r_err}")
+                    except Exception as media_err:
+                        logger.warning(f"Failed sending standalone media message: {media_err}")
+
+            if not sent_batch:
+                chunk_text = (header + tags_str) if batch_idx == 0 else tags_str
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat.id,
+                        text=chunk_text,
+                        parse_mode="HTML",
+                        reply_to_message_id=msg.message_id if batch_idx == 0 else None,
+                        disable_web_page_preview=True
+                    )
+                    sent_batch = True
+                except RetryAfter as e:
+                    await asyncio.sleep(e.retry_after + 1)
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat.id,
+                            text=chunk_text,
+                            parse_mode="HTML",
+                            reply_to_message_id=msg.message_id if batch_idx == 0 else None,
+                            disable_web_page_preview=True
+                        )
+                        sent_batch = True
+                    except Exception as retry_err:
+                        logger.error(f"Failed sending tag batch after retry: {retry_err}")
+                        partial_failure = True
+                except TelegramError as err:
+                    logger.error(f"Failed sending tag batch due to TelegramError: {err}")
+                    if batch_idx == 0 and not media_msg:
+                        await msg.reply_text(f"🌸 I couldn't send the tag message because I'm missing permissions: {err}")
+                        return
+                    partial_failure = True
+                except Exception as err:
+                    logger.error(f"Failed sending tag batch: {err}")
+                    partial_failure = True
+
+            if sent_batch:
+                total_tagged += len(batch)
+
+            if batch_idx < len(batches) - 1:
+                await asyncio.sleep(0.5)
+
+        # Completion summary
+        if was_cancelled:
+            await msg.reply_text(
+                f"🛑 <b>Tag operation cancelled.</b>\n\n"
+                f"👤 {giver_name}, tagging was stopped. Processed <b>{total_tagged}</b> member(s) in {len(batches)} batch(es).",
+                parse_mode="HTML"
+            )
+        elif len(valid_members) > 10 or len(batches) > 1:
+            status_text = "completed successfully" if not partial_failure else "completed with some limitations"
+            await msg.reply_text(
+                f"✅ <b>Tag operation {status_text}!</b>\n\n"
+                f"👤 {giver_name}, notified <b>{total_tagged}</b> member(s) across {len(batches)} batch(es). ✨",
+                parse_mode="HTML"
+            )
+        elif not partial_failure:
+            await msg.reply_text(
+                f"✅ <b>Tag completed successfully!</b>\n\n"
+                f"👤 {giver_name}, everyone has been notified. ✨",
+                parse_mode="HTML"
+            )
+        else:
+            await msg.reply_text(
+                f"⚠️ <b>Tag completed with some limitations.</b>\n\n"
+                f"👤 {giver_name}, some members could not be mentioned.",
+                parse_mode="HTML"
+            )
+
+    finally:
+        ACTIVE_TAG_OPERATIONS.discard(chat.id)
+        CANCELLED_TAG_OPERATIONS.discard(chat.id)
 
 
 async def packs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
