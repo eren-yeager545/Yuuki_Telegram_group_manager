@@ -31,67 +31,39 @@ async def test_chat_join_request_handler_notification():
     ctx.bot = AsyncMock()
 
     with patch("logger_helper.send_logger_notification", new_callable=AsyncMock) as mock_send_logger:
-        mock_send_logger.return_value = True
         await chat_join_request_handler(upd, ctx)
 
-        mock_send_logger.assert_called_once()
-        args, kwargs = mock_send_logger.call_args
-        msg_text = args[1] if len(args) > 1 else args[0]
+        ctx.bot.send_message.assert_called_once()
+        call_kwargs = ctx.bot.send_message.call_args.kwargs
+        assert call_kwargs.get("chat_id") == chat.id
+        msg_text = call_kwargs.get("text")
         assert "Yuki noticed a new visitor!" in msg_text
         assert "Example User" in msg_text
         assert "@example_user" in msg_text
         assert "123456781" in msg_text
-        assert kwargs.get("group_chat_id") == chat.id
-        reply_markup = kwargs.get("reply_markup")
+
+        reply_markup = call_kwargs.get("reply_markup")
         assert reply_markup is not None
         btns = reply_markup.inline_keyboard[0]
-        assert btns[0].text == "💚 Accept"
+        assert btns[0].text == "✅ Approve"
         assert btns[0].callback_data == f"cjr:a:{chat.id}:{user_with_username.id}"
-        assert btns[1].text == "❤️ Decline"
+        assert btns[1].text == "❌ Decline"
         assert btns[1].callback_data == f"cjr:d:{chat.id}:{user_with_username.id}"
+
+        mock_send_logger.assert_called_once()
 
     # Test user WITHOUT username
     user_no_username = User(id=987654321, first_name="NoUser", is_bot=False)
     req.user = user_no_username
+    ctx.bot.send_message.reset_mock()
 
     with patch("logger_helper.send_logger_notification", new_callable=AsyncMock) as mock_send_logger:
-        mock_send_logger.return_value = True
         await chat_join_request_handler(upd, ctx)
 
-        args, _ = mock_send_logger.call_args
-        msg_text = args[1] if len(args) > 1 else args[0]
+        call_kwargs = ctx.bot.send_message.call_args.kwargs
+        msg_text = call_kwargs.get("text")
         assert "Username: Not set" in msg_text
         assert "987654321" in msg_text
-
-
-@pytest.mark.asyncio
-async def test_chat_join_request_fallback_to_owner_recipients():
-    """Test that when send_logger_notification returns False, get_group_owner_recipients is used."""
-    chat = Chat(id=-100123456789, title="Fallback Chat", type="supergroup")
-    user = User(id=123123, first_name="Visitor", is_bot=False)
-
-    req = MagicMock(spec=ChatJoinRequest)
-    req.chat = chat
-    req.user = user
-
-    upd = MagicMock(spec=Update)
-    upd.chat_join_request = req
-
-    ctx = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
-    ctx.bot = AsyncMock()
-
-    with patch("logger_helper.send_logger_notification", new_callable=AsyncMock) as mock_send_logger, \
-         patch("logger_helper.get_group_owner_recipients", new_callable=AsyncMock) as mock_recipients:
-        mock_send_logger.return_value = False
-        mock_recipients.return_value = [55555, 66666]
-
-        await chat_join_request_handler(upd, ctx)
-
-        mock_send_logger.assert_called_once()
-        mock_recipients.assert_called_once_with(ctx, chat)
-        assert ctx.bot.send_message.call_count == 2
-        sent_chat_ids = [call.kwargs["chat_id"] for call in ctx.bot.send_message.call_args_list]
-        assert sent_chat_ids == [55555, 66666]
 
 
 @pytest.mark.asyncio
@@ -115,20 +87,23 @@ async def test_chat_join_request_callback_accept_success():
     ctx = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
     ctx.bot = AsyncMock()
 
-    with patch("admin.is_target_admin", new_callable=AsyncMock) as mock_is_admin:
-        mock_is_admin.return_value = True
+    admin_member = MagicMock()
+    admin_member.status = 'administrator'
+    ctx.bot.get_chat_member.return_value = admin_member
 
-        await chat_join_request_callback_handler(upd, ctx)
+    await chat_join_request_callback_handler(upd, ctx)
 
-        ctx.bot.approve_chat_join_request.assert_called_once_with(chat_id=chat_id, user_id=requester_id)
-        query.answer.assert_called_with("Join request accepted! 💚")
-        query.edit_message_text.assert_called_once()
-        assert "Request Accepted" in query.edit_message_text.call_args[0][0]
+    ctx.bot.get_chat_member.assert_called_once_with(chat_id, admin_user.id)
+    ctx.bot.approve_chat_join_request.assert_called_once_with(chat_id=chat_id, user_id=requester_id)
+    query.answer.assert_called_with("Join request accepted! 💚")
+    query.edit_message_text.assert_called_once()
+    assert "Request Accepted" in query.edit_message_text.call_args[0][0]
+    assert query.edit_message_text.call_args.kwargs.get("reply_markup") is None
 
-        decision = get_join_request_decision(chat_id, requester_id)
-        assert decision is not None
-        assert decision[0] == "accepted"
-        assert decision[1] == admin_user.id
+    decision = get_join_request_decision(chat_id, requester_id)
+    assert decision is not None
+    assert decision[0] == "accepted"
+    assert decision[1] == admin_user.id
 
 
 @pytest.mark.asyncio
@@ -152,20 +127,23 @@ async def test_chat_join_request_callback_decline_success():
     ctx = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
     ctx.bot = AsyncMock()
 
-    with patch("admin.is_target_admin", new_callable=AsyncMock) as mock_is_admin:
-        mock_is_admin.return_value = True
+    creator_member = MagicMock()
+    creator_member.status = 'creator'
+    ctx.bot.get_chat_member.return_value = creator_member
 
-        await chat_join_request_callback_handler(upd, ctx)
+    await chat_join_request_callback_handler(upd, ctx)
 
-        ctx.bot.decline_chat_join_request.assert_called_once_with(chat_id=chat_id, user_id=requester_id)
-        query.answer.assert_called_with("Join request declined. ❤️")
-        query.edit_message_text.assert_called_once()
-        assert "Request Declined" in query.edit_message_text.call_args[0][0]
+    ctx.bot.get_chat_member.assert_called_once_with(chat_id, admin_user.id)
+    ctx.bot.decline_chat_join_request.assert_called_once_with(chat_id=chat_id, user_id=requester_id)
+    query.answer.assert_called_with("Join request declined. ❤️")
+    query.edit_message_text.assert_called_once()
+    assert "Request Declined" in query.edit_message_text.call_args[0][0]
+    assert query.edit_message_text.call_args.kwargs.get("reply_markup") is None
 
-        decision = get_join_request_decision(chat_id, requester_id)
-        assert decision is not None
-        assert decision[0] == "declined"
-        assert decision[1] == admin_user.id
+    decision = get_join_request_decision(chat_id, requester_id)
+    assert decision is not None
+    assert decision[0] == "declined"
+    assert decision[1] == admin_user.id
 
 
 @pytest.mark.asyncio
@@ -185,14 +163,44 @@ async def test_chat_join_request_callback_unauthorized_user():
     ctx = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
     ctx.bot = AsyncMock()
 
-    with patch("admin.is_target_admin", new_callable=AsyncMock) as mock_is_admin:
-        mock_is_admin.return_value = False
+    member = MagicMock()
+    member.status = 'member'
+    ctx.bot.get_chat_member.return_value = member
 
-        await chat_join_request_callback_handler(upd, ctx)
+    await chat_join_request_callback_handler(upd, ctx)
 
-        ctx.bot.approve_chat_join_request.assert_not_called()
-        ctx.bot.decline_chat_join_request.assert_not_called()
-        query.answer.assert_called_once_with("Gomen ne~ 🌸 Only group admins can manage join requests for this chat desu! 💕", show_alert=True)
+    ctx.bot.approve_chat_join_request.assert_not_called()
+    ctx.bot.decline_chat_join_request.assert_not_called()
+    query.answer.assert_called_once_with("Gomen ne~ 🌸 Only group admins can manage join requests for this chat desu! 💕", show_alert=True)
+
+
+@pytest.mark.asyncio
+async def test_chat_join_request_callback_global_owner_not_group_admin():
+    """Global bot owner or sudo user who is NOT a group admin of originating group must be denied."""
+    chat_id = -100123456788
+    requester_id = 123456788
+    owner_user = User(id=11111, first_name="GlobalOwner", is_bot=False)
+
+    query = AsyncMock()
+    query.data = f"cjr:a:{chat_id}:{requester_id}"
+    query.from_user = owner_user
+
+    upd = MagicMock(spec=Update)
+    upd.callback_query = query
+    upd.effective_user = owner_user
+
+    ctx = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+    ctx.bot = AsyncMock()
+
+    # User is not in group or is a regular member in that group
+    member = MagicMock()
+    member.status = 'member'
+    ctx.bot.get_chat_member.return_value = member
+
+    await chat_join_request_callback_handler(upd, ctx)
+
+    ctx.bot.approve_chat_join_request.assert_not_called()
+    query.answer.assert_called_once_with("Gomen ne~ 🌸 Only group admins can manage join requests for this chat desu! 💕", show_alert=True)
 
 
 @pytest.mark.asyncio
@@ -215,14 +223,15 @@ async def test_chat_join_request_callback_duplicate_decision():
     ctx = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
     ctx.bot = AsyncMock()
 
-    with patch("admin.is_target_admin", new_callable=AsyncMock) as mock_is_admin:
-        mock_is_admin.return_value = True
+    admin_member = MagicMock()
+    admin_member.status = 'administrator'
+    ctx.bot.get_chat_member.return_value = admin_member
 
-        await chat_join_request_callback_handler(upd, ctx)
+    await chat_join_request_callback_handler(upd, ctx)
 
-        ctx.bot.approve_chat_join_request.assert_not_called()
-        ctx.bot.decline_chat_join_request.assert_not_called()
-        query.answer.assert_called_once_with("This join request has already been accepted!", show_alert=True)
+    ctx.bot.approve_chat_join_request.assert_not_called()
+    ctx.bot.decline_chat_join_request.assert_not_called()
+    query.answer.assert_called_once_with("This join request has already been accepted!", show_alert=True)
 
 
 @pytest.mark.asyncio
@@ -243,9 +252,13 @@ async def test_chat_join_request_callback_api_error_handling():
     ctx.bot = AsyncMock()
     ctx.bot.approve_chat_join_request.side_effect = Exception("HIDE_ME: User not found or request expired")
 
-    with patch("admin.is_target_admin", new_callable=AsyncMock) as mock_is_admin:
-        mock_is_admin.return_value = True
+    admin_member = MagicMock()
+    admin_member.status = 'administrator'
+    ctx.bot.get_chat_member.return_value = admin_member
 
-        await chat_join_request_callback_handler(upd, ctx)
+    await chat_join_request_callback_handler(upd, ctx)
 
-        query.answer.assert_called_once_with("Failed to approve request (it may have expired or already been decided).", show_alert=True)
+    query.answer.assert_called_once_with("Failed to approve request (it may have expired or already been decided).", show_alert=True)
+    query.edit_message_text.assert_not_called()
+    decision = get_join_request_decision(chat_id, requester_id)
+    assert decision is None
