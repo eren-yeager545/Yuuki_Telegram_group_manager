@@ -134,8 +134,10 @@ class ResolvedUser:
         self.is_bot = is_bot
 
 
-async def resolve_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def resolve_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE, fallback_to_sender: bool = False):
     if not update or not update.message:
+        if fallback_to_sender and update and update.effective_user:
+            return update.effective_user
         return None
 
     if context and context.args:
@@ -144,6 +146,9 @@ async def resolve_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE
             u_info = get_user_by_username(first_arg)
             if u_info:
                 return ResolvedUser(u_info[0], u_info[1], u_info[2])
+            else:
+                clean_un = first_arg.lstrip('@')
+                return ResolvedUser(0, clean_un, clean_un)
         elif first_arg.isdigit() or (first_arg.startswith('-') and first_arg[1:].isdigit()):
             uid = int(first_arg)
             u_info = get_user_by_id(uid)
@@ -164,9 +169,15 @@ async def resolve_target_user(update: Update, context: ContextTypes.DEFAULT_TYPE
                 u_info = get_user_by_username(raw_uname)
                 if u_info:
                     return ResolvedUser(u_info[0], u_info[1], u_info[2])
+                else:
+                    clean_un = raw_uname.lstrip('@')
+                    return ResolvedUser(0, clean_un, clean_un)
 
     if update.message.reply_to_message and update.message.reply_to_message.from_user:
         return update.message.reply_to_message.from_user
+
+    if fallback_to_sender and update.effective_user:
+        return update.effective_user
 
     return None
 
@@ -1532,17 +1543,40 @@ async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    target = await resolve_target_user(update, context)
-    if not target:
-        await update.message.reply_text("🌸 Please reply to a user, tag (@username), or specify a valid user ID/username to get user info desu~ 💕")
+    target = await resolve_target_user(update, context, fallback_to_sender=True)
+    if not target or (getattr(target, 'id', 0) == 0 and not getattr(target, 'username', None)):
+        if update.message:
+            await update.message.reply_text("🌸 Please reply to a user, tag (@username), or specify a valid user ID/username to get user info desu~ 💕")
         return
-    user_id = target.id
-    first_name = getattr(target, 'first_name', 'User')
-    username = getattr(target, 'username', None)
-    username_str = f"@{username}" if username else "Not set"
-    user_link = format_user_link(user_id, first_name)
 
-    status_str = "Member"
+    user_id = getattr(target, 'id', 0)
+    if user_id == 0 and getattr(target, 'username', None):
+        u_info = get_user_by_username(target.username)
+        if u_info:
+            user_id = u_info[0]
+            first_name = u_info[1] or target.username
+            username = u_info[2]
+        else:
+            if update.message:
+                await update.message.reply_text("🌸 Could not resolve user from username desu~ 💕")
+            return
+    else:
+        first_name = getattr(target, 'first_name', None) or getattr(target, 'full_name', None) or (f"User {user_id}" if user_id else "User")
+        username = getattr(target, 'username', None)
+
+    if user_id and (first_name == f"User {user_id}" or not username):
+        u_db = get_user_by_id(user_id)
+        if u_db:
+            if not username and u_db[2]:
+                username = u_db[2]
+            if first_name == f"User {user_id}" and u_db[1]:
+                first_name = u_db[1]
+
+    escaped_first_name = html.escape(first_name)
+    username_str = f"@{html.escape(username.lstrip('@'))}" if username else "Not set"
+    user_link = format_user_link(user_id, first_name) if user_id else "Not available"
+
+    status_str = "Unknown"
     banned_str = "No"
     admin_status_str = "No"
     group_owner_status_str = "No"
@@ -1550,42 +1584,55 @@ async def info_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat = update.effective_chat
     if chat and chat.type in ('group', 'supergroup'):
-        approved_status_str = "Yes" if is_approved_user(chat.id, user_id) else "No"
-        if await is_bot_or_group_owner(chat.id, user_id, context):
-            group_owner_status_str = "Yes"
+        if user_id:
+            approved_status_str = "Yes" if is_approved_user(chat.id, user_id) else "No"
+            if await is_bot_or_group_owner(chat.id, user_id, context):
+                group_owner_status_str = "Yes"
 
-        try:
-            member = await context.bot.get_chat_member(chat.id, user_id)
-            st = member.status
-            status_map = {
-                'creator': 'Owner',
-                'administrator': 'Administrator',
-                'member': 'Member',
-                'restricted': 'Restricted',
-                'left': 'Left',
-                'kicked': 'Kicked'
-            }
-            status_str = status_map.get(st, st.capitalize())
-            if st in ('administrator', 'creator'):
-                admin_status_str = "Yes"
-            if st == 'kicked':
-                banned_str = "Yes"
-        except Exception:
-            pass
+            try:
+                member = await context.bot.get_chat_member(chat.id, user_id)
+                st = getattr(member, 'status', 'unknown')
+                status_map = {
+                    'creator': 'Owner',
+                    'administrator': 'Administrator',
+                    'member': 'Member',
+                    'restricted': 'Restricted',
+                    'left': 'Left',
+                    'kicked': 'Banned'
+                }
+                status_str = status_map.get(st, st.capitalize() if isinstance(st, str) else 'Unknown')
+                if st in ('administrator', 'creator'):
+                    admin_status_str = "Yes"
+                if st == 'creator':
+                    group_owner_status_str = "Yes"
+                if st == 'kicked':
+                    banned_str = "Yes"
+            except Exception as e:
+                logger.debug(f"Could not fetch chat member for user {user_id} in chat {chat.id}: {e}")
+                status_str = "Not in group"
+    else:
+        status_str = "N/A (Private Chat)"
 
     info_text = (
-        "👤 User Information\n\n"
-        f"🆔 ID: {user_id}\n"
-        f"👤 First Name: {html.escape(first_name)}\n"
-        f"🔹 Username: {username_str}\n"
-        f"🔗 User Link: {user_link}\n"
-        f"🛡 Status: {status_str}\n"
-        f"👮 Administrator: {admin_status_str}\n"
-        f"👑 Group Owner: {group_owner_status_str}\n"
-        f"✅ Approved status: {approved_status_str}\n"
-        f"🚫 Banned: {banned_str}"
+        "👤 <b>User Information</b>\n\n"
+        f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
+        f"👤 <b>First Name:</b> {escaped_first_name}\n"
+        f"🔹 <b>Username:</b> {username_str}\n"
+        f"🔗 <b>User Link:</b> {user_link}\n"
+        f"🛡 <b>Status:</b> {status_str}\n"
+        f"👮 <b>Administrator:</b> {admin_status_str}\n"
+        f"👑 <b>Group Owner:</b> {group_owner_status_str}\n"
+        f"✅ <b>Approved status:</b> {approved_status_str}\n"
+        f"🚫 <b>Banned:</b> {banned_str}"
     )
-    await update.message.reply_html(info_text, disable_web_page_preview=True)
+
+    try:
+        if update.message:
+            await update.message.reply_html(info_text, disable_web_page_preview=True)
+    except Exception as e:
+        logger.error(f"Error sending info response: {e}")
+        if update.message:
+            await update.message.reply_text("🌸 Could not send user information desu~ 💕")
 
 
 async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):

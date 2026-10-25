@@ -133,11 +133,11 @@ async def test_info_cmd_display():
 
         await info_cmd(upd, ctx)
         info_text = msg.reply_html.call_args[0][0]
-        assert "ID: 3001" in info_text
-        assert "Username: Not set" in info_text
-        assert "Administrator: No" in info_text
-        assert "Group Owner: No" in info_text
-        assert "Approved status: Yes" in info_text
+        assert "3001" in info_text
+        assert "Not set" in info_text
+        assert "Administrator:</b> No" in info_text
+        assert "Group Owner:</b> No" in info_text
+        assert "Approved status:</b> Yes" in info_text
 
     # Target 2: Has username, admin & group owner, not approved
     target_2 = User(id=3002, first_name="OwnerGuy", username="the_boss", is_bot=False)
@@ -151,11 +151,11 @@ async def test_info_cmd_display():
         msg.reply_html.reset_mock()
         await info_cmd(upd, ctx)
         info_text_2 = msg.reply_html.call_args[0][0]
-        assert "ID: 3002" in info_text_2
-        assert "Username: @the_boss" in info_text_2
-        assert "Administrator: Yes" in info_text_2
-        assert "Group Owner: Yes" in info_text_2
-        assert "Approved status: No" in info_text_2
+        assert "3002" in info_text_2
+        assert "@the_boss" in info_text_2
+        assert "Administrator:</b> Yes" in info_text_2
+        assert "Group Owner:</b> Yes" in info_text_2
+        assert "Approved status:</b> No" in info_text_2
 
 
 @pytest.mark.asyncio
