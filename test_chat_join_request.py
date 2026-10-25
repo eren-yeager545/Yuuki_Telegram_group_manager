@@ -22,6 +22,7 @@ async def test_chat_join_request_handler_notification():
 
     req = MagicMock(spec=ChatJoinRequest)
     req.chat = chat
+    req.from_user = user_with_username
     req.user = user_with_username
 
     upd = MagicMock(spec=Update)
@@ -54,6 +55,7 @@ async def test_chat_join_request_handler_notification():
 
     # Test user WITHOUT username
     user_no_username = User(id=987654321, first_name="NoUser", is_bot=False)
+    req.from_user = user_no_username
     req.user = user_no_username
     ctx.bot.send_message.reset_mock()
 
