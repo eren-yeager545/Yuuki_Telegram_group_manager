@@ -1172,6 +1172,199 @@ def test_ban_and_unban_comprehensive(monkeypatch, tmp_path):
     assert "free as a bird" in msg.reply_html.call_args[0][0]
 
 
+def test_id_cmd_sender_and_reply(monkeypatch):
+    import admin
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import User, Chat, Message, Update
+
+    sender = User(id=12345, first_name="Alice", username="alice_un", is_bot=False)
+    chat = Chat(id=-100111, type="supergroup")
+    msg1 = MagicMock(spec=Message)
+    msg1.reply_to_message = None
+    msg1.reply_html = AsyncMock()
+
+    up1 = MagicMock(spec=Update)
+    up1.effective_user = sender
+    up1.effective_chat = chat
+    up1.message = msg1
+
+    context = MagicMock()
+    context.args = []
+
+    asyncio.run(admin.id_cmd(up1, context))
+    msg1.reply_html.assert_called_once()
+    text1 = msg1.reply_html.call_args[0][0]
+    assert "User ID: <code>12345</code>" in text1
+    assert "Username: @alice_un" in text1
+    assert "Chat ID: <code>-100111</code>" in text1
+
+    replied_user = User(id=67890, first_name="Bob", username="bob_un", is_bot=False)
+    replied_msg = MagicMock(spec=Message)
+    replied_msg.from_user = replied_user
+
+    msg2 = MagicMock(spec=Message)
+    msg2.reply_to_message = replied_msg
+    msg2.reply_html = AsyncMock()
+
+    up2 = MagicMock(spec=Update)
+    up2.effective_user = sender
+    up2.effective_chat = chat
+    up2.message = msg2
+
+    asyncio.run(admin.id_cmd(up2, context))
+    msg2.reply_html.assert_called_once()
+    text2 = msg2.reply_html.call_args[0][0]
+    assert "User ID: <code>67890</code>" in text2
+    assert "Username: @bob_un" in text2
+    assert "Chat ID: <code>-100111</code>" in text2
+
+
+def test_help_cmd_pagination_and_permissions(monkeypatch):
+    import common
+    import bot as bot_module
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import User, Chat, Message, Update
+
+    app = bot_module.Application.builder().token('123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11').build()
+    bot_module.register_help(app, 'Users Commands', '/start', 'Start the bot', '/start')
+    bot_module.register_help(app, 'Moderation Commands', '/ban', 'Ban user', '/ban')
+    bot_module.register_help(app, 'Owner Commands', '/broadcast', 'Broadcast text', '/broadcast hi')
+
+    context = MagicMock()
+    context.application = app
+
+    member = User(id=111, first_name="Member", is_bot=False)
+    chat = Chat(id=-100111, type="supergroup")
+    msg = MagicMock(spec=Message)
+    msg.reply_html = AsyncMock()
+
+    up = MagicMock(spec=Update)
+    up.effective_user = member
+    up.effective_chat = chat
+    up.message = msg
+    context.args = []
+
+    monkeypatch.setattr("admin.is_target_admin", AsyncMock(return_value=False))
+    asyncio.run(common.help_cmd(up, context))
+
+    msg.reply_html.assert_called_once()
+    text, kwargs = msg.reply_html.call_args[0][0], msg.reply_html.call_args[1]
+    reply_markup = kwargs.get('reply_markup')
+    assert reply_markup is not None
+    button_callbacks = [b.callback_data for row in reply_markup.inline_keyboard for b in row]
+    assert "helpcat:Users Commands" in button_callbacks
+    assert "helpcat:Moderation Commands" not in button_callbacks
+    assert "helpcat:Owner Commands" not in button_callbacks
+
+    msg_admin = MagicMock(spec=Message)
+    msg_admin.reply_html = AsyncMock()
+    up_admin = MagicMock(spec=Update)
+    up_admin.effective_user = User(id=222, first_name="Admin", is_bot=False)
+    up_admin.effective_chat = chat
+    up_admin.message = msg_admin
+
+    monkeypatch.setattr("admin.is_target_admin", AsyncMock(return_value=True))
+    asyncio.run(common.help_cmd(up_admin, context))
+
+    kb_admin = msg_admin.reply_html.call_args[1].get('reply_markup')
+    btn_callbacks_admin = [b.callback_data for row in kb_admin.inline_keyboard for b in row]
+    assert "helpcat:Users Commands" in btn_callbacks_admin
+    assert "helpcat:Moderation Commands" in btn_callbacks_admin
+    assert "helpcat:Owner Commands" not in btn_callbacks_admin
+
+
+def test_admins_cmd_group_owner_and_count(monkeypatch):
+    import admin
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import User, Chat, Message, Update
+
+    owner_user = User(id=1001, first_name="GroupOwner", username="owner_un", is_bot=False)
+    admin_user = User(id=1002, first_name="GroupAdmin", username="admin_un", is_bot=False)
+
+    owner_member = MagicMock()
+    owner_member.status = 'creator'
+    owner_member.user = owner_user
+
+    admin_member = MagicMock()
+    admin_member.status = 'administrator'
+    admin_member.user = admin_user
+
+    bot = AsyncMock()
+    bot.get_chat_administrators = AsyncMock(return_value=[owner_member, admin_member])
+
+    context = MagicMock()
+    context.bot = bot
+
+    chat = Chat(id=-100123, type="supergroup")
+    msg = MagicMock(spec=Message)
+    msg.reply_html = AsyncMock()
+    msg.reply_to_message = None
+
+    up = MagicMock(spec=Update)
+    up.effective_chat = chat
+    up.effective_user = admin_user
+    up.message = msg
+
+    asyncio.run(admin.admins_cmd(up, context))
+
+    msg.reply_html.assert_called_once()
+    res_text = msg.reply_html.call_args[0][0]
+    assert "<b>Total Administrators:</b> <code>2</code>" in res_text
+    assert "Group Owner:" in res_text
+    assert "GroupOwner" in res_text
+    assert "@owner_un" in res_text
+    assert "<code>1001</code>" in res_text
+    assert "Administrators:" in res_text
+    assert "GroupAdmin" in res_text
+    assert "@admin_un" in res_text
+    assert "<code>1002</code>" in res_text
+
+
+def test_del_cmd_success_and_failure(monkeypatch):
+    import admin
+    from unittest.mock import AsyncMock, MagicMock
+    from telegram import User, Chat, Message, Update
+
+    bot = AsyncMock()
+    bot.delete_message = AsyncMock()
+
+    context = MagicMock()
+    context.bot = bot
+
+    chat = Chat(id=-100123, type="supergroup")
+    cmd_user = User(id=100, first_name="Admin", is_bot=False)
+    target_user = User(id=200, first_name="Spammer", is_bot=False)
+
+    replied_msg = MagicMock(spec=Message)
+    replied_msg.message_id = 501
+    replied_msg.from_user = target_user
+
+    cmd_msg = MagicMock(spec=Message)
+    cmd_msg.message_id = 502
+    cmd_msg.reply_to_message = replied_msg
+    cmd_msg.reply_text = AsyncMock()
+
+    up = MagicMock(spec=Update)
+    up.effective_chat = chat
+    up.effective_user = cmd_user
+    up.message = cmd_msg
+
+    monkeypatch.setattr(admin, "admin_only", AsyncMock(return_value=True))
+
+    asyncio.run(admin.del_cmd(up, context))
+    assert bot.delete_message.call_count == 2
+    bot.delete_message.assert_any_call(-100123, 501)
+    bot.delete_message.assert_any_call(-100123, 502)
+    cmd_msg.reply_text.assert_not_called()
+
+    bot.delete_message.reset_mock()
+    cmd_msg.reply_text.reset_mock()
+    bot.delete_message.side_effect = Exception("Telegram API error: Message cannot be deleted")
+
+    asyncio.run(admin.del_cmd(up, context))
+    cmd_msg.reply_text.assert_called_once_with('I could not delete that message.')
+
+
 def test_mybot_and_owner_commands_non_owner_restrictions(monkeypatch):
     import common
     import admin

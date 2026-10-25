@@ -21,7 +21,7 @@ from store import (
     get_chat_federation, get_fed_ban, get_expired_temp_actions, clear_temp_action, is_safe_user, get_group_by_id,
     log_admin_action, delete_user_data, get_global_link, record_user_message,
 )
-from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd, feedback_cmd, mybot_cmd, build_mybot_keyboard
+from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd, feedback_cmd, mybot_cmd, build_mybot_keyboard, is_owner_category, is_admin_category
 from broadcast import broadcast_cmd, broadcast_callback_handler, handle_broadcast_content
 from tictactoe import ttt_cmd, ttt_callback_handler
 from admin import *
@@ -148,11 +148,53 @@ async def homepage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await privacy_cmd(update, context)
         return
     if data == 'home:help':
-        await query.message.reply_text('Choose a help category:', reply_markup=build_help_category_keyboard(registry))
+        user = update.effective_user
+        user_id = user.id if user else 0
+        chat = update.effective_chat
+        is_admin_user = True
+        if chat and chat.type in ('group', 'supergroup'):
+            is_admin_user = await is_target_admin(chat.id, user_id, context)
+        kb = build_help_category_keyboard(registry, user_id=user_id, is_admin_user=is_admin_user)
+        text = (
+            "🌸 <b>Yuki Command Help Menu</b> 🌸\n\n"
+            "Choose a category below to explore my commands desu~! 💕"
+        )
+        try:
+            await query.edit_message_text(text, parse_mode='HTML', reply_markup=kb)
+        except Exception:
+            try:
+                await query.message.reply_text(text, parse_mode='HTML', reply_markup=kb)
+            except Exception:
+                pass
         return
+
     if data.startswith('helpcat:'):
         category = data.split(':', 1)[1]
-        await query.message.reply_text(build_category_help_text(registry, category))
+        user = update.effective_user
+        user_id = user.id if user else 0
+
+        if is_owner_category(category) and not is_owner_or_sudo(user_id):
+            await query.answer("Gomen ne~ This category is for bot owners only desu! 🌸", show_alert=True)
+            return
+
+        chat = update.effective_chat
+        is_admin_user = True
+        if chat and chat.type in ('group', 'supergroup'):
+            is_admin_user = await is_target_admin(chat.id, user_id, context)
+
+        if is_admin_category(category) and not is_admin_user:
+            await query.answer("Gomen ne~ This category is for group admins only desu! 🌸", show_alert=True)
+            return
+
+        cat_text = build_category_help_text(registry, category)
+        back_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Categories", callback_data="home:help")]])
+        try:
+            await query.edit_message_text(cat_text, parse_mode='HTML', reply_markup=back_kb)
+        except Exception:
+            try:
+                await query.message.reply_text(cat_text, parse_mode='HTML', reply_markup=back_kb)
+            except Exception:
+                pass
         return
     if data.startswith('reply_fb:'):
         target_uid_str = data.split(':', 1)[1]
@@ -1273,14 +1315,14 @@ def main():
         ('unban', unban_cmd, 'Group Management Commands', 'Unban by user id', '/unban 1234'),
         ('kick', kick_cmd, 'Group Management Commands', 'Reply-kick a user', '/kick'),
         ('del', del_cmd, 'Group Management Commands', 'Delete replied message', '/del'),
-        ('addpack', addpack_cmd, 'Group Management Commands', 'Add sticker pack by reply to a sticker', '/addpack'),
-        ('packs', packs_cmd, 'Group Management Commands', 'View all saved sticker packs', '/packs'),
-        ('pack', pack_cmd, 'Group Management Commands', 'Preview a specific saved sticker pack', '/pack id'),
-        ('delpack', delpack_cmd, 'Group Management Commands', 'Delete a stored sticker pack', '/delpack pack_name'),
-        ('addem', addem_cmd, 'Group Management Commands', 'Add emoji pack by link', '/addem https://t.me/addemoji/ExamplePack'),
-        ('delem', delem_cmd, 'Group Management Commands', 'Delete a stored emoji pack', '/delem pack_id'),
-        ('packem', packem_cmd, 'Group Management Commands', 'Preview a specific saved emoji pack', '/packem pack_id'),
-        ('packsem', packsem_cmd, 'Group Management Commands', 'View all saved emoji packs', '/packsem'),
+        ('addpack', addpack_cmd, 'Owner Commands', 'Add sticker pack by reply to a sticker', '/addpack'),
+        ('packs', packs_cmd, 'Owner Commands', 'View all saved sticker packs', '/packs'),
+        ('pack', pack_cmd, 'Owner Commands', 'Preview a specific saved sticker pack', '/pack id'),
+        ('delpack', delpack_cmd, 'Owner Commands', 'Delete a stored sticker pack', '/delpack pack_name'),
+        ('addem', addem_cmd, 'Owner Commands', 'Add emoji pack by link', '/addem https://t.me/addemoji/ExamplePack'),
+        ('delem', delem_cmd, 'Owner Commands', 'Delete a stored emoji pack', '/delem pack_id'),
+        ('packem', packem_cmd, 'Owner Commands', 'Preview a specific saved emoji pack', '/packem pack_id'),
+        ('packsem', packsem_cmd, 'Owner Commands', 'View all saved emoji packs', '/packsem'),
         ('dban', dban_cmd, 'Group Management Commands', 'Ban user and purge all their messages', '/dban'),
         ('pin', pin_cmd, 'Group Management Commands', 'Pin replied message', '/pin'),
         ('unpin', unpin_cmd, 'Group Management Commands', 'Clear all pins', '/unpin'),

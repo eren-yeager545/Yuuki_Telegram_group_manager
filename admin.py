@@ -371,13 +371,31 @@ async def kick_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
 async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
-    if update.message.reply_to_message:
-        try:
-            await context.bot.delete_message(update.effective_chat.id, update.message.reply_to_message.message_id)
-            await context.bot.delete_message(update.effective_chat.id, update.message.message_id)
-            log_admin_action(update.effective_chat.id, update.effective_user.id, 'del', update.message.reply_to_message.from_user.id)
-        except Exception:
-            await update.message.reply_text('I could not delete that message.')
+    reply_msg = update.message.reply_to_message if update.message else None
+    if not reply_msg:
+        await update.message.reply_text("🌸 Please reply to the message you want me to delete desu~ 💕")
+        return
+
+    chat_id = update.effective_chat.id
+    target_msg_id = reply_msg.message_id
+    target_user_id = reply_msg.from_user.id if reply_msg.from_user else 0
+
+    try:
+        await context.bot.delete_message(chat_id, target_msg_id)
+    except Exception as e:
+        logger.warning(f"Failed to delete target message {target_msg_id} in chat {chat_id}: {e}")
+        await update.message.reply_text('I could not delete that message.')
+        return
+
+    try:
+        log_admin_action(chat_id, update.effective_user.id, 'del', target_user_id)
+    except Exception:
+        pass
+
+    try:
+        await context.bot.delete_message(chat_id, update.message.message_id)
+    except Exception:
+        pass
 
 
 async def dban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1300,31 +1318,63 @@ async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = update.effective_user
     user_id = target.id if target else (update.effective_user.id if update.effective_user else 0)
     chat_id = update.effective_chat.id if update.effective_chat else 0
-    await update.message.reply_text(f'User ID: {user_id}\nChat ID: {chat_id}')
+    username = getattr(target, 'username', None)
+
+    lines = [f"User ID: <code>{user_id}</code>"]
+    if username:
+        clean_un = username.lstrip('@')
+        lines.append(f"Username: @{html.escape(clean_un)}")
+    lines.append(f"Chat ID: <code>{chat_id}</code>")
+
+    await update.message.reply_html("\n".join(lines))
 
 
 async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if not chat or chat.type not in ('group', 'supergroup'):
+        await update.message.reply_text("🌸 /admins command can only be used in group chats desu~ 💕")
+        return
+
     try:
-        admins = await context.bot.get_chat_administrators(update.effective_chat.id)
+        admins = await context.bot.get_chat_administrators(chat.id)
     except Exception as e:
+        logger.error(f"Error fetching administrators for chat {chat.id}: {e}")
         await update.message.reply_text("Could not fetch administrator list.")
         return
 
-    admin_tags = []
+    owner = None
+    other_admins = []
+
     for a in admins:
+        if getattr(a, 'status', '') in ('creator', 'CREATOR'):
+            owner = a
+        else:
+            other_admins.append(a)
+
+    def format_admin_line(a):
         u = a.user
-        tag = format_user_tag(u.id, u.first_name, u.username)
-        admin_tags.append(tag)
+        name = html.escape(u.full_name or u.first_name or "User")
+        user_link = f'<a href="tg://user?id={u.id}">{name}</a>'
+        un_str = f" (@{html.escape(u.username.lstrip('@'))})" if u.username else ""
+        return f"• {user_link}{un_str} - <code>{u.id}</code>"
 
-    lines = ["🌸 Here are the amazing admins keeping this group safe! 💕", ""]
-    for tag in admin_tags:
-        lines.append(f"• {tag}")
+    lines = ["🌸 <b>Group Administrators</b> 💕", ""]
+    lines.append(f"📊 <b>Total Administrators:</b> <code>{len(admins)}</code>\n")
 
-    # If used in context of a complaint/report (message reply)
+    if owner:
+        lines.append("👑 <b>Group Owner:</b>")
+        lines.append(format_admin_line(owner))
+        lines.append("")
+
+    if other_admins:
+        lines.append("🛡️ <b>Administrators:</b>")
+        for a in other_admins:
+            lines.append(format_admin_line(a))
+
     reason = extract_reason(update)
     if update.message and update.message.reply_to_message:
         lines.append("")
-        lines.append(f"📝 Reason: {html.escape(reason or 'User requested admin attention')}")
+        lines.append(f"📝 <b>Reason:</b> {html.escape(reason or 'User requested admin attention')}")
 
     await update.message.reply_html("\n".join(lines), disable_web_page_preview=True)
 
