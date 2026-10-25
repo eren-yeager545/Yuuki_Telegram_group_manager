@@ -552,6 +552,76 @@ async def track_profile_update_handler(update: Update, context: ContextTypes.DEF
         logger.error(f"Error in track_profile_update_handler: {e}", exc_info=True)
 
 
+MAINTENANCE_MESSAGE = (
+    "🚧 <b>Maintenance Mode Active!</b> 🌸\n\n"
+    "Yuki is currently undergoing maintenance desu~! Please try again later 💕 (⁠⁠◕⁠‿⁠◕⁠✿⁠)"
+)
+
+
+async def maintenance_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not store.is_maintenance_mode():
+        return
+
+    user = update.effective_user
+    if user and is_owner_or_sudo(user.id):
+        return
+
+    # Internal application updates/tasks pass-through
+    if getattr(update, 'my_chat_member', None) or getattr(update, 'chat_member', None):
+        return
+
+    msg = update.effective_message
+    if msg and getattr(msg, 'status_update', None):
+        return
+
+    # Handle Callback Queries (inline buttons)
+    if update.callback_query:
+        query = update.callback_query
+        try:
+            await query.answer("🚧 Maintenance Mode Active! Yuki is currently undergoing maintenance desu~! 💕", show_alert=True)
+        except Exception:
+            pass
+        raise ApplicationHandlerStop()
+
+    # Handle Messages (slash commands, private messages, group interactions, etc.)
+    if update.message or update.edited_message:
+        eff_msg = update.message or update.edited_message
+        chat = update.effective_chat
+
+        is_private = chat and chat.type == 'private'
+        txt = (eff_msg.text or eff_msg.caption or '').strip()
+        is_command = False
+        if txt and (txt.startswith('/') or txt.startswith('!') or txt.startswith('.')):
+            is_command = True
+        if eff_msg.entities:
+            for ent in eff_msg.entities:
+                if getattr(ent, 'type', '') == 'bot_command':
+                    is_command = True
+                    break
+
+        is_interaction = False
+        if is_private or is_command:
+            is_interaction = True
+        elif chat and chat.type in ('group', 'supergroup'):
+            bot_username = context.bot.username if context and context.bot else ''
+            if bot_username and f"@{bot_username.lower()}" in txt.lower():
+                is_interaction = True
+            elif eff_msg.reply_to_message and eff_msg.reply_to_message.from_user and context and context.bot and eff_msg.reply_to_message.from_user.id == context.bot.id:
+                is_interaction = True
+            elif txt.startswith('#') and len(txt.split()) == 1:
+                is_interaction = True
+
+        if is_interaction:
+            try:
+                await eff_msg.reply_html(MAINTENANCE_MESSAGE)
+            except Exception as e:
+                logger.warning(f"Could not send maintenance notice: {e}")
+            raise ApplicationHandlerStop()
+        else:
+            # Stop handler propagation for unauthorized users during maintenance
+            raise ApplicationHandlerStop()
+
+
 async def get_group_owner_recipients(context: ContextTypes.DEFAULT_TYPE, chat) -> list:
     recipients = []
     setting_owner = get_setting(chat.id, 'group_owner_id', '') or get_setting(chat.id, 'owner_id', '')
@@ -1374,9 +1444,11 @@ def main():
         ('delquiz', delquiz_cmd, 'Quiz Commands', 'Delete saved quiz', '/delquiz 1'),
         ('broadcast', broadcast_cmd, 'Owner Commands', 'Broadcast to all groups', '/broadcast hello all'),
         ('emoji', emoji_cmd, 'Owner Commands', 'Configure custom emoji for reactions', '/emoji <custom_emoji_id>'),
+        ('maintenance', maintenance_cmd, 'Owner Commands', 'Toggle or view maintenance mode', '/maintenance on|off'),
     ]
     app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, night_mode_message_handler), group=-2)
     app.add_handler(TypeHandler(Update, track_profile_update_handler), group=-1)
+    app.add_handler(TypeHandler(Update, maintenance_handler), group=-1)
     for spec in user_cmds + admin_cmds:
         add_registered_command(app, *spec)
     app.add_handler(CallbackQueryHandler(packs_callback_handler, pattern='^packs_page:'))
