@@ -2,12 +2,11 @@
 
 **Yuuki** is a cute, stylish, and super powerful Telegram group manager inspired by a cheerful 17-year-old college student from Tokyo! 🌸✨ Built for communities that want top-tier moderation, automated channel logging, flexible note management, and a lovely member experience without bloat.
 
-Instead of being just a simple ban bot, Yuuki is a complete group control system: she helps admins manage spam, organize rules and button notes, purge bad user messages, log real-time events to connected channels, issue Reference IDs on command errors, and keep community engagement high! 💕
+Instead of being just a simple ban bot, Yuuki is a complete group control system: she helps admins manage spam, organize rules and button notes, log real-time events to connected channels, issue Reference IDs on command errors, and keep community engagement high! 💕
 
 ## Why Yuuki stands out
 
 - **Cute Tokyo Student Persona**: Every response is sweet, polite, and kaomoji-adorned (⁠≧⁠▽⁠≦⁠)🌸!
-- **User Purging & Delete-Ban (`/dban`)**: Purge all messages from a selected user (`/purge`), or ban a user and wipe all their messages from the group simultaneously (`/dban`).
 - **Real-Time Channel Logging**: Live logger support for connected group log channels and global channels when users start the bot or add the bot to groups. Parses channel usernames (`@channel`), IDs, and Telegram invite/channel links.
 - **Error Reference IDs**: Automatic Reference ID tracking whenever a command encounters an issue or exception.
 - **Dual Storage Engine**: Seamlessly switches between local SQLite (`bot.db`) and MongoDB based on environment variables.
@@ -16,8 +15,6 @@ Instead of being just a simple ban bot, Yuuki is a complete group control system
 
 ### Moderation toolkit
 - **Ban, Unban, Kick, Mute, Unmute, Warn, Clear Warns**: Complete restriction and warning controls.
-- **User Message Purging (`/purge`)**: Delete all messages from a selected user (via reply or mention/ID) in the group.
-- **Delete-Ban (`/dban`)**: Ban a user and purge all their messages from the chat at once.
 - **Moderation Logs (`/modlog`)**: Audit trail for admin actions.
 
 ### Real-Time Logger System
@@ -83,9 +80,9 @@ MONGO_DB_NAME=yuuki_bot
 - `/fedinfo`, `/fedstat`, `/myfeds`, `/blacklists`
 
 ### Moderation commands
-- `/ban`, `/unban`, `/dban`, `/kick`, `/mute`, `/unmute`
+- `/ban`, `/unban`, `/kick`, `/mute`, `/unmute`
 - `/warn`, `/warns`, `/clearwarns`, `/warnlimit`, `/warnaction`
-- `/del`, `/purge`, `/modlog`
+- `/modlog`
 - `/lock`, `/unlock`, `/flood`
 - `/blacklist`, `/rmblacklist`
 - `/reports on|off`

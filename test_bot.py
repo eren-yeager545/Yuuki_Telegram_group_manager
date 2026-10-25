@@ -418,54 +418,6 @@ def test_mongo_extended_group_store(monkeypatch):
 
 
 
-def test_purge_and_dban_bulk(monkeypatch, tmp_path):
-    import store
-    import admin
-    from unittest.mock import AsyncMock, MagicMock
-    from telegram import Update, User, Chat, Message
-
-    db_file = str(tmp_path / "test_purge_dban.db")
-    monkeypatch.setattr(store, "DB_PATH", db_file)
-    store.init_db()
-
-    # Record user messages
-    store.record_user_message(-1001, 555, 101)
-    store.record_user_message(-1001, 555, 102)
-    store.record_user_message(-1001, 555, 103)
-
-    bot = AsyncMock()
-    bot.delete_messages = AsyncMock()
-    bot.delete_message = AsyncMock()
-    bot.ban_chat_member = AsyncMock()
-    bot.send_message = AsyncMock()
-
-    context = MagicMock()
-    context.bot = bot
-
-    # Test purge
-    user = User(id=555, first_name="Target", is_bot=False)
-    chat = Chat(id=-1001, type="supergroup")
-    chat.set_bot(bot)
-    cmd_user = User(id=999, first_name="Admin", is_bot=False)
-
-    msg = MagicMock(spec=Message)
-    msg.message_id = 9999
-    msg.reply_to_message = None
-
-    update = MagicMock(spec=Update)
-    update.effective_chat = chat
-    update.effective_user = cmd_user
-    update.message = msg
-
-    monkeypatch.setattr(admin, "resolve_target_user", AsyncMock(return_value=user))
-    monkeypatch.setattr(admin, "admin_only", AsyncMock(return_value=True))
-
-    asyncio.run(admin.dban_cmd(update, context))
-
-    assert bot.delete_messages.called or bot.delete_message.called
-    assert bot.send_message.called
-
-
 def test_feedback_and_reply_flow(monkeypatch, tmp_path):
     import store
     import common
@@ -1318,51 +1270,6 @@ def test_admins_cmd_group_owner_and_count(monkeypatch):
     assert "GroupAdmin" in res_text
     assert "@admin_un" in res_text
     assert "<code>1002</code>" in res_text
-
-
-def test_del_cmd_success_and_failure(monkeypatch):
-    import admin
-    from unittest.mock import AsyncMock, MagicMock
-    from telegram import User, Chat, Message, Update
-
-    bot = AsyncMock()
-    bot.delete_message = AsyncMock()
-
-    context = MagicMock()
-    context.bot = bot
-
-    chat = Chat(id=-100123, type="supergroup")
-    cmd_user = User(id=100, first_name="Admin", is_bot=False)
-    target_user = User(id=200, first_name="Spammer", is_bot=False)
-
-    replied_msg = MagicMock(spec=Message)
-    replied_msg.message_id = 501
-    replied_msg.from_user = target_user
-
-    cmd_msg = MagicMock(spec=Message)
-    cmd_msg.message_id = 502
-    cmd_msg.reply_to_message = replied_msg
-    cmd_msg.reply_text = AsyncMock()
-
-    up = MagicMock(spec=Update)
-    up.effective_chat = chat
-    up.effective_user = cmd_user
-    up.message = cmd_msg
-
-    monkeypatch.setattr(admin, "admin_only", AsyncMock(return_value=True))
-
-    asyncio.run(admin.del_cmd(up, context))
-    assert bot.delete_message.call_count == 2
-    bot.delete_message.assert_any_call(-100123, 501)
-    bot.delete_message.assert_any_call(-100123, 502)
-    cmd_msg.reply_text.assert_not_called()
-
-    bot.delete_message.reset_mock()
-    cmd_msg.reply_text.reset_mock()
-    bot.delete_message.side_effect = Exception("Telegram API error: Message cannot be deleted")
-
-    asyncio.run(admin.del_cmd(up, context))
-    cmd_msg.reply_text.assert_called_once_with('I could not delete that message.')
 
 
 def test_mybot_and_owner_commands_non_owner_restrictions(monkeypatch):
