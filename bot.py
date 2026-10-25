@@ -1315,7 +1315,6 @@ def main():
         ('night', night_cmd, 'Group Management Commands', 'Toggle Night Mode in group', '/night on|off'),
         ('promote', promote_cmd, 'Group Management Commands', 'Promote a member to admin', '/promote'),
         ('tag', tag_cmd, 'Group Management Commands', 'Tag all eligible members in the group.', '/tag Good morning!'),
-        ('all', tag_cmd, 'Group Management Commands', 'Tag all eligible members in the group.', '/all Good morning!'),
         ('demote', demote_cmd, 'Group Management Commands', 'Demote an admin', '/demote'),
         ('ban', ban_cmd, 'Group Management Commands', 'Reply-ban a user', '/ban'),
         ('unban', unban_cmd, 'Group Management Commands', 'Unban by user id', '/unban 1234'),

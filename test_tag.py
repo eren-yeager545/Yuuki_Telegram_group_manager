@@ -14,7 +14,10 @@ def create_mock_update_and_context(chat_id=-100123, user_id=111, first_name="Ali
     context = MagicMock()
 
     msg = AsyncMock()
+    msg.reply_html = AsyncMock(return_value=MagicMock())
+    msg.reply_text = AsyncMock(return_value=MagicMock())
     update.effective_message = msg
+    update.message = msg
     update.effective_chat.id = chat_id
     update.effective_chat.type = chat_type
     update.effective_chat.title = "Test Group"
@@ -330,23 +333,6 @@ async def test_tag_promoted_demoted_user(tmp_path, monkeypatch):
     context.bot.send_message.assert_called_once()
 
 
-@pytest.mark.asyncio
-async def test_all_alias_command(tmp_path, monkeypatch):
-    monkeypatch.setattr(store, 'DB_PATH', str(tmp_path / "test_tag.db"))
-    store.init_db()
-
-    store.upsert_user(101, "Member All", "m_all")
-    store.touch_member(-100123, 101)
-
-    update, context = create_mock_update_and_context(user_id=222, is_admin_status=True)
-    update.effective_message.text = "/all Hello team!"
-
-    await tag_cmd(update, context)
-
-    context.bot.send_message.assert_called_once()
-    send_args = context.bot.send_message.call_args[1]
-    assert "Hello team!" in send_args['text']
-    assert "Member All" in send_args['text']
 
 
 @pytest.mark.asyncio
@@ -381,3 +367,110 @@ async def test_tag_user_never_started_bot(tmp_path, monkeypatch):
     context.bot.send_message.assert_called_once()
     send_args = context.bot.send_message.call_args[1]
     assert 'href="tg://user?id=888"' in send_args['text']
+
+
+@pytest.mark.asyncio
+async def test_report_all_admins_mentioned(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, 'DB_PATH', str(tmp_path / "test_tag.db"))
+    store.init_db()
+
+    from admin import report_cmd
+    update, context = create_mock_update_and_context(chat_id=-100555, user_id=111)
+
+    target_user = MagicMock()
+    target_user.id = 777
+    target_user.first_name = "Bad User"
+    target_user.username = "baduser"
+
+    target_msg = MagicMock()
+    target_msg.message_id = 456
+    target_msg.from_user = target_user
+
+    update.message.reply_to_message = target_msg
+    update.message.text = "/report spamming in chat"
+
+    # Mock 6 administrators (5 humans, 1 bot)
+    admin1 = MagicMock()
+    admin1.user.id = 1001
+    admin1.user.first_name = "Admin One"
+    admin1.user.username = "admin1"
+    admin1.user.is_bot = False
+
+    admin2 = MagicMock()
+    admin2.user.id = 1002
+    admin2.user.first_name = "Admin Two"
+    admin2.user.username = None
+    admin2.user.is_bot = False
+
+    admin3 = MagicMock()
+    admin3.user.id = 1003
+    admin3.user.first_name = "Admin Three"
+    admin3.user.username = "admin3"
+    admin3.user.is_bot = False
+
+    admin4 = MagicMock()
+    admin4.user.id = 1004
+    admin4.user.first_name = "Admin Four"
+    admin4.user.username = "admin4"
+    admin4.user.is_bot = False
+
+    admin5 = MagicMock()
+    admin5.user.id = 1005
+    admin5.user.first_name = "Admin Five"
+    admin5.user.username = "admin5"
+    admin5.user.is_bot = False
+
+    admin_bot = MagicMock()
+    admin_bot.user.id = 999999
+    admin_bot.user.first_name = "Bot Admin"
+    admin_bot.user.username = "botadmin"
+    admin_bot.user.is_bot = True
+
+    context.bot.get_chat_administrators = AsyncMock(return_value=[admin1, admin2, admin3, admin4, admin5, admin_bot])
+
+    await report_cmd(update, context)
+
+    update.message.reply_html.assert_called_once()
+    reply_text = update.message.reply_html.call_args[0][0]
+    assert "@admin1" in reply_text
+    assert 'href="tg://user?id=1002"' in reply_text
+    assert "@admin3" in reply_text
+    assert "@admin4" in reply_text
+    assert "@admin5" in reply_text
+    assert "botadmin" not in reply_text
+
+
+@pytest.mark.asyncio
+async def test_tag_media_announcement_and_cancellation(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, 'DB_PATH', str(tmp_path / "test_tag.db"))
+    store.init_db()
+
+    for i in range(1, 15):
+        store.upsert_user(200 + i, f"Member{i}", f"member{i}")
+        store.touch_member(-100123, 200 + i)
+
+    update, context = create_mock_update_and_context(user_id=222, is_admin_status=True)
+
+    # Attach media to replied message
+    replied_media = MagicMock()
+    replied_media.text = None
+    replied_media.caption = "Check out this photo!"
+    replied_media.chat_id = -100123
+    replied_media.message_id = 888
+    replied_media.photo = [MagicMock()]
+    replied_media.video = None
+    replied_media.document = None
+    replied_media.animation = None
+    replied_media.audio = None
+    replied_media.voice = None
+    replied_media.sticker = None
+
+    update.effective_message.reply_to_message = replied_media
+    update.effective_message.text = "/tag"
+
+    context.bot.copy_message = AsyncMock(return_value=MagicMock())
+
+    await tag_cmd(update, context)
+
+    assert context.bot.copy_message.call_count == 1
+    assert context.bot.send_message.call_count == 1  # 2nd batch sent as text
