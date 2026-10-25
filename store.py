@@ -516,6 +516,16 @@ def get_user_count():
         return c.execute('SELECT COUNT(*) FROM users').fetchone()[0]
 
 
+def set_maintenance_mode(enabled: bool) -> None:
+    val = 'on' if enabled else 'off'
+    set_setting(0, 'maintenance_mode', val)
+
+
+def is_maintenance_mode() -> bool:
+    val = get_setting(0, 'maintenance_mode', 'off')
+    return str(val).lower() in ('on', 'true', '1')
+
+
 def set_setting(chat_id, key, value):
     if is_mongo():
         db = get_mongo_db()

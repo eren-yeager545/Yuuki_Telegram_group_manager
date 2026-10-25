@@ -20,6 +20,7 @@ from store import (
     touch_member, update_member_status, get_note, get_random_quiz, get_buttons, list_blacklists,
     get_chat_federation, get_fed_ban, get_expired_temp_actions, clear_temp_action, is_safe_user, get_group_by_id,
     log_admin_action, delete_user_data, get_global_link, record_user_message, is_approved_user,
+    is_maintenance_mode,
 )
 from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd, feedback_cmd, mybot_cmd, build_mybot_keyboard, is_owner_category, is_admin_category
 from broadcast import broadcast_cmd, broadcast_callback_handler, handle_broadcast_content
@@ -821,6 +822,43 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return True
 
 
+async def maintenance_middleware_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Central maintenance mode enforcement middleware.
+    Passes through operational updates (my_chat_member, chat_member) and updates from owner or sudo users.
+    Blocks unauthorized users with a friendly notification and halts handler propagation when maintenance mode is active.
+    """
+    if not is_maintenance_mode():
+        return
+
+    # Pass through internal/operational bot updates that do not originate from user interactions
+    if getattr(update, 'my_chat_member', None) or getattr(update, 'chat_member', None):
+        return
+
+    user = update.effective_user
+    if not user:
+        return
+
+    if is_owner_or_sudo(user.id, OWNER_IDS, SUDO_USERS):
+        return
+
+    # Respond to unauthorized interaction paths
+    maintenance_text = "Gomen ne~ 🛠️ Yuki is currently undergoing scheduled maintenance to make me even better! 🌸 Please check back in a little bit desu~! 💕"
+
+    if update.callback_query:
+        try:
+            await update.callback_query.answer("Gomen ne~ Yuki is currently undergoing scheduled maintenance! 🛠️ Please try again later desu~ 🌸", show_alert=True)
+        except Exception:
+            pass
+    elif update.effective_message:
+        try:
+            await update.effective_message.reply_text(maintenance_text)
+        except Exception:
+            pass
+
+    raise ApplicationHandlerStop()
+
+
 async def night_mode_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Dedicated handler for Night Mode enforcement.
@@ -1373,7 +1411,9 @@ def main():
         ('delquiz', delquiz_cmd, 'Quiz Commands', 'Delete saved quiz', '/delquiz 1'),
         ('broadcast', broadcast_cmd, 'Owner Commands', 'Broadcast to all groups', '/broadcast hello all'),
         ('emoji', emoji_cmd, 'Owner Commands', 'Configure custom emoji for reactions', '/emoji <custom_emoji_id>'),
+        ('maintenance', maintenance_cmd, 'Owner Commands', 'Toggle or check maintenance mode', '/maintenance [on|off]'),
     ]
+    app.add_handler(TypeHandler(Update, maintenance_middleware_handler), group=-10)
     app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, night_mode_message_handler), group=-2)
     app.add_handler(TypeHandler(Update, track_profile_update_handler), group=-1)
     for spec in user_cmds + admin_cmds:
