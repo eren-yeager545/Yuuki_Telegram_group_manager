@@ -576,6 +576,40 @@ def remove_safe_user(chat_id: int, user_id: int) -> bool:
     return True
 
 
+def get_approved_users(chat_id: int) -> list:
+    raw = get_setting(chat_id, 'approved_users', '')
+    if not raw:
+        return []
+    try:
+        import json
+        val = json.loads(raw)
+        if isinstance(val, list):
+            return [int(x) for x in val if str(x).lstrip('-').isdigit()]
+    except Exception:
+        pass
+    return [int(x.strip()) for x in str(raw).split(',') if x.strip().lstrip('-').isdigit()]
+
+
+def is_approved_user(chat_id: int, user_id: int) -> bool:
+    return user_id in get_approved_users(chat_id)
+
+
+def add_approved_user(chat_id: int, user_id: int) -> bool:
+    users = set(get_approved_users(chat_id))
+    users.add(user_id)
+    import json
+    set_setting(chat_id, 'approved_users', json.dumps(sorted(list(users))))
+    return True
+
+
+def remove_approved_user(chat_id: int, user_id: int) -> bool:
+    users = set(get_approved_users(chat_id))
+    users.discard(user_id)
+    import json
+    set_setting(chat_id, 'approved_users', json.dumps(sorted(list(users))))
+    return True
+
+
 def toggle_safe_user(chat_id: int, user_id: int) -> bool:
     users = set(get_safe_users(chat_id))
     if user_id in users:
