@@ -16,7 +16,8 @@ from store import (
     list_notes, list_quizzes, list_warned_users, log_admin_action, remove_blacklist,
     reset_warns, save_buttons, save_filter, save_note, set_chat_federation, set_setting,
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
-    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members, get_safe_users, is_safe_user, add_safe_user, remove_safe_user, toggle_safe_user, get_group_by_id, upsert_user, get_approved_users, is_approved_user, add_approved_user, remove_approved_user
+    get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members, get_safe_users, is_safe_user, add_safe_user, remove_safe_user, toggle_safe_user, get_group_by_id, upsert_user, get_approved_users, is_approved_user, add_approved_user, remove_approved_user,
+    set_maintenance_mode, is_maintenance_mode
 )
 from helpers import is_admin, is_owner, is_owner_or_sudo, safe_reply_error, create_custom_emoji_entities, send_reply_with_custom_emoji
 logger = logging.getLogger(__name__)
@@ -3066,3 +3067,33 @@ async def slist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error listing safe users in chat {chat.id}: {e}", exc_info=True)
         await safe_reply_error(update.effective_message)
+
+
+async def maintenance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id if user else 0
+    msg = update.effective_message
+    if not msg:
+        return
+
+    args = context.args or []
+    sub = args[0].lower().strip() if args else ''
+
+    if sub in ('on', 'off'):
+        if not is_owner(user_id, OWNER_IDS):
+            await msg.reply_text("Gomen ne~ 🌸 Only my owner can enable or disable maintenance mode desu! (⁠⁠◕⁠‿⁠◕⁠✿⁠)")
+            return
+
+        if sub == 'on':
+            set_maintenance_mode(True)
+            await msg.reply_html("🚧 Maintenance mode is now <b>ON</b> desu~! Only owner and sudo users can use the bot now. 🌸 (⁠⁠◕⁠‿⁠◕⁠✿⁠)")
+        else:
+            set_maintenance_mode(False)
+            await msg.reply_html("🌸 Maintenance mode is now <b>OFF</b> desu~! Everyone can use the bot now! 💕 (⁠≧⁠▽⁠≦⁠)")
+        return
+
+    is_on = is_maintenance_mode()
+    if is_on:
+        await msg.reply_html("🚧 Maintenance mode is currently <b>ON</b> desu~! 🌸")
+    else:
+        await msg.reply_html("🌸 Maintenance mode is currently <b>OFF</b> desu~! ✨")

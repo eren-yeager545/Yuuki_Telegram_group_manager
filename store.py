@@ -542,6 +542,15 @@ def get_setting(chat_id, key, default=None):
         return row[0] if row else default
 
 
+def set_maintenance_mode(enabled: bool) -> None:
+    set_setting(0, 'maintenance_mode', 'on' if enabled else 'off')
+
+
+def is_maintenance_mode() -> bool:
+    val = get_setting(0, 'maintenance_mode', 'off')
+    return str(val or '').strip().lower() in ('on', 'true', '1')
+
+
 def get_safe_users(chat_id: int) -> list:
     raw = get_setting(chat_id, 'safe_users', '')
     if not raw:
