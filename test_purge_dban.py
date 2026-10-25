@@ -4,13 +4,20 @@ from unittest.mock import AsyncMock, MagicMock
 from telegram import Update, User, Chat, Message
 
 
-def test_purge_range_all_messages(monkeypatch, tmp_path):
+def test_purge_reply_defaults_to_replied_user(monkeypatch, tmp_path):
     import store
     import admin
 
-    db_file = str(tmp_path / "test_purge_all.db")
+    db_file = str(tmp_path / "test_purge_reply_user.db")
     monkeypatch.setattr(store, "DB_PATH", db_file)
     store.init_db()
+
+    # User 555 and User 666 messages recorded
+    store.record_user_message(-1001, 555, 100)
+    store.record_user_message(-1001, 666, 101)
+    store.record_user_message(-1001, 555, 102)
+    store.record_user_message(-1001, 666, 103)
+    store.record_user_message(-1001, 555, 104)
 
     bot = AsyncMock()
     bot.delete_messages = AsyncMock()
@@ -24,9 +31,10 @@ def test_purge_range_all_messages(monkeypatch, tmp_path):
     chat = Chat(id=-1001, type="supergroup")
     admin_user = User(id=100, first_name="Admin", is_bot=False)
 
+    user_a = User(id=555, first_name="UserA", is_bot=False)
     reply_msg = MagicMock(spec=Message)
     reply_msg.message_id = 100
-    reply_msg.from_user = User(id=555, first_name="UserA", is_bot=False)
+    reply_msg.from_user = user_a
 
     cmd_msg = MagicMock(spec=Message)
     cmd_msg.message_id = 105
@@ -45,10 +53,11 @@ def test_purge_range_all_messages(monkeypatch, tmp_path):
     bot.delete_messages.assert_called_once()
     call_args = bot.delete_messages.call_args
     assert call_args.kwargs["chat_id"] == -1001
-    assert call_args.kwargs["message_ids"] == [100, 101, 102, 103, 104, 105]
+    # ONLY User A's messages in range (100, 102, 104) are purged
+    assert call_args.kwargs["message_ids"] == [100, 102, 104]
 
     bot.send_message.assert_called_once()
-    assert "Purged 6 message(s)" in bot.send_message.call_args.kwargs["text"]
+    assert "Purged 3 message(s)" in bot.send_message.call_args.kwargs["text"]
 
 
 def test_purge_user_targeted_mode(monkeypatch, tmp_path):
@@ -125,6 +134,11 @@ def test_purge_api_fallback_on_failure(monkeypatch, tmp_path):
     db_file = str(tmp_path / "test_purge_fallback.db")
     monkeypatch.setattr(store, "DB_PATH", db_file)
     store.init_db()
+
+    user_a_id = 555
+    store.record_user_message(-1001, user_a_id, 100)
+    store.record_user_message(-1001, user_a_id, 101)
+    store.record_user_message(-1001, user_a_id, 102)
 
     bot = AsyncMock()
     # Batch delete fails (e.g. contains messages older than 48 hours)

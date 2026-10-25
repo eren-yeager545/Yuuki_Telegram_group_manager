@@ -434,26 +434,30 @@ async def purge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if has_target_arg:
         target_user = await resolve_target_user(update, context)
 
-    if target_user:
-        recorded_ids = set(get_user_message_ids_in_range(chat_id, target_user.id, start_id, end_id))
-        if reply_msg.from_user and reply_msg.from_user.id == target_user.id:
-            recorded_ids.add(reply_msg.message_id)
-        if update.message.from_user and update.message.from_user.id == target_user.id:
-            recorded_ids.add(update.message.message_id)
-        candidate_ids = sorted(list(recorded_ids))
-    else:
-        candidate_ids = list(range(start_id, end_id + 1))
+    if not target_user and reply_msg and reply_msg.from_user:
+        target_user = reply_msg.from_user
+
+    if not target_user:
+        await update.message.reply_text("🌸 Could not identify the target user to purge desu~ 💕")
+        return
+
+    recorded_ids = set(get_user_message_ids_in_range(chat_id, target_user.id, start_id, end_id))
+    if reply_msg and reply_msg.from_user and reply_msg.from_user.id == target_user.id:
+        recorded_ids.add(reply_msg.message_id)
+    if update.message and update.message.from_user and update.message.from_user.id == target_user.id:
+        recorded_ids.add(update.message.message_id)
+
+    candidate_ids = sorted(list(recorded_ids))
+
+    uname = getattr(target_user, 'username', None)
+    utag = f"@{uname.lstrip('@')}" if uname else format_user_link(target_user.id, getattr(target_user, 'first_name', 'User'))
 
     if not candidate_ids:
-        if target_user:
-            uname = getattr(target_user, 'username', None)
-            utag = f"@{uname.lstrip('@')}" if uname else format_user_link(target_user.id, getattr(target_user, 'first_name', 'User'))
-            await update.message.reply_html(f"🌸 No messages from {utag} found in the specified purge range desu~")
-        else:
-            await update.message.reply_text("🌸 No messages found in the specified range desu~")
+        await update.message.reply_html(f"🌸 No recorded messages from {utag} found in the specified purge range desu~")
         return
 
     deleted_count = 0
+    failed_count = 0
     deleted_ids = []
 
     for i in range(0, len(candidate_ids), 100):
@@ -469,19 +473,17 @@ async def purge_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     deleted_count += 1
                     deleted_ids.append(mid)
                 except Exception:
-                    pass
+                    failed_count += 1
 
     if deleted_ids:
         delete_recorded_message_ids(chat_id, deleted_ids)
 
-    log_admin_action(chat_id, update.effective_user.id, 'purge', target_user.id if target_user else 0, details=f"deleted={deleted_count}")
+    log_admin_action(chat_id, update.effective_user.id, 'purge', target_user.id, details=f"deleted={deleted_count},failed={failed_count}")
 
-    if target_user:
-        uname = getattr(target_user, 'username', None)
-        utag = f"@{uname.lstrip('@')}" if uname else format_user_link(target_user.id, getattr(target_user, 'first_name', 'User'))
-        confirm_text = f"🗑️ Purged {deleted_count} message(s) from {utag} desu~ 🌸"
+    if failed_count > 0:
+        confirm_text = f"🗑️ Purged {deleted_count} message(s) from {utag} ({failed_count} message(s) could not be deleted due to Telegram API restrictions) desu~ 🌸"
     else:
-        confirm_text = f"🗑️ Purged {deleted_count} message(s) desu~ 🌸"
+        confirm_text = f"🗑️ Purged {deleted_count} message(s) from {utag} desu~ 🌸"
 
     try:
         status_msg = await context.bot.send_message(chat_id=chat_id, text=confirm_text, parse_mode='HTML')
@@ -529,37 +531,48 @@ Please reply to, tag, or provide the user ID/username of the member you actually
         await safe_reply_error(update.effective_message, "🌷 Aww, Telegram won't let me perform that action on this member. Please check that I have administrator permissions to ban users!")
         return
 
-    recorded_mids = clear_user_messages(chat_id, target_id)
+    recorded_mids = get_user_messages(chat_id, target_id)
     candidate_mids = set(recorded_mids)
 
     if update.message.reply_to_message and update.message.reply_to_message.from_user and update.message.reply_to_message.from_user.id == target_id:
         candidate_mids.add(update.message.reply_to_message.message_id)
 
-    deleted_count = 0
+    deleted_ids = []
+    failed_count = 0
     candidate_list = sorted(list(candidate_mids))
 
     for i in range(0, len(candidate_list), 100):
         batch = candidate_list[i:i + 100]
         try:
             await context.bot.delete_messages(chat_id=chat_id, message_ids=batch)
-            deleted_count += len(batch)
+            deleted_ids.extend(batch)
         except Exception:
             for mid in batch:
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=mid)
-                    deleted_count += 1
+                    deleted_ids.append(mid)
                 except Exception:
-                    pass
+                    failed_count += 1
+
+    if deleted_ids:
+        delete_recorded_message_ids(chat_id, deleted_ids)
 
     try:
         await context.bot.delete_message(chat_id, update.message.message_id)
     except Exception:
         pass
 
-    log_admin_action(chat_id, commander_id, 'dban', target_id, details=f"deleted={deleted_count}")
+    deleted_count = len(deleted_ids)
+    log_admin_action(chat_id, commander_id, 'dban', target_id, details=f"deleted={deleted_count},failed={failed_count}")
+
+    if failed_count > 0:
+        msg_text = f"Banned! 🔨 {user_tag} has been banned and {deleted_count} of their message(s) were purged ({failed_count} message(s) could not be deleted due to Telegram API restrictions)."
+    else:
+        msg_text = f"Banned and swept clean! 🔨🧹 {user_tag} has been banned and {deleted_count} of their message(s) were purged from the group! Stay safe everyone~ 🌸 (⁠≧⁠∇⁠≦⁠)/"
+
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"Banned and swept clean! 🔨🧹 {user_tag} has been banned and {deleted_count} of their message(s) were purged from the group! Stay safe everyone~ 🌸 (⁠≧⁠∇⁠≦⁠)/",
+        text=msg_text,
         parse_mode='HTML'
     )
 

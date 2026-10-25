@@ -8,8 +8,11 @@ from admin import chat_join_request_handler, chat_join_request_callback_handler
 
 
 @pytest.fixture(autouse=True)
-def setup_db():
-    init_db()
+def setup_db(monkeypatch, tmp_path):
+    import store
+    db_file = str(tmp_path / "test_cjr.db")
+    monkeypatch.setattr(store, "DB_PATH", db_file)
+    store.init_db()
 
 
 @pytest.mark.asyncio
