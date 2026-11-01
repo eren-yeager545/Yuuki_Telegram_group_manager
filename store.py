@@ -2116,6 +2116,16 @@ def get_join_request_decision(chat_id: int, user_id: int):
         return None
 
 
+def clear_join_request_decision(chat_id: int, user_id: int):
+    if is_mongo():
+        db = get_mongo_db()
+        db['join_request_decisions'].delete_one({'chat_id': chat_id, 'user_id': user_id})
+        return
+    with get_conn() as c:
+        c.execute('DELETE FROM join_request_decisions WHERE chat_id=? AND user_id=?', (chat_id, user_id))
+        c.commit()
+
+
 def delete_emoji_pack(set_name: str) -> bool:
     """Deletes an emoji pack and its emojis by set_name. Returns True if deleted."""
     if not set_name:
