@@ -7,6 +7,7 @@ import time
 from telegram import Update, ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup, MessageEntity
 from telegram.ext import ContextTypes
 from config import OWNER_IDS, OWNER_ID, SUDO_USERS
+from telegram.error import RetryAfter, TelegramError, TimedOut, NetworkError
 from store import (
     add_blacklist, add_fed_admin, add_quiz, add_report, add_temp_action, add_warn,
     clear_temp_action, create_federation, delete_filter, delete_note, delete_quiz,
@@ -18,7 +19,7 @@ from store import (
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
     get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members, get_safe_users, is_safe_user, add_safe_user, remove_safe_user, toggle_safe_user, get_group_by_id, upsert_user, get_approved_users, is_approved_user, add_approved_user, remove_approved_user,
     set_maintenance_mode, is_maintenance_mode, get_user_message_ids_in_range, delete_recorded_message_ids,
-    save_join_request_decision, get_join_request_decision
+    save_join_request_decision, get_join_request_decision, clear_join_request_decision
 )
 from helpers import is_admin, is_owner, is_owner_or_sudo, safe_reply_error, create_custom_emoji_entities, send_reply_with_custom_emoji
 logger = logging.getLogger(__name__)
@@ -1727,6 +1728,38 @@ async def night_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def autojoin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Persistent, per-group toggle for automatic approval of Telegram join requests.
+    Usage: /autojoin [on|off]
+    Restricted to group administrators.
+    """
+    if not await admin_only(update, context):
+        return
+    chat_id = update.effective_chat.id
+    if context.args:
+        sub = context.args[0].lower().strip()
+        if sub in ('on', 'enable', 'true', '1'):
+            set_setting(chat_id, 'autojoin', 'on')
+            await update.message.reply_text('✨ <b>Auto Join-Request Approval</b> is now <b>ON</b> for this group! 🌸 Incoming join requests will be approved automatically desu~ 💕', parse_mode="HTML")
+            return
+        elif sub in ('off', 'disable', 'false', '0'):
+            set_setting(chat_id, 'autojoin', 'off')
+            await update.message.reply_text('🔒 <b>Auto Join-Request Approval</b> is now <b>OFF</b> for this group! Manual admin approval will be required for join requests desu~ ✨', parse_mode="HTML")
+            return
+
+    current = get_setting(chat_id, 'autojoin', 'off')
+    status_str = "ON ✨" if current in ('on', 'true', '1') else "OFF 🔒"
+    await update.message.reply_text(
+        f"🌸 <b>Auto Join-Request Approval Status:</b> {status_str}\n\n"
+        "Usage:\n"
+        "• <code>/autojoin on</code> - Automatically approve incoming join requests\n"
+        "• <code>/autojoin off</code> - Require manual admin approval for join requests\n"
+        "• <code>/autojoin</code> - Show current status",
+        parse_mode="HTML"
+    )
+
+
 async def zombies_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await admin_only(update, context):
         return
@@ -3198,6 +3231,33 @@ async def normie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply_error(update.effective_message)
 
 
+async def is_user_currently_in_group(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Checks if a user is currently a member of a group.
+    Returns:
+        (True, member_obj) if the user is currently in the group.
+        (False, member_obj) if the user has left, been kicked, or is restricted without membership.
+        (None, error) if the Telegram API check fails due to network/error/timeout.
+    """
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        st = getattr(member, 'status', 'left')
+        if st in ('left', 'kicked'):
+            return False, member
+        if st == 'restricted':
+            is_mem = getattr(member, 'is_member', False)
+            return bool(is_mem), member
+        if st in ('member', 'administrator', 'creator'):
+            return True, member
+        return True, member
+    except (TimedOut, NetworkError, RetryAfter, TelegramError) as te:
+        logger.warning(f"Telegram API error checking membership for user {user_id} in chat {chat_id}: {te}")
+        return None, te
+    except Exception as e:
+        logger.error(f"Unexpected error checking membership for user {user_id} in chat {chat_id}: {e}", exc_info=True)
+        return None, e
+
+
 async def chat_join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     req = update.chat_join_request
     if not req:
@@ -3208,10 +3268,62 @@ async def chat_join_request_handler(update: Update, context: ContextTypes.DEFAUL
     if not chat or not user:
         return
 
+    # Check if a previous approval record exists and if user is already in the group
+    existing_decision = get_join_request_decision(chat.id, user.id)
+    if existing_decision:
+        past_action, _, _ = existing_decision
+        if past_action in ('a', 'accept', 'accepted'):
+            is_in_group, _ = await is_user_currently_in_group(chat.id, user.id, context)
+            if is_in_group is True:
+                # User is genuinely still in the group
+                logger.info(f"Join request from user {user.id} in chat {chat.id} ignored: user already in group.")
+                return
+            elif is_in_group is False:
+                # Stale approval record (user left or was kicked); clear it so new request is processed
+                logger.info(f"Clearing stale approval record for user {user.id} in chat {chat.id} (user left/kicked).")
+                clear_join_request_decision(chat.id, user.id)
+            else:
+                # API check failed; do not clear record or auto-reject
+                logger.warning(f"Could not verify membership for user {user.id} in chat {chat.id} due to API error. Proceeding with caution.")
+
     display_name = html.escape(user.full_name or user.first_name or "User")
     username_str = f"@{user.username}" if user.username else "Not set"
     user_id_str = str(user.id)
     chat_title = html.escape(chat.title or "our group")
+
+    # Check if auto-join approval is enabled for this chat
+    autojoin_status = get_setting(chat.id, 'autojoin', 'off')
+    if autojoin_status in ('on', 'enable', 'true', '1'):
+        try:
+            await context.bot.approve_chat_join_request(chat_id=chat.id, user_id=user.id)
+            bot_admin_id = context.bot.id if hasattr(context, 'bot') and hasattr(context.bot, 'id') and isinstance(context.bot.id, int) else 0
+            save_join_request_decision(chat.id, user.id, 'accepted', bot_admin_id)
+
+            auto_msg = (
+                "🌸 <b>Yuki welcomed a new member!</b> ✨\n\n"
+                f"👤 <b>Name:</b> {display_name}\n"
+                f"🪪 <b>Username:</b> {username_str}\n"
+                f"🆔 <b>User ID:</b> <code>{user_id_str}</code>\n\n"
+                "✅ <i>Automatically approved via Auto-Join!</i> 💕"
+            )
+            try:
+                await context.bot.send_message(
+                    chat_id=chat.id,
+                    text=auto_msg,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"Failed to send auto-join approval message in group {chat.id}: {e}")
+
+            from logger_helper import send_logger_notification
+            try:
+                await send_logger_notification(context, auto_msg, group_chat_id=chat.id)
+            except Exception as e:
+                logger.warning(f"Logger notification for auto-join approval skipped/failed: {e}")
+            return
+        except Exception as e:
+            logger.error(f"Auto-approval of join request failed for user {user.id} in {chat.id}: {e}", exc_info=True)
+            # If auto-approval failed (e.g. permission or expired), fall back to manual notification
 
     msg_text = (
         "🌸 Yuki noticed a new visitor!\n\n"
@@ -3278,13 +3390,27 @@ async def chat_join_request_callback_handler(update: Update, context: ContextTyp
         await query.answer("Gomen ne~ 🌸 Only group admins can manage join requests for this chat desu! 💕", show_alert=True)
         return
 
-    # Prevent duplicate decisions
+    # Check for existing decision and verify current membership
     existing_decision = get_join_request_decision(target_chat_id, requester_id)
     if existing_decision:
         past_action, past_admin_id, _ = existing_decision
-        status_disp = "accepted" if past_action in ('a', 'accept', 'accepted') else "declined"
-        await query.answer(f"This join request has already been {status_disp}!", show_alert=True)
-        return
+        if past_action in ('a', 'accept', 'accepted'):
+            is_in_group, err = await is_user_currently_in_group(target_chat_id, requester_id, context)
+            if is_in_group is True:
+                await query.answer("This join request has already been accepted!", show_alert=True)
+                return
+            elif is_in_group is False:
+                # Stale approval record (user left or was kicked); clear it and allow processing
+                logger.info(f"Clearing stale approval record for user {requester_id} in chat {target_chat_id} upon callback decision.")
+                clear_join_request_decision(target_chat_id, requester_id)
+            else:
+                # Telegram API verification error/timeout: never assume user has left!
+                logger.warning(f"API verification failed for user {requester_id} in {target_chat_id}: {err}")
+                await query.answer("Could not verify user's current membership status due to a Telegram error. Please try again.", show_alert=True)
+                return
+        else:
+            await query.answer("This join request has already been declined!", show_alert=True)
+            return
 
     admin_disp = html.escape(acting_user.full_name or acting_user.first_name or f"Admin {acting_user.id}")
 

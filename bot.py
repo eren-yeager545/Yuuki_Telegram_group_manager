@@ -430,11 +430,17 @@ async def service_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await msg.reply_text(text)
 
 
-async def maybe_delete(msg):
+async def maybe_delete(msg, reason="unspecified"):
     try:
         await msg.delete()
+        chat_id = msg.chat_id if hasattr(msg, 'chat_id') else (msg.chat.id if hasattr(msg, 'chat') else "unknown")
+        msg_id = getattr(msg, 'message_id', 'unknown')
+        logger.info(f"Deleted message {msg_id} in chat {chat_id}. Reason: {reason}")
         return True
-    except Exception:
+    except Exception as e:
+        chat_id = msg.chat_id if hasattr(msg, 'chat_id') else (msg.chat.id if hasattr(msg, 'chat') else "unknown")
+        msg_id = getattr(msg, 'message_id', 'unknown')
+        logger.debug(f"Failed to delete message {msg_id} in chat {chat_id} (Reason: {reason}): {e}")
         return False
 
 
@@ -969,12 +975,19 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
         is_approved = is_approved_user(chat.id, user.id)
+        is_safe = is_safe_user(chat.id, user.id)
+        is_admin_or_owner = await is_target_admin(chat.id, user.id, context)
 
         has_link = bool('http://' in lower or 'https://' in lower or 't.me/' in lower)
         has_sticker = bool(msg.sticker)
         has_voice = bool(msg.voice)
 
-        if not is_approved:
+        if not is_approved and not is_safe and not is_admin_or_owner:
+            entities = (msg.entities or []) + (msg.caption_entities or [])
+            has_hashtag = any(str(getattr(ent, 'type', '')) in ('hashtag', 'MessageEntityType.HASHTAG') for ent in entities) or bool(re.search(r'(?:^|\s)#[A-Za-z0-9_]+', lower))
+            has_mention = any(str(getattr(ent, 'type', '')) in ('mention', 'text_mention') for ent in entities) or bool(re.search(r'(?:^|\s)@[A-Za-z0-9_]+', lower))
+            has_inline_mention = any(str(getattr(ent, 'type', '')) in ('text_mention',) for ent in entities) or ('tg://user?id=' in lower)
+
             lock_checks = {
                 'all': True,
                 'links': has_link,
@@ -991,22 +1004,64 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'videos': bool(msg.video),
                 'audio': bool(msg.audio),
                 'commands': bool(msg.text and msg.text.startswith('/')),
-                'hashtags': '#' in lower,
-                'mentions': '@' in lower,
-                'inline': 'tg://user?id=' in lower,
+                'hashtags': has_hashtag,
+                'mentions': has_mention,
+                'inline': has_inline_mention,
                 'contact': bool(msg.contact),
             }
             for key, matched in lock_checks.items():
                 if matched and get_setting(chat.id, f'lock_{key}', 'off') == 'on':
-                    if await maybe_delete(msg):
+                    if await maybe_delete(msg, reason=f"lock_{key}"):
                         log_admin_action(chat.id, user.id, f'lock_{key}_delete', user.id)
                         return
             for trigger, action in list_blacklists(chat.id):
                 if trigger and trigger in lower:
-                    await maybe_delete(msg)
+                    await maybe_delete(msg, reason=f"blacklist_{trigger}_{action}")
                     try:
                         if action == 'warn':
-                            add_warn(chat.id, user.id, f'Blacklist: {trigger}')
+                            warn_reason = f'Blacklist: {trigger}'
+                            count = add_warn(chat.id, user.id, warn_reason)
+                            limit = int(get_setting(chat.id, 'warn_limit', '3'))
+                            warn_mode = get_setting(chat.id, 'warn_mode', 'ban').lower()
+
+                            tag = format_user_tag(user.id, getattr(user, 'first_name', 'User'), getattr(user, 'username', None))
+                            warn_notice = (
+                                f"⚠️ <b>Warning for {tag}!</b>\n"
+                                f"<b>Rule:</b> <code>{html.escape(trigger)}</code>\n"
+                                f"<b>Reason:</b> {html.escape(warn_reason)}\n"
+                                f"<b>Warn count:</b> {count}/{limit}"
+                            )
+                            try:
+                                await context.bot.send_message(
+                                    chat_id=chat.id,
+                                    text=warn_notice,
+                                    parse_mode="HTML"
+                                )
+                            except Exception as notify_err:
+                                logger.warning(f"Failed to send blacklist warning notification in chat {chat.id}: {notify_err}")
+
+                            if count >= limit:
+                                try:
+                                    duration_sec = parse_duration_to_seconds(get_setting(chat.id, 'warn_time', '1h'))
+                                    await apply_action(chat.id, user.id, warn_mode, context, duration_sec)
+                                    action_disp = warn_mode.capitalize() if warn_mode not in ('none', 'off') else 'None'
+                                    limit_notice = (
+                                        f"⚠️ <b>Warning limit reached.</b>\n\n"
+                                        f"👤 <b>User:</b> {tag}\n"
+                                        f"📌 <b>Action:</b> {html.escape(action_disp)}"
+                                    )
+                                    try:
+                                        await context.bot.send_message(
+                                            chat_id=chat.id,
+                                            text=limit_notice,
+                                            parse_mode="HTML"
+                                        )
+                                    except Exception as notify_err:
+                                        logger.warning(f"Failed to send warn limit notification in chat {chat.id}: {notify_err}")
+                                    reset_warns(chat.id, user.id)
+                                    log_admin_action(chat.id, context.bot.id if hasattr(context, 'bot') and hasattr(context.bot, 'id') else 0, f'auto_{warn_mode}_warn_limit', user.id, f'count={count}')
+                                except Exception as exc:
+                                    logger.error(f"Failed to execute blacklist warn limit action: {exc}")
                         elif action == 'mute':
                             await context.bot.restrict_chat_member(chat.id, user.id, permissions=ChatPermissions(can_send_messages=False))
                         elif action == 'kick':
@@ -1014,8 +1069,8 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             await context.bot.unban_chat_member(chat.id, user.id)
                         elif action == 'ban':
                             await context.bot.ban_chat_member(chat.id, user.id)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.error(f"Error executing blacklist action {action} for user {user.id} in {chat.id}: {e}")
                     log_admin_action(chat.id, user.id, 'blacklist_trigger', user.id, f'{trigger}->{action}')
                     return
             key = (chat.id, user.id)
@@ -1024,7 +1079,7 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             while dq and now - dq[0] > 8:
                 dq.popleft()
             if len(dq) >= int(get_setting(chat.id, 'flood_limit', '5')):
-                await maybe_delete(msg)
+                await maybe_delete(msg, reason="antiflood")
                 action = get_setting(chat.id, 'flood_action', 'delete')
                 duration = parse_duration_to_seconds(get_setting(chat.id, 'flood_time', '10m'))
                 try:
@@ -1319,6 +1374,7 @@ def main():
         ('normie', normie_cmd, 'Group Management Commands', 'Remove user from Night Mode safe list', '.normie or /normie'),
         ('slist', slist_cmd, 'Group Management Commands', 'List Night Mode safe users in group', '.slist or /slist'),
         ('night', night_cmd, 'Group Management Commands', 'Toggle Night Mode in group', '/night on|off'),
+        ('autojoin', autojoin_cmd, 'Group Management Commands', 'Toggle auto join-request approval in group', '/autojoin [on|off]'),
         ('promote', promote_cmd, 'Group Management Commands', 'Promote a member to admin', '/promote'),
         ('tag', tag_cmd, 'Group Management Commands', 'Tag all eligible members in the group.', '/tag Good morning!'),
         ('demote', demote_cmd, 'Group Management Commands', 'Demote an admin', '/demote'),
