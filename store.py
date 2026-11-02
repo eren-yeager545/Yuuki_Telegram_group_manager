@@ -2148,3 +2148,182 @@ def delete_emoji_pack(set_name: str) -> bool:
     except Exception as e:
         logger.error(f"Error deleting emoji pack '{set_name}': {e}")
         return False
+
+
+def format_bytes(size_bytes: int) -> str:
+    """Formats bytes into human readable string (B, KB, MB, GB)."""
+    if size_bytes is None or size_bytes < 0:
+        return "N/A"
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.2f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.2f} MB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+
+def get_db_stats() -> dict:
+    """
+    Gathers real-time database statistics for the configured database backend (MongoDB or SQLite).
+    Returns a dictionary with status, backend name, database name, counts, storage size,
+    index metrics, connections, server version, checked_at timestamp, and per-table/collection breakdown.
+    Does not modify or delete any records. Handles missing permissions or metrics gracefully.
+    """
+    now_utc = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+    stats = {
+        'status': 'Disconnected',
+        'backend': 'Unknown',
+        'db_name': 'Unknown',
+        'total_tables': 0,
+        'total_documents': 0,
+        'per_item_counts': {},
+        'db_size': 'Unavailable',
+        'index_count': 'Unavailable',
+        'index_size': 'Unavailable',
+        'connections': 'Unavailable',
+        'version': 'Unavailable',
+        'checked_at': now_utc,
+        'error': None
+    }
+
+    if is_mongo():
+        stats['backend'] = 'MongoDB'
+        try:
+            db = get_mongo_db()
+            if db is None:
+                stats['status'] = 'Disconnected'
+                stats['error'] = 'MongoDB instance not initialized'
+                return stats
+
+            # Health check ping
+            db.command('ping')
+            stats['status'] = 'Connected'
+            stats['db_name'] = getattr(db, 'name', 'yuuki_bot')
+
+            # Version and connections via serverStatus or buildInfo
+            try:
+                server_status = db.command('serverStatus')
+                if 'version' in server_status:
+                    stats['version'] = str(server_status['version'])
+                if 'connections' in server_status:
+                    curr_conn = server_status['connections'].get('current', 'N/A')
+                    avail_conn = server_status['connections'].get('available', 'N/A')
+                    stats['connections'] = f"{curr_conn} current ({avail_conn} available)"
+            except Exception:
+                try:
+                    build_info = db.command('buildInfo')
+                    stats['version'] = str(build_info.get('version', 'Unavailable'))
+                except Exception:
+                    stats['version'] = 'Unavailable'
+
+            # Collections and document counts
+            coll_names = []
+            try:
+                coll_names = db.list_collection_names()
+                stats['total_tables'] = len(coll_names)
+            except Exception as e:
+                stats['total_tables'] = 'Unavailable'
+
+            total_docs = 0
+            per_coll = {}
+            total_indexes = 0
+            if isinstance(coll_names, list):
+                for cname in sorted(coll_names):
+                    if cname.startswith('system.'):
+                        continue
+                    try:
+                        coll = db[cname]
+                        # Use estimated count or count_documents
+                        cnt = coll.count_documents({})
+                        per_coll[cname] = cnt
+                        total_docs += cnt
+
+                        # Index count per collection
+                        try:
+                            idx_info = coll.index_information()
+                            total_indexes += len(idx_info)
+                        except Exception:
+                            pass
+                    except Exception as err:
+                        per_coll[cname] = 'Error'
+
+            stats['total_documents'] = total_docs
+            stats['per_item_counts'] = per_coll
+            if total_indexes > 0:
+                stats['index_count'] = total_indexes
+
+            # Storage size and index size via dbStats
+            try:
+                db_stats_cmd = db.command('dbStats')
+                storage_bytes = db_stats_cmd.get('storageSize', db_stats_cmd.get('dataSize'))
+                if storage_bytes is not None:
+                    stats['db_size'] = format_bytes(storage_bytes)
+                if 'indexes' in db_stats_cmd:
+                    stats['index_count'] = db_stats_cmd['indexes']
+                idx_bytes = db_stats_cmd.get('indexSize')
+                if idx_bytes is not None:
+                    stats['index_size'] = format_bytes(idx_bytes)
+            except Exception:
+                pass
+
+        except Exception as e:
+            stats['status'] = 'Disconnected'
+            stats['error'] = str(e)
+            logger.error(f"Error gathering MongoDB stats: {e}")
+        return stats
+
+    # SQLite backend
+    stats['backend'] = 'SQLite'
+    try:
+        import sqlite3
+        stats['version'] = f"SQLite {sqlite3.sqlite_version}"
+
+        db_file = DB_PATH
+        stats['db_name'] = os.path.basename(db_file) if db_file else 'bot.db'
+
+        with closing(conn()) as c:
+            cur = c.cursor()
+            cur.execute("SELECT 1")
+            stats['status'] = 'Connected'
+
+            # Table count and list
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+            tables = [row[0] for row in cur.fetchall()]
+            stats['total_tables'] = len(tables)
+
+            total_rows = 0
+            per_table = {}
+            for t in tables:
+                try:
+                    cur.execute(f"SELECT COUNT(*) FROM \"{t}\"")
+                    cnt = cur.fetchone()[0]
+                    per_table[t] = cnt
+                    total_rows += cnt
+                except Exception:
+                    per_table[t] = 'Error'
+
+            stats['total_documents'] = total_rows
+            stats['per_item_counts'] = per_table
+
+            # Indexes count
+            cur.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'")
+            idx_row = cur.fetchone()
+            stats['index_count'] = idx_row[0] if idx_row else 0
+            stats['index_size'] = 'Embedded in DB file'
+            stats['connections'] = '1 active (embedded file)'
+
+        # Storage size from file
+        if os.path.exists(db_file):
+            size_b = os.path.getsize(db_file)
+            stats['db_size'] = format_bytes(size_b)
+        else:
+            stats['db_size'] = '0 B'
+
+    except Exception as e:
+        stats['status'] = 'Disconnected'
+        stats['error'] = str(e)
+        logger.error(f"Error gathering SQLite stats: {e}")
+
+    return stats
