@@ -3632,40 +3632,84 @@ async def db_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("☁️ Failed to retrieve database statistics. Please check the logs.")
         return
 
-    status_icon = "🟢" if stats.get('status') == 'Connected' else "🔴"
-    status_str = f"{status_icon} {stats.get('status', 'Unknown')}"
-    backend_str = stats.get('backend', 'Unknown')
-    db_name = stats.get('db_name', 'Unknown')
-    tables_cnt = stats.get('total_tables', 'Unavailable')
     docs_cnt = stats.get('total_documents', 'Unavailable')
-    db_size = stats.get('db_size', 'Unavailable')
+    docs_cnt_disp = f"{docs_cnt:,}" if isinstance(docs_cnt, int) else str(docs_cnt)
+
+    # Storage Used
+    db_used = stats.get('db_storage_used', 'Unavailable')
+    logical_size = stats.get('logical_data_size')
+    if logical_size and logical_size != db_used:
+        db_used_disp = f"{db_used} (logical: {logical_size})"
+    else:
+        db_used_disp = str(db_used)
+
+    # Capacity
+    capacity = stats.get('storage_capacity', 'Unavailable')
+    cap_type = stats.get('storage_capacity_type')
+    if capacity != 'Unavailable' and cap_type:
+        capacity_disp = f"{capacity} ({cap_type})"
+    else:
+        capacity_disp = str(capacity)
+
+    # Available
+    available = stats.get('storage_available', 'Unavailable')
+    avail_type = stats.get('storage_available_type')
+    if available != 'Unavailable' and avail_type:
+        available_disp = f"{available} ({avail_type})"
+    else:
+        available_disp = str(available)
+
+    # Usage percent
+    usage_pct = stats.get('storage_usage_percent', 'Unavailable')
+    usage_type = stats.get('storage_usage_type')
+    if usage_pct != 'Unavailable' and usage_type:
+        usage_pct_disp = f"{usage_pct} ({usage_type})"
+    else:
+        usage_pct_disp = str(usage_pct)
+
+    # Index count & storage
     indexes = stats.get('index_count', 'Unavailable')
-    index_size = stats.get('index_size', 'Unavailable')
-    connections = stats.get('connections', 'Unavailable')
-    version = stats.get('version', 'Unavailable')
-    checked_at = stats.get('checked_at', 'Unavailable')
+    index_storage = stats.get('index_storage_size', 'Unavailable')
+
+    # Connections
+    connections_disp = stats.get('connections_str', 'Unavailable')
 
     lines = [
         "📊 <b>Database Statistics</b>\n",
-        f"• <b>Status:</b> {html.escape(str(status_str))}",
-        f"• <b>Backend:</b> <code>{html.escape(str(backend_str))}</code>",
-        f"• <b>Database Name:</b> <code>{html.escape(str(db_name))}</code>",
-        f"• <b>Server Version:</b> <code>{html.escape(str(version))}</code>",
-        f"• <b>Tables/Collections:</b> <code>{html.escape(str(tables_cnt))}</code>",
-        f"• <b>Total Documents/Rows:</b> <code>{html.escape(str(docs_cnt))}</code>",
-        f"• <b>Database Size:</b> <code>{html.escape(str(db_size))}</code>",
-        f"• <b>Indexes:</b> <code>{html.escape(str(indexes))}</code> (Size: <code>{html.escape(str(index_size))}</code>)",
-        f"• <b>Connections:</b> <code>{html.escape(str(connections))}</code>",
-        f"• <b>Checked At:</b> <code>{html.escape(str(checked_at))}</code>"
+        f"• <b>Total Documents:</b> {html.escape(docs_cnt_disp)}",
+        f"• <b>Database Storage Used:</b> {html.escape(db_used_disp)}",
+        f"• <b>Index Storage:</b> {html.escape(str(index_storage))}",
+        f"• <b>Total Storage Capacity:</b> {html.escape(capacity_disp)}",
+        f"• <b>Available Storage:</b> {html.escape(available_disp)}",
+        f"• <b>Storage Usage:</b> {html.escape(usage_pct_disp)}",
+        f"• <b>Indexes:</b> {html.escape(str(indexes))}",
+        f"• <b>Connections:</b> {html.escape(connections_disp)}"
     ]
 
     # Per-collection or per-table details
+    per_details = stats.get('per_item_details')
     per_item = stats.get('per_item_counts')
-    if per_item and isinstance(per_item, dict):
-        item_label = "Collections" if backend_str == "MongoDB" else "Tables"
-        lines.append(f"\n📂 <b>Per-{item_label[:-1]} Breakdown:</b>")
+    item_label = "Collection" if stats.get('backend') == "MongoDB" else "Table"
+
+    if per_details and isinstance(per_details, dict):
+        lines.append(f"\n📂 <b>{item_label} Breakdown</b>\n")
+        for name, item_info in sorted(per_details.items()):
+            cnt = item_info.get('count', 0)
+            cnt_str = f"{cnt:,}" if isinstance(cnt, int) else str(cnt)
+            line_parts = [f'• <code>"{html.escape(name)}"</code>: {cnt_str} documents']
+            extra = []
+            if item_info.get('storage_size') and item_info['storage_size'] != 'Unavailable':
+                extra.append(f"size: {item_info['storage_size']}")
+            if item_info.get('index_size') and item_info['index_size'] not in ('Unavailable', '0 B'):
+                extra.append(f"index: {item_info['index_size']}")
+            if extra:
+                line_parts.append(f" ({', '.join(extra)})")
+            lines.append("".join(line_parts))
+    elif per_item and isinstance(per_item, dict):
+        lines.append(f"\n📂 <b>{item_label} Breakdown</b>\n")
         for name, cnt in sorted(per_item.items()):
-            lines.append(f"  ▫️ <code>{html.escape(name)}</code>: {cnt}")
+            cnt_str = f"{cnt:,}" if isinstance(cnt, int) else str(cnt)
+            lines.append(f'• <code>"{html.escape(name)}"</code>: {cnt_str} documents')
 
     if stats.get('error'):
         lines.append(f"\n⚠️ <b>Notice:</b> <code>{html.escape(str(stats['error']))}</code>")
