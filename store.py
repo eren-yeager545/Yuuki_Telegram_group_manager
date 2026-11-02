@@ -819,8 +819,10 @@ def delete_filter(chat_id, keyword, filter_type=None):
         return cur.rowcount > 0
 
 
-def delete_expired_audit_logs(chat_id=None):
-    cutoff = _now() - 86400  # 24 hours ago
+def delete_expired_audit_logs(chat_id=None, retention_seconds=None):
+    if retention_seconds is None:
+        retention_seconds = getattr(config, 'AUDIT_LOG_RETENTION_SECONDS', 7 * 86400)
+    cutoff = _now() - retention_seconds
     if is_mongo():
         db = get_mongo_db()
         query = {'created_at': {'$lt': cutoff}}
@@ -1186,6 +1188,24 @@ def get_expired_temp_actions(now_ts=None):
         return c.execute('SELECT chat_id, user_id, action, until_ts FROM temp_actions WHERE until_ts<=?', (now_ts,)).fetchall()
 
 
+def cleanup_expired_temp_actions(now_ts=None):
+    """
+    Cleans up expired temp_actions records (where until_ts <= now_ts).
+    Never removes records where until_ts > now_ts (active operations).
+    Returns count of cleaned records.
+    """
+    now_ts = now_ts or _now()
+    if is_mongo():
+        db = get_mongo_db()
+        res = db['temp_actions'].delete_many({'until_ts': {'$lte': now_ts}})
+        return res.deleted_count
+    with closing(conn()) as c:
+        cur = c.cursor()
+        cur.execute('DELETE FROM temp_actions WHERE until_ts <= ?', (now_ts,))
+        c.commit()
+        return cur.rowcount
+
+
 def save_buttons(chat_id, scope, rows):
     table = 'welcome_buttons' if scope == 'welcome' else 'rules_buttons'
     if is_mongo():
@@ -1241,6 +1261,53 @@ def check_chat_quota(chat_id, kind):
     return True
 
 
+def delete_report(report_id):
+    """Deletes a report by its ID."""
+    if is_mongo():
+        db = get_mongo_db()
+        db['reports'].delete_one({'id': report_id})
+        return
+    with closing(conn()) as c:
+        c.execute('DELETE FROM reports WHERE id=?', (report_id,))
+        c.commit()
+
+
+def get_pending_reports(limit=50):
+    """Retrieves pending reports that have not been successfully delivered/deleted."""
+    if is_mongo():
+        db = get_mongo_db()
+        docs = list(db['reports'].find().sort('created_at', 1).limit(limit))
+        return [
+            {
+                'id': d.get('id'),
+                'chat_id': d.get('chat_id'),
+                'reporter_id': d.get('reporter_id'),
+                'target_id': d.get('target_id'),
+                'message_id': d.get('message_id'),
+                'reason': d.get('reason', ''),
+                'created_at': d.get('created_at')
+            }
+            for d in docs
+        ]
+    with closing(conn()) as c:
+        rows = c.execute(
+            'SELECT id, chat_id, reporter_id, target_id, message_id, reason, created_at FROM reports ORDER BY created_at ASC LIMIT ?',
+            (limit,)
+        ).fetchall()
+        return [
+            {
+                'id': r[0],
+                'chat_id': r[1],
+                'reporter_id': r[2],
+                'target_id': r[3],
+                'message_id': r[4],
+                'reason': r[5] or '',
+                'created_at': r[6]
+            }
+            for r in rows
+        ]
+
+
 def trim_reports(chat_id):
     if is_mongo():
         db = get_mongo_db()
@@ -1257,10 +1324,29 @@ def trim_reports(chat_id):
         c.commit()
 
 
+def delete_expired_action_events(max_age_seconds=300):
+    """
+    Deletes temporary operational action_events that have expired past their sliding window.
+    Preserves recent records required for rate-limiting calculations.
+    Returns the count of deleted records.
+    """
+    cutoff = int(time.time()) - max_age_seconds
+    if is_mongo():
+        db = get_mongo_db()
+        res = db['action_events'].delete_many({'created_at': {'$lt': cutoff}})
+        return res.deleted_count
+    with closing(conn()) as c:
+        cur = c.cursor()
+        cur.execute('DELETE FROM action_events WHERE created_at < ?', (cutoff,))
+        c.commit()
+        return cur.rowcount
+
+
 def allow_report_event(chat_id, reporter_id, target_id, window_seconds=60, max_events=2):
     now = int(time.time())
     cutoff = now - window_seconds
     scope = f'report:{chat_id}:{target_id}'
+    delete_expired_action_events(window_seconds * 5)  # Safe cleanup of expired events
     if is_mongo():
         db = get_mongo_db()
         cnt = db['action_events'].count_documents({
@@ -1359,7 +1445,7 @@ def get_global_link(key, default=''):
     return val if val else default
 
 
-def record_user_message(chat_id, user_id, message_id):
+def record_user_message(chat_id, user_id, message_id, quota_limit=100):
     now = int(time.time())
     if is_mongo():
         db = get_mongo_db()
@@ -1368,11 +1454,41 @@ def record_user_message(chat_id, user_id, message_id):
             {'chat_id': chat_id, 'user_id': user_id, 'message_id': message_id, 'created_at': now},
             upsert=True
         )
+        if quota_limit and quota_limit > 0:
+            excess_docs = list(db['user_messages'].find(
+                {'chat_id': chat_id, 'user_id': user_id}
+            ).sort('message_id', -1).skip(quota_limit))
+            if excess_docs:
+                excess_ids = [d['_id'] for d in excess_docs]
+                db['user_messages'].delete_many({'_id': {'$in': excess_ids}})
     else:
         with closing(conn()) as c:
             c.execute('INSERT OR REPLACE INTO user_messages(chat_id, user_id, message_id, created_at) VALUES(?,?,?,?)',
                       (chat_id, user_id, message_id, now))
+            if quota_limit and quota_limit > 0:
+                c.execute(
+                    'DELETE FROM user_messages WHERE chat_id=? AND user_id=? AND message_id NOT IN '
+                    '(SELECT message_id FROM user_messages WHERE chat_id=? AND user_id=? ORDER BY message_id DESC LIMIT ?)',
+                    (chat_id, user_id, chat_id, user_id, quota_limit)
+                )
             c.commit()
+
+
+def clean_stale_user_messages(max_age_seconds=172800):
+    """
+    Safely purges user_messages older than max_age_seconds (default 48 hours).
+    Returns count of removed records.
+    """
+    cutoff = int(time.time()) - max_age_seconds
+    if is_mongo():
+        db = get_mongo_db()
+        res = db['user_messages'].delete_many({'created_at': {'$lt': cutoff}})
+        return res.deleted_count
+    with closing(conn()) as c:
+        cur = c.cursor()
+        cur.execute('DELETE FROM user_messages WHERE created_at < ?', (cutoff,))
+        c.commit()
+        return cur.rowcount
 
 
 def get_user_messages(chat_id, user_id):
