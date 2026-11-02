@@ -22,6 +22,10 @@ WEBHOOK_SECRET = os.getenv('WEBHOOK_SECRET', '')
 MONGO_URI = os.getenv('MONGO_URI') or os.getenv('MONGO_URL') or os.getenv('MONGODB_URI') or ''
 MONGO_DB_NAME = os.getenv('MONGO_DB_NAME', 'yuuki_bot')
 
+# Database storage capacity limit (MB) when provider quota is not exposed
+_raw_db_limit = os.getenv('DB_STORAGE_LIMIT_MB', '').strip()
+DB_STORAGE_LIMIT_MB = float(_raw_db_limit) if _raw_db_limit and _raw_db_limit.replace('.', '', 1).isdigit() else None
+
 # AI Configuration
 AI_ENABLED = os.getenv('AI_ENABLED', 'true').lower() in ('true', '1', 'yes')
 AI_PROVIDER_ORDER = [x.strip().lower() for x in os.getenv('AI_PROVIDER_ORDER', 'gemini,groq,openrouter').split(',') if x.strip()]

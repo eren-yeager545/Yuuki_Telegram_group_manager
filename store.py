@@ -2266,12 +2266,18 @@ def delete_emoji_pack(set_name: str) -> bool:
         return False
 
 
-def format_bytes(size_bytes: int) -> str:
+def format_bytes(size_bytes) -> str:
     """Formats bytes into human readable string (B, KB, MB, GB)."""
-    if size_bytes is None or size_bytes < 0:
-        return "N/A"
+    if size_bytes is None:
+        return "Unavailable"
+    try:
+        size_bytes = float(size_bytes)
+    except (ValueError, TypeError):
+        return "Unavailable"
+    if size_bytes < 0:
+        return "Unavailable"
     if size_bytes < 1024:
-        return f"{size_bytes} B"
+        return f"{int(size_bytes)} B"
     elif size_bytes < 1024 * 1024:
         return f"{size_bytes / 1024:.2f} KB"
     elif size_bytes < 1024 * 1024 * 1024:
@@ -2283,11 +2289,23 @@ def format_bytes(size_bytes: int) -> str:
 def get_db_stats() -> dict:
     """
     Gathers real-time database statistics for the configured database backend (MongoDB or SQLite).
-    Returns a dictionary with status, backend name, database name, counts, storage size,
-    index metrics, connections, server version, checked_at timestamp, and per-table/collection breakdown.
-    Does not modify or delete any records. Handles missing permissions or metrics gracefully.
+    Returns accurate metrics conforming to /db requirements:
+    - Total Documents/Rows
+    - Database Storage Used (disk usage vs logical data size)
+    - Total Storage Capacity & quota type
+    - Available Storage Remaining
+    - Storage Usage Percentage
+    - Index Count and Index Storage Size
+    - Current Database Connections and Maximum Connections
+    - Per-Collection/Table breakdown with document counts, storage size, and index size when supported.
     """
     now_utc = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+    configured_limit_mb = getattr(config, 'DB_STORAGE_LIMIT_MB', None)
+    if configured_limit_mb is None:
+        raw_env = os.getenv('DB_STORAGE_LIMIT_MB', '').strip()
+        if raw_env and raw_env.replace('.', '', 1).isdigit():
+            configured_limit_mb = float(raw_env)
+
     stats = {
         'status': 'Disconnected',
         'backend': 'Unknown',
@@ -2295,10 +2313,25 @@ def get_db_stats() -> dict:
         'total_tables': 0,
         'total_documents': 0,
         'per_item_counts': {},
-        'db_size': 'Unavailable',
+        'per_item_details': {},
+        'db_storage_used_bytes': None,
+        'db_storage_used': 'Unavailable',
+        'logical_data_size_bytes': None,
+        'logical_data_size': None,
+        'storage_capacity_bytes': None,
+        'storage_capacity': 'Unavailable',
+        'storage_capacity_type': None,
+        'storage_available_bytes': None,
+        'storage_available': 'Unavailable',
+        'storage_available_type': None,
+        'storage_usage_percent': 'Unavailable',
+        'storage_usage_type': None,
         'index_count': 'Unavailable',
-        'index_size': 'Unavailable',
-        'connections': 'Unavailable',
+        'index_storage_bytes': None,
+        'index_storage_size': 'Unavailable',
+        'connections_current': 'Unavailable',
+        'connections_max': 'Unavailable',
+        'connections_str': 'Unavailable',
         'version': 'Unavailable',
         'checked_at': now_utc,
         'error': None
@@ -2318,23 +2351,36 @@ def get_db_stats() -> dict:
             stats['status'] = 'Connected'
             stats['db_name'] = getattr(db, 'name', 'yuuki_bot')
 
-            # Version and connections via serverStatus or buildInfo
+            # Server status (version & connections)
             try:
                 server_status = db.command('serverStatus')
                 if 'version' in server_status:
-                    stats['version'] = str(server_status['version'])
+                    stats['version'] = f"MongoDB {server_status['version']}"
                 if 'connections' in server_status:
-                    curr_conn = server_status['connections'].get('current', 'N/A')
-                    avail_conn = server_status['connections'].get('available', 'N/A')
-                    stats['connections'] = f"{curr_conn} current ({avail_conn} available)"
+                    curr_conn = server_status['connections'].get('current')
+                    avail_conn = server_status['connections'].get('available')
+                    stats['connections_current'] = curr_conn
+                    if curr_conn is not None and avail_conn is not None:
+                        max_conn = curr_conn + avail_conn
+                        stats['connections_max'] = max_conn
+                        stats['connections_str'] = f"{curr_conn} / {max_conn}"
+                    elif curr_conn is not None:
+                        stats['connections_str'] = f"{curr_conn}"
             except Exception:
                 try:
                     build_info = db.command('buildInfo')
-                    stats['version'] = str(build_info.get('version', 'Unavailable'))
+                    stats['version'] = f"MongoDB {build_info.get('version', 'Unavailable')}"
                 except Exception:
                     stats['version'] = 'Unavailable'
 
-            # Collections and document counts
+            # dbStats command
+            db_stats_cmd = {}
+            try:
+                db_stats_cmd = db.command('dbStats')
+            except Exception as e:
+                logger.debug(f"dbStats command failed or unsupported: {e}")
+
+            # Collect collections list
             coll_names = []
             try:
                 coll_names = db.list_collection_names()
@@ -2343,46 +2389,128 @@ def get_db_stats() -> dict:
                 stats['total_tables'] = 'Unavailable'
 
             total_docs = 0
-            per_coll = {}
+            per_coll_counts = {}
+            per_coll_details = {}
             total_indexes = 0
+            coll_sum_storage = 0
+            coll_sum_index = 0
+            has_coll_stats = False
+
             if isinstance(coll_names, list):
                 for cname in sorted(coll_names):
                     if cname.startswith('system.'):
                         continue
                     try:
                         coll = db[cname]
-                        # Use estimated count or count_documents
+                        # Use estimated document count or count_documents
                         cnt = coll.count_documents({})
-                        per_coll[cname] = cnt
+                        per_coll_counts[cname] = cnt
                         total_docs += cnt
 
-                        # Index count per collection
+                        # Index count
+                        idx_count = 0
                         try:
                             idx_info = coll.index_information()
-                            total_indexes += len(idx_info)
+                            idx_count = len(idx_info)
+                            total_indexes += idx_count
                         except Exception:
                             pass
+
+                        # Collection stats (collStats)
+                        c_storage = None
+                        c_idx_size = None
+                        try:
+                            cstats = db.command('collStats', cname)
+                            c_storage = cstats.get('storageSize', cstats.get('size'))
+                            c_idx_size = cstats.get('totalIndexSize')
+                            if c_storage is not None:
+                                coll_sum_storage += c_storage
+                                has_coll_stats = True
+                            if c_idx_size is not None:
+                                coll_sum_index += c_idx_size
+                        except Exception:
+                            pass
+
+                        per_coll_details[cname] = {
+                            'count': cnt,
+                            'storage_bytes': c_storage,
+                            'storage_size': format_bytes(c_storage) if c_storage is not None else None,
+                            'index_count': idx_count,
+                            'index_bytes': c_idx_size,
+                            'index_size': format_bytes(c_idx_size) if c_idx_size is not None else None
+                        }
                     except Exception as err:
-                        per_coll[cname] = 'Error'
+                        per_coll_counts[cname] = 'Error'
+                        per_coll_details[cname] = {'count': 'Error', 'storage_size': None, 'index_size': None}
 
             stats['total_documents'] = total_docs
-            stats['per_item_counts'] = per_coll
-            if total_indexes > 0:
+            stats['per_item_counts'] = per_coll_counts
+            stats['per_item_details'] = per_coll_details
+
+            # Total indexes
+            if 'indexes' in db_stats_cmd:
+                stats['index_count'] = db_stats_cmd['indexes']
+            elif total_indexes > 0:
                 stats['index_count'] = total_indexes
 
-            # Storage size and index size via dbStats
-            try:
-                db_stats_cmd = db.command('dbStats')
-                storage_bytes = db_stats_cmd.get('storageSize', db_stats_cmd.get('dataSize'))
-                if storage_bytes is not None:
-                    stats['db_size'] = format_bytes(storage_bytes)
-                if 'indexes' in db_stats_cmd:
-                    stats['index_count'] = db_stats_cmd['indexes']
-                idx_bytes = db_stats_cmd.get('indexSize')
-                if idx_bytes is not None:
-                    stats['index_size'] = format_bytes(idx_bytes)
-            except Exception:
-                pass
+            # Storage sizes from dbStats or collection aggregation
+            storage_bytes = db_stats_cmd.get('storageSize')
+            data_bytes = db_stats_cmd.get('dataSize')
+            idx_bytes = db_stats_cmd.get('indexSize')
+
+            if storage_bytes is None and has_coll_stats:
+                storage_bytes = coll_sum_storage
+            if idx_bytes is None and has_coll_stats and coll_sum_index > 0:
+                idx_bytes = coll_sum_index
+
+            stats['db_storage_used_bytes'] = storage_bytes
+            if storage_bytes is not None:
+                stats['db_storage_used'] = format_bytes(storage_bytes)
+            elif data_bytes is not None:
+                stats['db_storage_used_bytes'] = data_bytes
+                stats['db_storage_used'] = format_bytes(data_bytes)
+
+            stats['logical_data_size_bytes'] = data_bytes
+            if data_bytes is not None and storage_bytes is not None and data_bytes != storage_bytes:
+                stats['logical_data_size'] = format_bytes(data_bytes)
+
+            stats['index_storage_bytes'] = idx_bytes
+            if idx_bytes is not None:
+                stats['index_storage_size'] = format_bytes(idx_bytes)
+
+            # Capacity / Quotas
+            # MongoDB does not expose cluster plan quotas via normal client commands, unless maxStorage is in dbStats
+            provider_quota_bytes = None
+            if 'maxStorageSize' in db_stats_cmd:
+                provider_quota_bytes = db_stats_cmd['maxStorageSize']
+
+            if provider_quota_bytes is not None and provider_quota_bytes > 0:
+                stats['storage_capacity_bytes'] = provider_quota_bytes
+                stats['storage_capacity'] = format_bytes(provider_quota_bytes)
+                stats['storage_capacity_type'] = 'provider quota'
+                metric_used = storage_bytes if storage_bytes is not None else data_bytes
+                if metric_used is not None:
+                    avail_b = max(0.0, provider_quota_bytes - metric_used)
+                    stats['storage_available_bytes'] = avail_b
+                    stats['storage_available'] = format_bytes(avail_b)
+                    stats['storage_available_type'] = 'verified'
+                    pct = (metric_used / provider_quota_bytes) * 100.0
+                    stats['storage_usage_percent'] = f"{pct:.2f}%"
+                    stats['storage_usage_type'] = 'verified'
+            elif configured_limit_mb is not None and configured_limit_mb > 0:
+                limit_bytes = configured_limit_mb * 1024 * 1024
+                stats['storage_capacity_bytes'] = limit_bytes
+                stats['storage_capacity'] = f"{int(configured_limit_mb) if configured_limit_mb.is_integer() else configured_limit_mb} MB"
+                stats['storage_capacity_type'] = 'configured limit'
+                metric_used = storage_bytes if storage_bytes is not None else data_bytes
+                if metric_used is not None:
+                    avail_b = max(0.0, limit_bytes - metric_used)
+                    stats['storage_available_bytes'] = avail_b
+                    stats['storage_available'] = format_bytes(avail_b)
+                    stats['storage_available_type'] = 'estimated'
+                    pct = (metric_used / limit_bytes) * 100.0
+                    stats['storage_usage_percent'] = f"{pct:.2f}%"
+                    stats['storage_usage_type'] = 'estimated'
 
         except Exception as e:
             stats['status'] = 'Disconnected'
@@ -2399,6 +2527,11 @@ def get_db_stats() -> dict:
         db_file = DB_PATH
         stats['db_name'] = os.path.basename(db_file) if db_file else 'bot.db'
 
+        # Connections for SQLite embedded database
+        stats['connections_current'] = 1
+        stats['connections_max'] = 1
+        stats['connections_str'] = "1 / 1"
+
         with closing(conn()) as c:
             cur = c.cursor()
             cur.execute("SELECT 1")
@@ -2409,33 +2542,128 @@ def get_db_stats() -> dict:
             tables = [row[0] for row in cur.fetchall()]
             stats['total_tables'] = len(tables)
 
+            # Gather per-page breakdown if dbstat virtual table is available
+            dbstat_sizes = {}
+            has_dbstat = False
+            try:
+                cur.execute("SELECT name, sum(pgsize) FROM dbstat GROUP BY name")
+                dbstat_sizes = dict(cur.fetchall())
+                has_dbstat = True
+            except Exception:
+                has_dbstat = False
+
             total_rows = 0
-            per_table = {}
+            per_table_counts = {}
+            per_table_details = {}
+            total_indexes = 0
+            total_index_bytes = 0
+
             for t in tables:
                 try:
                     cur.execute(f"SELECT COUNT(*) FROM \"{t}\"")
                     cnt = cur.fetchone()[0]
-                    per_table[t] = cnt
+                    per_table_counts[t] = cnt
                     total_rows += cnt
+
+                    # Check indexes for table
+                    t_idx_count = 0
+                    t_idx_bytes = 0
+                    try:
+                        cur.execute(f"PRAGMA index_list(\"{t}\")")
+                        for idx_row in cur.fetchall():
+                            t_idx_count += 1
+                            idx_name = idx_row[1]
+                            if has_dbstat:
+                                t_idx_bytes += dbstat_sizes.get(idx_name, 0)
+                    except Exception:
+                        pass
+
+                    total_indexes += t_idx_count
+                    total_index_bytes += t_idx_bytes
+
+                    t_data_size = dbstat_sizes.get(t) if has_dbstat else None
+                    per_table_details[t] = {
+                        'count': cnt,
+                        'storage_bytes': t_data_size,
+                        'storage_size': format_bytes(t_data_size) if t_data_size is not None else None,
+                        'index_count': t_idx_count,
+                        'index_bytes': t_idx_bytes if has_dbstat else None,
+                        'index_size': format_bytes(t_idx_bytes) if has_dbstat and t_idx_bytes > 0 else (format_bytes(0) if has_dbstat else None)
+                    }
                 except Exception:
-                    per_table[t] = 'Error'
+                    per_table_counts[t] = 'Error'
+                    per_table_details[t] = {'count': 'Error', 'storage_size': None, 'index_size': None}
 
             stats['total_documents'] = total_rows
-            stats['per_item_counts'] = per_table
+            stats['per_item_counts'] = per_table_counts
+            stats['per_item_details'] = per_table_details
 
-            # Indexes count
+            # Index count from sqlite_master
             cur.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%'")
             idx_row = cur.fetchone()
-            stats['index_count'] = idx_row[0] if idx_row else 0
-            stats['index_size'] = 'Embedded in DB file'
-            stats['connections'] = '1 active (embedded file)'
+            stats['index_count'] = total_indexes if total_indexes > 0 else (idx_row[0] if idx_row else 0)
 
-        # Storage size from file
+            # SQLite page sizing for logical vs file size
+            try:
+                cur.execute("PRAGMA page_size")
+                page_size = cur.fetchone()[0]
+                cur.execute("PRAGMA page_count")
+                page_count = cur.fetchone()[0]
+                cur.execute("PRAGMA freelist_count")
+                freelist_count = cur.fetchone()[0]
+                logical_bytes = page_size * (page_count - freelist_count)
+                stats['logical_data_size_bytes'] = logical_bytes
+            except Exception:
+                pass
+
+        # Physical file size on disk
         if os.path.exists(db_file):
             size_b = os.path.getsize(db_file)
-            stats['db_size'] = format_bytes(size_b)
+            stats['db_storage_used_bytes'] = size_b
+            stats['db_storage_used'] = format_bytes(size_b)
+            if stats.get('logical_data_size_bytes') is not None and stats['logical_data_size_bytes'] != size_b:
+                stats['logical_data_size'] = format_bytes(stats['logical_data_size_bytes'])
         else:
-            stats['db_size'] = '0 B'
+            stats['db_storage_used_bytes'] = 0
+            stats['db_storage_used'] = '0 B'
+
+        if has_dbstat:
+            stats['index_storage_bytes'] = total_index_bytes
+            stats['index_storage_size'] = format_bytes(total_index_bytes)
+        else:
+            stats['index_storage_size'] = 'Embedded in DB file'
+
+        # Capacity and Available calculation for SQLite
+        # Check configured_limit_mb first, then disk space
+        if configured_limit_mb is not None and configured_limit_mb > 0:
+            limit_bytes = configured_limit_mb * 1024 * 1024
+            stats['storage_capacity_bytes'] = limit_bytes
+            stats['storage_capacity'] = f"{int(configured_limit_mb) if configured_limit_mb.is_integer() else configured_limit_mb} MB"
+            stats['storage_capacity_type'] = 'configured limit'
+            used_b = stats['db_storage_used_bytes'] or 0
+            avail_b = max(0.0, limit_bytes - used_b)
+            stats['storage_available_bytes'] = avail_b
+            stats['storage_available'] = format_bytes(avail_b)
+            stats['storage_available_type'] = 'estimated'
+            pct = (used_b / limit_bytes) * 100.0
+            stats['storage_usage_percent'] = f"{pct:.2f}%"
+            stats['storage_usage_type'] = 'estimated'
+        else:
+            # Fall back to host disk capacity where db_file resides
+            try:
+                import shutil
+                total, used, free = shutil.disk_usage(os.path.dirname(os.path.abspath(db_file)))
+                stats['storage_capacity_bytes'] = total
+                stats['storage_capacity'] = format_bytes(total)
+                stats['storage_capacity_type'] = 'disk capacity'
+                stats['storage_available_bytes'] = free
+                stats['storage_available'] = format_bytes(free)
+                stats['storage_available_type'] = 'disk free'
+                used_pct = (used / total) * 100.0
+                stats['storage_usage_percent'] = f"{used_pct:.2f}%"
+                stats['storage_usage_type'] = 'disk usage'
+            except Exception:
+                pass
 
     except Exception as e:
         stats['status'] = 'Disconnected'

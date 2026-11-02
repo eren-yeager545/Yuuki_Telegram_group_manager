@@ -198,11 +198,15 @@ async def test_db_command_executed_by_owner_sqlite(monkeypatch):
     reply_text = mock_msg.reply_html.call_args[0][0]
 
     assert "Database Statistics" in reply_text
-    assert "SQLite" in reply_text
-    assert "Connected" in reply_text
-    assert "Tables/Collections:" in reply_text
-    assert "Total Documents/Rows:" in reply_text
-    assert "Database Size:" in reply_text
+    assert "Total Documents:" in reply_text
+    assert "Database Storage Used:" in reply_text
+    assert "Index Storage:" in reply_text
+    assert "Total Storage Capacity:" in reply_text
+    assert "Available Storage:" in reply_text
+    assert "Storage Usage:" in reply_text
+    assert "Indexes:" in reply_text
+    assert "Connections:" in reply_text
+    assert "Table Breakdown" in reply_text
 
 
 @pytest.mark.asyncio
@@ -252,7 +256,40 @@ async def test_db_command_executed_by_owner_mongo(monkeypatch):
     reply_text = mock_msg.reply_html.call_args[0][0]
 
     assert "Database Statistics" in reply_text
-    assert "MongoDB" in reply_text
-    assert "Connected" in reply_text
-    assert "yuuki_bot" in reply_text
-    assert "Per-Collection Breakdown:" in reply_text
+    assert "Total Documents:" in reply_text
+    assert "Database Storage Used:" in reply_text
+    assert "Index Storage:" in reply_text
+    assert "Total Storage Capacity:" in reply_text
+    assert "Available Storage:" in reply_text
+    assert "Storage Usage:" in reply_text
+    assert "Indexes:" in reply_text
+    assert "Connections:" in reply_text
+    assert "Collection Breakdown" in reply_text
+    assert '"users"' in reply_text
+
+
+@pytest.mark.asyncio
+async def test_db_command_configured_limit_mb(monkeypatch):
+    """Verify that DB_STORAGE_LIMIT_MB is properly reflected in /db output."""
+    owner_id = 123456789
+    monkeypatch.setattr(config, "OWNER_IDS", [owner_id])
+    monkeypatch.setattr(admin, "OWNER_IDS", [owner_id])
+    monkeypatch.setattr(config, "DB_STORAGE_LIMIT_MB", 500)
+
+    mock_msg = AsyncMock(spec=Message)
+    mock_user = MagicMock(spec=User)
+    mock_user.id = owner_id
+
+    update = MagicMock(spec=Update)
+    update.effective_message = mock_msg
+    update.effective_user = mock_user
+
+    context = MagicMock()
+
+    await admin.db_cmd(update, context)
+
+    mock_msg.reply_html.assert_called_once()
+    reply_text = mock_msg.reply_html.call_args[0][0]
+
+    assert "Total Storage Capacity:</b> 500 MB (configured limit)" in reply_text
+    assert "(estimated)" in reply_text
