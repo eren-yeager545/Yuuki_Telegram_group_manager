@@ -376,17 +376,23 @@ async def process_active_interaction_and_reaction(update: Update, context: Conte
     if not isinstance(bot_id, int):
         bot_id = 123456
 
-    triggered, prompt = should_trigger_yuki(update, bot_username=bot_username, bot_id=bot_id)
+    try:
+        triggered, prompt = should_trigger_yuki(update, bot_username=bot_username, bot_id=bot_id)
 
-    if triggered:
-        set_active_chatter(chat.id, user.id)
-        asyncio.create_task(try_react_to_message(msg, chat.id))
-        await handle_ai_chat(update, context, prompt_override=prompt)
-        return
+        if triggered:
+            set_active_chatter(chat.id, user.id)
+            asyncio.create_task(try_react_to_message(msg, chat.id))
+            await handle_ai_chat(update, context, prompt_override=prompt)
+            return
 
-    if is_active_chatter(chat.id, user.id):
-        set_active_chatter(chat.id, user.id)
-        asyncio.create_task(try_react_to_message(msg, chat.id))
+        if is_active_chatter(chat.id, user.id):
+            set_active_chatter(chat.id, user.id)
+            asyncio.create_task(try_react_to_message(msg, chat.id))
+    except Exception as e:
+        logger.error(
+            f"Error processing active interaction/reaction for chat {chat.id} user {user.id}: {type(e).__name__}: {e}",
+            exc_info=True
+        )
 
 
 async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt_override: Optional[str] = None):

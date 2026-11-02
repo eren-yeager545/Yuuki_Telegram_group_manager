@@ -71,30 +71,80 @@ active_quizzes = {}
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error('Exception while handling an update:', exc_info=context.error)
     err = context.error
+    exc_type = type(err).__name__ if err else "UnknownError"
+
+    # Extract non-sensitive metadata for diagnostic logging
+    chat_id = None
+    user_id = None
+    update_type = "unknown"
+    is_command = False
+    is_callback = False
+    command_name = None
+
+    if isinstance(update, Update):
+        if update.effective_chat:
+            chat_id = update.effective_chat.id
+        if update.effective_user:
+            user_id = update.effective_user.id
+
+        if update.callback_query:
+            update_type = "callback_query"
+            is_callback = True
+        elif update.message or update.effective_message:
+            update_type = "message"
+            msg = update.effective_message or update.message
+            text = msg.text or msg.caption or ""
+            if text.startswith(('/', '!', '.')):
+                is_command = True
+                command_name = text.split()[0].lower()
+            elif msg.entities:
+                for ent in msg.entities:
+                    if getattr(ent, 'type', '') == 'bot_command' and ent.offset == 0:
+                        is_command = True
+                        command_name = text[ent.offset:ent.offset + ent.length].lower()
+                        break
+        elif update.my_chat_member or update.chat_member:
+            update_type = "chat_member"
+        elif update.chat_join_request:
+            update_type = "chat_join_request"
+        else:
+            update_type = "other_update"
+    elif update is None:
+        update_type = "background_job_or_internal"
+
+    logger.error(
+        f"Unhandled exception during update processing - Type: {update_type}, "
+        f"Chat ID: {chat_id}, User ID: {user_id}, Command: {command_name}, "
+        f"Exception: {exc_type}: {err}",
+        exc_info=err
+    )
+
     if getattr(err, 'is_night_mode', False) or isinstance(err, NightModeError):
-        chat_id = getattr(err, 'chat_id', None)
-        msg_id = getattr(err, 'message_id', None)
+        err_chat_id = getattr(err, 'chat_id', chat_id)
+        err_msg_id = getattr(err, 'message_id', None)
         stage = getattr(err, 'stage', 'unknown')
         logger.error(
-            f"Night Mode failure in error_handler - Chat ID: {chat_id}, Message ID: {msg_id}, Stage: {stage}, Error: {err}",
+            f"Night Mode failure in error_handler - Chat ID: {err_chat_id}, Message ID: {err_msg_id}, Stage: {stage}, Error: {err}",
             exc_info=err
         )
         return
 
-    msg_obj = None
-    if isinstance(update, Update):
-        if update.effective_message:
-            msg_obj = update.effective_message
-        elif update.callback_query and update.callback_query.message:
-            msg_obj = update.callback_query.message
+    # Only send generic user-facing error response when an actual user-initiated command/operation fails
+    # and a reply is appropriate. Do not send for ordinary chatter, background jobs, reactions, or status updates.
+    if is_command or is_callback:
+        msg_obj = None
+        if isinstance(update, Update):
+            if update.effective_message:
+                msg_obj = update.effective_message
+            elif update.callback_query and update.callback_query.message:
+                msg_obj = update.callback_query.message
 
-    if msg_obj:
-        await safe_reply_error(
-            msg_obj,
-            "☁️ Oopsie! Something went a little wrong. Please try again in a moment~ 💗"
-        )
+        if msg_obj:
+            await safe_reply_error(
+                msg_obj,
+                "☁️ Oopsie! Something went a little wrong. Please try again in a moment~ 💗"
+            )
 
 
 def register_help(app: Application, category: str, command: str, usage: str, example: str):
@@ -287,10 +337,20 @@ async def expire_quiz(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def hourly_quiz(context: ContextTypes.DEFAULT_TYPE):
-    for chat_id, title in get_active_groups():
+    try:
+        active_groups = get_active_groups()
+    except Exception as e:
+        logger.warning(f"Failed to fetch active groups for hourly quiz: {e}")
+        return
+
+    for chat_id, title in active_groups:
         if chat_id in active_quizzes:
             continue
-        q = get_random_quiz()
+        try:
+            q = get_random_quiz()
+        except Exception as e:
+            logger.warning(f"Failed to fetch random quiz: {e}")
+            break
         if not q:
             continue
         quiz_id, question, answer = q
@@ -366,6 +426,19 @@ async def service_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not msg or not chat:
         return
+
+    try:
+        await _internal_service_router(update, context)
+    except Exception as e:
+        logger.error(
+            f"Error in service_router for chat {chat.id}: {type(e).__name__}: {e}",
+            exc_info=True
+        )
+
+
+async def _internal_service_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
 
     now = int(time.time())
     bot_id = context.bot.id if context and context.bot else None
@@ -863,6 +936,20 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not msg or not chat or not user:
         return
+
+    try:
+        return await _internal_message_router(update, context)
+    except Exception as e:
+        logger.error(
+            f"Error in message_router for chat_id={chat.id} user_id={user.id} msg_id={msg.message_id}: {type(e).__name__}: {e}",
+            exc_info=True
+        )
+
+
+async def _internal_message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
 
     if await handle_broadcast_content(update, context):
         return
@@ -1434,6 +1521,7 @@ def main():
         ('broadcast', broadcast_cmd, 'Owner Commands', 'Broadcast to all groups', '/broadcast hello all'),
         ('emoji', emoji_cmd, 'Owner Commands', 'Configure custom emoji for reactions', '/emoji <custom_emoji_id>'),
         ('maintenance', maintenance_cmd, 'Owner Commands', 'Toggle or check maintenance mode', '/maintenance [on|off]'),
+        ('db', db_cmd, 'Owner Commands', 'Show real-time database statistics', '/db'),
     ]
     app.add_handler(TypeHandler(Update, maintenance_middleware_handler), group=-10)
     app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, night_mode_message_handler), group=-2)

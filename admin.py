@@ -3501,3 +3501,87 @@ async def slist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error listing safe users in chat {chat.id}: {e}", exc_info=True)
         await safe_reply_error(update.effective_message)
+
+
+async def db_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Owner-only command that displays real-time database statistics.
+    Strict access control: Only configured bot owner(s) in OWNER_IDS can execute.
+    Sudo users, administrators, VIP users, and regular users are denied before running any query.
+    """
+    msg = update.effective_message
+    if not msg:
+        return
+
+    user = update.effective_user
+    if not user or not is_owner(user.id, OWNER_IDS):
+        await msg.reply_text("🌸 Gomen ne~ This command is strictly reserved for the bot owner desu! 💕")
+        return
+
+    # Non-blocking query to database statistics helper
+    try:
+        from store import get_db_stats
+        stats = await asyncio.to_thread(get_db_stats)
+    except Exception as e:
+        logger.error(f"Failed to gather database statistics: {e}", exc_info=True)
+        await msg.reply_text("☁️ Failed to retrieve database statistics. Please check the logs.")
+        return
+
+    status_icon = "🟢" if stats.get('status') == 'Connected' else "🔴"
+    status_str = f"{status_icon} {stats.get('status', 'Unknown')}"
+    backend_str = stats.get('backend', 'Unknown')
+    db_name = stats.get('db_name', 'Unknown')
+    tables_cnt = stats.get('total_tables', 'Unavailable')
+    docs_cnt = stats.get('total_documents', 'Unavailable')
+    db_size = stats.get('db_size', 'Unavailable')
+    indexes = stats.get('index_count', 'Unavailable')
+    index_size = stats.get('index_size', 'Unavailable')
+    connections = stats.get('connections', 'Unavailable')
+    version = stats.get('version', 'Unavailable')
+    checked_at = stats.get('checked_at', 'Unavailable')
+
+    lines = [
+        "📊 <b>Database Statistics</b>\n",
+        f"• <b>Status:</b> {html.escape(str(status_str))}",
+        f"• <b>Backend:</b> <code>{html.escape(str(backend_str))}</code>",
+        f"• <b>Database Name:</b> <code>{html.escape(str(db_name))}</code>",
+        f"• <b>Server Version:</b> <code>{html.escape(str(version))}</code>",
+        f"• <b>Tables/Collections:</b> <code>{html.escape(str(tables_cnt))}</code>",
+        f"• <b>Total Documents/Rows:</b> <code>{html.escape(str(docs_cnt))}</code>",
+        f"• <b>Database Size:</b> <code>{html.escape(str(db_size))}</code>",
+        f"• <b>Indexes:</b> <code>{html.escape(str(indexes))}</code> (Size: <code>{html.escape(str(index_size))}</code>)",
+        f"• <b>Connections:</b> <code>{html.escape(str(connections))}</code>",
+        f"• <b>Checked At:</b> <code>{html.escape(str(checked_at))}</code>"
+    ]
+
+    # Per-collection or per-table details
+    per_item = stats.get('per_item_counts')
+    if per_item and isinstance(per_item, dict):
+        item_label = "Collections" if backend_str == "MongoDB" else "Tables"
+        lines.append(f"\n📂 <b>Per-{item_label[:-1]} Breakdown:</b>")
+        for name, cnt in sorted(per_item.items()):
+            lines.append(f"  ▫️ <code>{html.escape(name)}</code>: {cnt}")
+
+    if stats.get('error'):
+        lines.append(f"\n⚠️ <b>Notice:</b> <code>{html.escape(str(stats['error']))}</code>")
+
+    output_text = "\n".join(lines)
+    # Split output into chunks if it exceeds Telegram's 4096 char limit
+    if len(output_text) > 4000:
+        chunks = []
+        curr = []
+        curr_len = 0
+        for line in lines:
+            if curr_len + len(line) + 1 > 3800 and curr:
+                chunks.append("\n".join(curr))
+                curr = [line]
+                curr_len = len(line)
+            else:
+                curr.append(line)
+                curr_len += len(line) + 1
+        if curr:
+            chunks.append("\n".join(curr))
+        for chunk in chunks:
+            await msg.reply_html(chunk)
+    else:
+        await msg.reply_html(output_text)
