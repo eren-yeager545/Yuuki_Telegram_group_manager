@@ -25,6 +25,7 @@ from store import (
 from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_cmd, build_help_category_keyboard, build_category_help_text, addsupport_cmd, addchannel_cmd, addlogger_cmd, feedback_cmd, mybot_cmd, build_mybot_keyboard, is_owner_category, is_admin_category
 from broadcast import broadcast_cmd, broadcast_callback_handler, handle_broadcast_content
 from tictactoe import ttt_cmd, ttt_callback_handler
+from mafia import mafia_cmd, mafia_callback_handler
 from admin import *
 from common import ai_cmd, mypersona_cmd, resetpersona_cmd
 from handlers.ai_chat import (
@@ -1455,6 +1456,7 @@ def main():
         ('locks', locks_cmd, 'Users Commands', 'Show lock status', '/locks'),
         ('myfeds', myfeds_cmd, 'Users Commands', 'List your federations', '/myfeds'),
         ('ttt', ttt_cmd, 'Game Commands', 'Play Tic Tac Toe against bot or challenged user in reply', '/ttt'),
+        ('mafia', mafia_cmd, 'Game Commands', 'Interactive story-driven Mafia game in your group', '/mafia'),
         ('afk', afk_cmd, 'Users Commands', 'Set your status to AFK with an optional reason', '/afk studying'),
         ('towhatsapp', towhatsapp_cmd, 'Utility Commands', 'Convert Telegram sticker pack to WhatsApp format', '/towhatsapp https://t.me/addstickers/pack_name'),
         ('mypersona', mypersona_cmd, 'Utility Commands', 'Show your currently selected AI persona', '/mypersona'),
@@ -1540,6 +1542,7 @@ def main():
     app.add_handler(CallbackQueryHandler(kick_callback_handler, pattern='^kick_'))
     app.add_handler(CallbackQueryHandler(broadcast_callback_handler, pattern='^bcast_'))
     app.add_handler(CallbackQueryHandler(ttt_callback_handler, pattern='^ttt_'))
+    app.add_handler(CallbackQueryHandler(mafia_callback_handler, pattern='^mafia_'))
     app.add_handler(CallbackQueryHandler(chat_join_request_callback_handler, pattern='^cjr:'))
     app.add_handler(CallbackQueryHandler(persona_callback_handler, pattern='^persona:'))
     app.add_handler(CallbackQueryHandler(homepage_callback))

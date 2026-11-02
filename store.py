@@ -120,6 +120,7 @@ def init_db():
         db['user_profile_snapshots'].create_index([('chat_id', 1), ('user_id', 1)], unique=True)
         db['join_request_decisions'].create_index([('chat_id', 1), ('user_id', 1)], unique=True)
         db['user_personas'].create_index('user_id', unique=True)
+        db['mafia_stats'].create_index('user_id', unique=True)
         return
 
     with closing(conn()) as c:
@@ -164,6 +165,15 @@ def init_db():
         cur.execute('CREATE TABLE IF NOT EXISTS user_profile_snapshots (chat_id INTEGER, user_id INTEGER, first_name TEXT, last_name TEXT, username TEXT, updated_at INTEGER, PRIMARY KEY(chat_id, user_id))')
         cur.execute('CREATE TABLE IF NOT EXISTS join_request_decisions (chat_id INTEGER, user_id INTEGER, action TEXT, admin_id INTEGER, created_at INTEGER, PRIMARY KEY(chat_id, user_id))')
         cur.execute('CREATE TABLE IF NOT EXISTS user_personas (user_id INTEGER PRIMARY KEY, persona TEXT NOT NULL DEFAULT "yuki", updated_at INTEGER)')
+        cur.execute('''CREATE TABLE IF NOT EXISTS mafia_stats (
+            user_id INTEGER PRIMARY KEY,
+            games_played INTEGER DEFAULT 0,
+            games_won INTEGER DEFAULT 0,
+            mafia_wins INTEGER DEFAULT 0,
+            town_wins INTEGER DEFAULT 0,
+            eliminations INTEGER DEFAULT 0,
+            updated_at INTEGER
+        )''')
 
         # Schema migrations for existing SQLite databases
         cur.execute("PRAGMA table_info(emojis)")
@@ -1422,6 +1432,7 @@ def delete_user_data(user_id):
         db['fed_admins'].delete_many({'user_id': user_id})
         db['action_events'].delete_many({'$or': [{'actor_id': user_id}, {'target_id': user_id}]})
         db['user_personas'].delete_many({'user_id': user_id})
+        db['mafia_stats'].delete_many({'user_id': user_id})
         return
 
     with get_conn() as c:
@@ -1436,6 +1447,7 @@ def delete_user_data(user_id):
         c.execute('DELETE FROM action_events WHERE actor_id=? OR target_id=?', (user_id, user_id))
         c.execute('DELETE FROM afk WHERE user_id=?', (user_id,))
         c.execute('DELETE FROM user_personas WHERE user_id=?', (user_id,))
+        c.execute('DELETE FROM mafia_stats WHERE user_id=?', (user_id,))
         c.commit()
 
 
@@ -1797,6 +1809,167 @@ def delete_afk(arg1: int, arg2: int = None) -> None:
     with get_conn() as c:
         c.execute('DELETE FROM afk WHERE user_id=?', (user_id,))
         c.commit()
+
+
+# ============================================================================
+# MAFIA GAME PERSISTENCE & STATS
+# ============================================================================
+
+def record_mafia_game_result(winner_team: str, player_roles: dict, eliminated_counts: dict = None):
+    """
+    Records game statistics for players at the end of a Mafia game.
+    - winner_team: 'mafia' or 'town'
+    - player_roles: dict mapping user_id -> role string ('mafia', 'detective', 'doctor', 'villager')
+    - eliminated_counts: optional dict mapping user_id -> count of players eliminated by this player's vote/night action
+    """
+    now = _now()
+    eliminated_counts = eliminated_counts or {}
+
+    for user_id, role in player_roles.items():
+        role_lower = str(role).lower()
+        is_mafia = (role_lower == 'mafia')
+        is_town = not is_mafia
+        won = (winner_team == 'mafia' and is_mafia) or (winner_team == 'town' and is_town)
+        mafia_win = 1 if (won and is_mafia) else 0
+        town_win = 1 if (won and is_town) else 0
+        game_win = 1 if won else 0
+        elims = eliminated_counts.get(user_id, 0)
+
+        if is_mongo():
+            db = get_mongo_db()
+            db['mafia_stats'].update_one(
+                {'user_id': user_id},
+                {
+                    '$inc': {
+                        'games_played': 1,
+                        'games_won': game_win,
+                        'mafia_wins': mafia_win,
+                        'town_wins': town_win,
+                        'eliminations': elims,
+                    },
+                    '$set': {'updated_at': now}
+                },
+                upsert=True
+            )
+        else:
+            with get_conn() as c:
+                c.execute('''
+                    INSERT INTO mafia_stats(user_id, games_played, games_won, mafia_wins, town_wins, eliminations, updated_at)
+                    VALUES(?, 1, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        games_played = mafia_stats.games_played + 1,
+                        games_won = mafia_stats.games_won + excluded.games_won,
+                        mafia_wins = mafia_stats.mafia_wins + excluded.mafia_wins,
+                        town_wins = mafia_stats.town_wins + excluded.town_wins,
+                        eliminations = mafia_stats.eliminations + excluded.eliminations,
+                        updated_at = excluded.updated_at
+                ''', (user_id, game_win, mafia_win, town_win, elims, now))
+                c.commit()
+
+
+def get_mafia_stats(user_id: int) -> dict:
+    """
+    Retrieves a player's Mafia stats.
+    """
+    default_stats = {
+        'user_id': user_id,
+        'games_played': 0,
+        'games_won': 0,
+        'mafia_wins': 0,
+        'town_wins': 0,
+        'eliminations': 0,
+        'win_rate': 0.0
+    }
+    if not user_id:
+        return default_stats
+
+    if is_mongo():
+        db = get_mongo_db()
+        doc = db['mafia_stats'].find_one({'user_id': user_id})
+        if not doc:
+            return default_stats
+        played = doc.get('games_played', 0)
+        won = doc.get('games_won', 0)
+        return {
+            'user_id': user_id,
+            'games_played': played,
+            'games_won': won,
+            'mafia_wins': doc.get('mafia_wins', 0),
+            'town_wins': doc.get('town_wins', 0),
+            'eliminations': doc.get('eliminations', 0),
+            'win_rate': round((won / played * 100.0), 1) if played > 0 else 0.0
+        }
+    else:
+        with closing(conn()) as c:
+            row = c.execute(
+                'SELECT games_played, games_won, mafia_wins, town_wins, eliminations FROM mafia_stats WHERE user_id=?',
+                (user_id,)
+            ).fetchone()
+            if not row:
+                return default_stats
+            played, won, m_wins, t_wins, elims = row
+            return {
+                'user_id': user_id,
+                'games_played': played or 0,
+                'games_won': won or 0,
+                'mafia_wins': m_wins or 0,
+                'town_wins': t_wins or 0,
+                'eliminations': elims or 0,
+                'win_rate': round((won / played * 100.0), 1) if played > 0 else 0.0
+            }
+
+
+def get_mafia_leaderboard(limit: int = 10) -> list:
+    """
+    Retrieves the top Mafia players sorted by games_won descending, then games_played.
+    Returns list of dicts: [{'user_id', 'full_name', 'username', 'games_played', 'games_won', 'win_rate'}]
+    """
+    results = []
+    if is_mongo():
+        db = get_mongo_db()
+        docs = list(db['mafia_stats'].find({'games_played': {'$gt': 0}}).sort([('games_won', -1), ('games_played', -1)]).limit(limit))
+        for d in docs:
+            uid = d['user_id']
+            u_doc = db['users'].find_one({'user_id': uid})
+            fn = u_doc.get('full_name') if u_doc else f"User {uid}"
+            un = u_doc.get('username') if u_doc else None
+            played = d.get('games_played', 0)
+            won = d.get('games_won', 0)
+            results.append({
+                'user_id': uid,
+                'full_name': fn,
+                'username': un,
+                'games_played': played,
+                'games_won': won,
+                'mafia_wins': d.get('mafia_wins', 0),
+                'town_wins': d.get('town_wins', 0),
+                'eliminations': d.get('eliminations', 0),
+                'win_rate': round((won / played * 100.0), 1) if played > 0 else 0.0
+            })
+    else:
+        with closing(conn()) as c:
+            rows = c.execute('''
+                SELECT s.user_id, u.full_name, u.username, s.games_played, s.games_won, s.mafia_wins, s.town_wins, s.eliminations
+                FROM mafia_stats s
+                LEFT JOIN users u ON s.user_id = u.user_id
+                WHERE s.games_played > 0
+                ORDER BY s.games_won DESC, s.games_played DESC
+                LIMIT ?
+            ''', (limit,)).fetchall()
+            for r in rows:
+                uid, fn, un, played, won, m_wins, t_wins, elims = r
+                results.append({
+                    'user_id': uid,
+                    'full_name': fn or f"User {uid}",
+                    'username': un,
+                    'games_played': played or 0,
+                    'games_won': won or 0,
+                    'mafia_wins': m_wins or 0,
+                    'town_wins': t_wins or 0,
+                    'eliminations': elims or 0,
+                    'win_rate': round((won / played * 100.0), 1) if played > 0 else 0.0
+                })
+    return results
 
 
 # ============================================================================
