@@ -19,7 +19,8 @@ from store import (
     unfed_ban_user, allow_report_event, report_exists_recent, get_group_quota_lines, MAX_LENGTHS,
     get_user_by_username, get_user_by_id, list_zombies, clean_zombies, get_user_messages, clear_user_messages, record_user_message, get_all_users, get_all_active_groups_detailed, get_group_members, get_safe_users, is_safe_user, add_safe_user, remove_safe_user, toggle_safe_user, get_group_by_id, upsert_user, get_approved_users, is_approved_user, add_approved_user, remove_approved_user,
     set_maintenance_mode, is_maintenance_mode, get_user_message_ids_in_range, delete_recorded_message_ids,
-    save_join_request_decision, get_join_request_decision, clear_join_request_decision
+    save_join_request_decision, get_join_request_decision, clear_join_request_decision,
+    delete_report, get_pending_reports
 )
 from helpers import is_admin, is_owner, is_owner_or_sudo, safe_reply_error, create_custom_emoji_entities, send_reply_with_custom_emoji
 logger = logging.getLogger(__name__)
@@ -309,6 +310,7 @@ async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_banned:
         try:
             await context.bot.unban_chat_member(chat.id, target_id, only_if_banned=True)
+            clear_temp_action(chat.id, target_id, 'tban')
             log_admin_action(chat.id, commander_id, 'unban', target_id)
             reply_text = f"🕊️ Welcome back!\n{target_disp} has been set free from the ban. ✨"
             await update.message.reply_html(reply_text)
@@ -994,7 +996,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text('Rate limit reached: you can report this user only 2 times per minute.')
         return
 
-    add_report(update.effective_chat.id, update.effective_user.id, target_user.id, target_msg.message_id, reason)
+    report_id = add_report(update.effective_chat.id, update.effective_user.id, target_user.id, target_msg.message_id, reason)
 
     # Send notification text
     reported_user_str = format_user_tag(target_user.id, target_user.first_name, target_user.username)
@@ -1007,6 +1009,7 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📝 Reason:\n{html.escape(reason)}"
     )
 
+    delivery_succeeded = False
     try:
         admins = await context.bot.get_chat_administrators(update.effective_chat.id)
         seen_admin_ids = set()
@@ -1040,11 +1043,110 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.effective_chat.send_message("📢 Admins mentioned: " + " ".join(chunk), parse_mode="HTML", disable_web_page_preview=True)
         else:
             await update.message.reply_html(report_notice, disable_web_page_preview=True)
+        delivery_succeeded = True
     except Exception as e:
-        logger.error(f"Error getting admins or sending report in chat {update.effective_chat.id}: {e}")
-        await update.message.reply_html(report_notice, disable_web_page_preview=True)
+        logger.error(f"Error getting admins or delivering report in chat {update.effective_chat.id}: {e}", exc_info=True)
+        # Attempt fallback direct delivery to effective chat
+        try:
+            await update.message.reply_html(report_notice, disable_web_page_preview=True)
+            delivery_succeeded = True
+        except Exception as send_err:
+            logger.error(f"Failed fallback delivery of report #{report_id} in chat {update.effective_chat.id}: {send_err}")
+            delivery_succeeded = False
+
+    if delivery_succeeded:
+        # Delete report immediately after its intended processing and delivery succeed
+        delete_report(report_id)
+    else:
+        # Preserve failed delivery for retry
+        logger.warning(f"Preserving report #{report_id} in chat {update.effective_chat.id} for retry after failed delivery.")
 
     log_admin_action(update.effective_chat.id, update.effective_user.id, 'report', target_user.id, reason)
+
+
+async def deliver_report_notification(context: ContextTypes.DEFAULT_TYPE, report: dict) -> bool:
+    """Delivers a report notification to group and its admins. Returns True on success, False on failure."""
+    chat_id = report['chat_id']
+    reporter_id = report['reporter_id']
+    target_id = report['target_id']
+    reason = report.get('reason') or "No reason provided"
+
+    # User displays
+    u_target = get_user_by_id(target_id)
+    if u_target:
+        reported_user_str = format_user_tag(u_target[0], u_target[1] or 'User', u_target[2])
+    else:
+        reported_user_str = format_user_link(target_id, f"User {target_id}")
+
+    u_reporter = get_user_by_id(reporter_id)
+    if u_reporter:
+        admin_user_str = format_user_tag(u_reporter[0], u_reporter[1] or 'User', u_reporter[2])
+    else:
+        admin_user_str = format_user_link(reporter_id, f"User {reporter_id}")
+
+    report_notice = (
+        "🚨 New Report (Retried)\n\n"
+        f"👤 Reported User:\n{reported_user_str}\n\n"
+        f"👮 Reporter:\n{admin_user_str}\n\n"
+        f"📝 Reason:\n{html.escape(reason)}"
+    )
+
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+        seen_admin_ids = set()
+        admin_mentions_list = []
+        for a in admins:
+            if not getattr(a, 'user', None) or a.user.is_bot:
+                continue
+            if a.user.id in seen_admin_ids:
+                continue
+            seen_admin_ids.add(a.user.id)
+            admin_mentions_list.append(format_user_tag(a.user.id, a.user.first_name, a.user.username))
+
+        if admin_mentions_list:
+            admin_mentions = ' '.join(admin_mentions_list)
+            full_msg = f"{report_notice}\n\n📢 Admins mentioned: {admin_mentions}"
+            if len(full_msg) <= 4000:
+                await context.bot.send_message(chat_id=chat_id, text=full_msg, parse_mode="HTML", disable_web_page_preview=True)
+            else:
+                await context.bot.send_message(chat_id=chat_id, text=report_notice, parse_mode="HTML", disable_web_page_preview=True)
+                chunk = []
+                chunk_len = 0
+                for mention in admin_mentions_list:
+                    if chunk_len + len(mention) + 1 > 3800 and chunk:
+                        await context.bot.send_message(chat_id=chat_id, text="📢 Admins mentioned: " + " ".join(chunk), parse_mode="HTML", disable_web_page_preview=True)
+                        chunk = [mention]
+                        chunk_len = len(mention)
+                    else:
+                        chunk.append(mention)
+                        chunk_len += len(mention) + 1
+                if chunk:
+                    await context.bot.send_message(chat_id=chat_id, text="📢 Admins mentioned: " + " ".join(chunk), parse_mode="HTML", disable_web_page_preview=True)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=report_notice, parse_mode="HTML", disable_web_page_preview=True)
+        return True
+    except Exception as e:
+        logger.error(f"Error during retry delivery of report #{report.get('id')} to chat {chat_id}: {e}")
+        return False
+
+
+async def retry_pending_reports(context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Retries failed report deliveries.
+    Deletes each report immediately after successful retry delivery.
+    Preserves failed deliveries for future retry.
+    """
+    pending = get_pending_reports(limit=50)
+    successful_count = 0
+    for report in pending:
+        success = await deliver_report_notification(context, report)
+        if success:
+            delete_report(report['id'])
+            successful_count += 1
+            logger.info(f"Report #{report['id']} successfully delivered on retry and deleted.")
+        else:
+            logger.warning(f"Retry delivery failed for report #{report['id']}; preserving for future retry.")
+    return successful_count
 
 
 async def reports_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3297,7 +3399,8 @@ async def chat_join_request_handler(update: Update, context: ContextTypes.DEFAUL
         try:
             await context.bot.approve_chat_join_request(chat_id=chat.id, user_id=user.id)
             bot_admin_id = context.bot.id if hasattr(context, 'bot') and hasattr(context.bot, 'id') and isinstance(context.bot.id, int) else 0
-            save_join_request_decision(chat.id, user.id, 'accepted', bot_admin_id)
+            # Delete decision record immediately after operation succeeds - do not retain permanent history
+            clear_join_request_decision(chat.id, user.id)
 
             auto_msg = (
                 "🌸 <b>Yuki welcomed a new member!</b> ✨\n\n"
@@ -3417,7 +3520,8 @@ async def chat_join_request_callback_handler(update: Update, context: ContextTyp
     if action == 'a':
         try:
             await context.bot.approve_chat_join_request(chat_id=target_chat_id, user_id=requester_id)
-            save_join_request_decision(target_chat_id, requester_id, 'accepted', acting_user.id)
+            # Delete decision record immediately after operation succeeds - do not retain permanent history
+            clear_join_request_decision(target_chat_id, requester_id)
             await query.answer("Join request accepted! 💚")
 
             orig_text = query.message.text or ""
@@ -3432,7 +3536,8 @@ async def chat_join_request_callback_handler(update: Update, context: ContextTyp
     elif action == 'd':
         try:
             await context.bot.decline_chat_join_request(chat_id=target_chat_id, user_id=requester_id)
-            save_join_request_decision(target_chat_id, requester_id, 'declined', acting_user.id)
+            # Delete decision record immediately after operation succeeds - do not retain permanent history
+            clear_join_request_decision(target_chat_id, requester_id)
             await query.answer("Join request declined. ❤️")
 
             orig_text = query.message.text or ""

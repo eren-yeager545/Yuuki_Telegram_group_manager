@@ -102,10 +102,9 @@ async def test_chat_join_request_callback_accept_success():
     assert "Request Accepted" in query.edit_message_text.call_args[0][0]
     assert query.edit_message_text.call_args.kwargs.get("reply_markup") is None
 
+    # Decision record is deleted immediately after operation succeeds (no permanent retention)
     decision = get_join_request_decision(chat_id, requester_id)
-    assert decision is not None
-    assert decision[0] == "accepted"
-    assert decision[1] == admin_user.id
+    assert decision is None
 
 
 @pytest.mark.asyncio
@@ -142,10 +141,9 @@ async def test_chat_join_request_callback_decline_success():
     assert "Request Declined" in query.edit_message_text.call_args[0][0]
     assert query.edit_message_text.call_args.kwargs.get("reply_markup") is None
 
+    # Decision record is deleted immediately after operation succeeds (no permanent retention)
     decision = get_join_request_decision(chat_id, requester_id)
-    assert decision is not None
-    assert decision[0] == "declined"
-    assert decision[1] == admin_user.id
+    assert decision is None
 
 
 @pytest.mark.asyncio

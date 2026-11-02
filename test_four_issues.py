@@ -204,10 +204,9 @@ async def test_autojoin_handler_auto_approves_when_enabled():
 
         # Bot should have called approve_chat_join_request automatically
         ctx.bot.approve_chat_join_request.assert_called_once_with(chat_id=chat.id, user_id=requester.id)
-        # Decision must be saved in DB
+        # Decision record is deleted immediately after operation succeeds (no permanent retention)
         decision = get_join_request_decision(chat.id, requester.id)
-        assert decision is not None
-        assert decision[0] == "accepted"
+        assert decision is None
 
         # Auto-approved message sent
         ctx.bot.send_message.assert_called_once()
@@ -353,8 +352,8 @@ async def test_stale_cjr_scenario_2_previously_approved_leaves_and_requests_agai
     bot_mock.approve_chat_join_request.assert_called_once_with(chat_id=chat_id, user_id=user_id)
     query.answer.assert_called_with("Join request accepted! 💚")
     decision = get_join_request_decision(chat_id, user_id)
-    assert decision is not None
-    assert decision[0] == "accepted"
+    # Decision record is deleted immediately after operation succeeds
+    assert decision is None
 
 
 @pytest.mark.asyncio
