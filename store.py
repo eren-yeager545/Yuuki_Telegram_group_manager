@@ -119,6 +119,7 @@ def init_db():
         db['afk'].create_index('user_id', unique=True)
         db['user_profile_snapshots'].create_index([('chat_id', 1), ('user_id', 1)], unique=True)
         db['join_request_decisions'].create_index([('chat_id', 1), ('user_id', 1)], unique=True)
+        db['user_personas'].create_index('user_id', unique=True)
         return
 
     with closing(conn()) as c:
@@ -162,6 +163,7 @@ def init_db():
         cur.execute('CREATE TABLE IF NOT EXISTS afk (user_id INTEGER PRIMARY KEY, reason TEXT, afk_since INTEGER)')
         cur.execute('CREATE TABLE IF NOT EXISTS user_profile_snapshots (chat_id INTEGER, user_id INTEGER, first_name TEXT, last_name TEXT, username TEXT, updated_at INTEGER, PRIMARY KEY(chat_id, user_id))')
         cur.execute('CREATE TABLE IF NOT EXISTS join_request_decisions (chat_id INTEGER, user_id INTEGER, action TEXT, admin_id INTEGER, created_at INTEGER, PRIMARY KEY(chat_id, user_id))')
+        cur.execute('CREATE TABLE IF NOT EXISTS user_personas (user_id INTEGER PRIMARY KEY, persona TEXT NOT NULL DEFAULT "yuki", updated_at INTEGER)')
 
         # Schema migrations for existing SQLite databases
         cur.execute("PRAGMA table_info(emojis)")
@@ -1419,6 +1421,7 @@ def delete_user_data(user_id):
         db['fed_bans'].delete_many({'user_id': user_id})
         db['fed_admins'].delete_many({'user_id': user_id})
         db['action_events'].delete_many({'$or': [{'actor_id': user_id}, {'target_id': user_id}]})
+        db['user_personas'].delete_many({'user_id': user_id})
         return
 
     with get_conn() as c:
@@ -1432,6 +1435,7 @@ def delete_user_data(user_id):
         c.execute('DELETE FROM fed_admins WHERE user_id=?', (user_id,))
         c.execute('DELETE FROM action_events WHERE actor_id=? OR target_id=?', (user_id, user_id))
         c.execute('DELETE FROM afk WHERE user_id=?', (user_id,))
+        c.execute('DELETE FROM user_personas WHERE user_id=?', (user_id,))
         c.commit()
 
 
@@ -1793,6 +1797,100 @@ def delete_afk(arg1: int, arg2: int = None) -> None:
     with get_conn() as c:
         c.execute('DELETE FROM afk WHERE user_id=?', (user_id,))
         c.commit()
+
+
+# ============================================================================
+# USER AI PERSONA PERSISTENCE
+# ============================================================================
+
+VALID_PERSONAS = {"yuki", "rukia", "renji", "zero_two"}
+DEFAULT_PERSONA = "yuki"
+
+
+def get_user_persona(user_id: int) -> str:
+    """
+    Retrieves the selected AI persona for a given user ID.
+    Defaults to 'yuki' if not set or invalid.
+    """
+    if not user_id:
+        return DEFAULT_PERSONA
+
+    try:
+        if is_mongo():
+            db = get_mongo_db()
+            doc = db['user_personas'].find_one({'user_id': user_id})
+            if doc and doc.get('persona'):
+                val = str(doc.get('persona')).strip().lower()
+                return val if val in VALID_PERSONAS else DEFAULT_PERSONA
+            return DEFAULT_PERSONA
+
+        with closing(conn()) as c:
+            row = c.execute('SELECT persona FROM user_personas WHERE user_id=?', (user_id,)).fetchone()
+            if row and row[0]:
+                val = str(row[0]).strip().lower()
+                return val if val in VALID_PERSONAS else DEFAULT_PERSONA
+            return DEFAULT_PERSONA
+    except Exception as e:
+        logger.warning(f"Error fetching persona for user {user_id}: {e}")
+        return DEFAULT_PERSONA
+
+
+def set_user_persona(user_id: int, persona: str) -> bool:
+    """
+    Persists the selected AI persona for a given user ID.
+    Validates persona identifier against VALID_PERSONAS.
+    Returns True if successfully set.
+    """
+    if not user_id or not persona:
+        return False
+
+    val = str(persona).strip().lower()
+    if val not in VALID_PERSONAS:
+        return False
+
+    now = _now()
+    try:
+        if is_mongo():
+            db = get_mongo_db()
+            db['user_personas'].update_one(
+                {'user_id': user_id},
+                {'$set': {'persona': val, 'updated_at': now}},
+                upsert=True
+            )
+            return True
+
+        with closing(conn()) as c:
+            c.execute(
+                'INSERT INTO user_personas(user_id, persona, updated_at) VALUES(?,?,?) '
+                'ON CONFLICT(user_id) DO UPDATE SET persona=excluded.persona, updated_at=excluded.updated_at',
+                (user_id, val, now)
+            )
+            c.commit()
+            return True
+    except Exception as e:
+        logger.error(f"Error saving persona for user {user_id}: {e}")
+        return False
+
+
+def reset_user_persona(user_id: int) -> bool:
+    """
+    Resets user's persona preference back to default ('yuki').
+    """
+    if not user_id:
+        return False
+    try:
+        if is_mongo():
+            db = get_mongo_db()
+            db['user_personas'].delete_one({'user_id': user_id})
+            return True
+
+        with closing(conn()) as c:
+            c.execute('DELETE FROM user_personas WHERE user_id=?', (user_id,))
+            c.commit()
+            return True
+    except Exception as e:
+        logger.error(f"Error resetting persona for user {user_id}: {e}")
+        return False
 
 
 def get_all_sticker_packs() -> list:

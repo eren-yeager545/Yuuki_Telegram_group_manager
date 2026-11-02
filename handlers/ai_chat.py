@@ -4,7 +4,7 @@ import random
 import re
 import time
 from typing import Optional, Tuple
-from telegram import Update, Message, User, ReactionTypeEmoji, ReactionTypeCustomEmoji
+from telegram import Update, Message, User, ReactionTypeEmoji, ReactionTypeCustomEmoji, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ReactionEmoji
 from telegram.ext import ContextTypes
 import config
@@ -13,6 +13,9 @@ from helpers import send_reply_with_custom_emoji, is_owner
 from store import get_all_stickers
 from src.ai import (
     YUKI_PERSONA,
+    PERSONAS,
+    get_persona_prompt,
+    get_persona_metadata,
     ContextManager,
     AIRateLimiter,
     AIProviderManager,
@@ -48,6 +51,171 @@ VALID_TELEGRAM_REACTION_EMOJIS = {e.value for e in ReactionEmoji}
 _reaction_quarantine = {}  # (chat_id, custom_emoji_id) -> float (expiration timestamp)
 _recent_chat_reactions = {}  # chat_id -> list of reaction keys
 INTERACTION_TIMEOUT_SECONDS = 300.0  # 5 minutes inactivity timeout
+
+
+def build_persona_selection_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """
+    Builds the inline keyboard for persona selection:
+    Arranged 2 buttons per row for the 4 personas.
+    Buttons include target user_id for secure callback authorization.
+    """
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "💗 Yuki — Cute, Caring & Playful",
+                callback_data=f"persona:select:yuki:{user_id}"
+            ),
+            InlineKeyboardButton(
+                "❄️ Rukia Kuchiki — Calm, Strong & Witty",
+                callback_data=f"persona:select:rukia:{user_id}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🔥 Renji Abarai — Bold, Loyal & Energetic",
+                callback_data=f"persona:select:renji:{user_id}"
+            ),
+            InlineKeyboardButton(
+                "💖 Zero Two — Playful, Confident & Affectionate",
+                callback_data=f"persona:select:zero_two:{user_id}"
+            ),
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def send_persona_selection_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Sends the persona selection menu when /ai is called without arguments.
+    """
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not msg:
+        return
+
+    current_persona_id = store.get_user_persona(user.id)
+    current_meta = get_persona_metadata(current_persona_id)
+
+    text = (
+        "🎭 <b>Choose Your AI Persona</b>\n\n"
+        f"<b>Currently Active:</b> {current_meta['emoji']} <b>{current_meta['name']}</b> ({current_meta['title']})\n\n"
+        "Tap a persona below to select who you'd like to chat with! ✨"
+    )
+
+    kb = build_persona_selection_keyboard(user.id)
+    try:
+        await msg.reply_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Failed to send persona selection menu: {e}")
+
+
+async def persona_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles inline callback button clicks for persona selection.
+    Verifies callback authorization so users cannot change another user's persona.
+    """
+    query = update.callback_query
+    if not query:
+        return
+
+    user = update.effective_user
+    if not user:
+        await query.answer("Could not identify user.", show_alert=True)
+        return
+
+    data = query.data or ""
+    parts = data.split(":")
+    # Expected format: persona:select:<persona_id>:<user_id>
+    if len(parts) != 4 or parts[0] != "persona" or parts[1] != "select":
+        await query.answer("Invalid button action.", show_alert=True)
+        return
+
+    persona_id = parts[2]
+    try:
+        target_user_id = int(parts[3])
+    except ValueError:
+        await query.answer("Invalid user reference.", show_alert=True)
+        return
+
+    # Callback authorization check
+    if user.id != target_user_id:
+        await query.answer(
+            "Gomen ne~ 🌸 This selection menu was opened for another user! Use /ai to choose your own persona.",
+            show_alert=True
+        )
+        return
+
+    meta = get_persona_metadata(persona_id)
+    if not meta or persona_id not in PERSONAS:
+        await query.answer("Unknown persona selected.", show_alert=True)
+        return
+
+    # Update database
+    success = store.set_user_persona(user.id, persona_id)
+    if not success:
+        await query.answer("Failed to update persona in database. Please try again.", show_alert=True)
+        return
+
+    # Acknowledge callback immediately
+    await query.answer(f"Selected {meta['name']}! {meta['emoji']}")
+
+    # Edit message to confirm change cleanly without duplicate messages
+    confirmation_text = (
+        "🎭 <b>AI Persona Updated!</b>\n\n"
+        f"You are now chatting with {meta['emoji']} <b>{meta['name']}</b> ({meta['title']})!\n\n"
+        f"<i>{meta['description']}</i>\n\n"
+        "Enjoy your conversations! 🌸✨"
+    )
+
+    try:
+        await query.edit_message_text(
+            text=confirmation_text,
+            parse_mode="HTML",
+            reply_markup=None
+        )
+    except Exception as e:
+        logger.warning(f"Failed to edit persona message: {e}")
+
+
+async def show_my_persona(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Implements /mypersona: displays user's currently selected AI persona.
+    """
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not msg:
+        return
+
+    persona_id = store.get_user_persona(user.id)
+    meta = get_persona_metadata(persona_id)
+
+    text = (
+        f"🎭 <b>Your Active AI Persona</b>\n\n"
+        f"{meta['emoji']} <b>{meta['name']}</b> — {meta['title']}\n\n"
+        f"<i>{meta['description']}</i>\n\n"
+        "💡 To change your persona, send /ai anytime!"
+    )
+    await msg.reply_text(text, parse_mode="HTML")
+
+
+async def reset_my_persona(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Implements /resetpersona: resets user's selection back to Yuki.
+    """
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not msg:
+        return
+
+    store.reset_user_persona(user.id)
+    yuki_meta = get_persona_metadata("yuki")
+
+    text = (
+        f"🌸 <b>AI Persona Reset!</b>\n\n"
+        f"Your AI persona has been reset to {yuki_meta['emoji']} <b>{yuki_meta['name']}</b> ({yuki_meta['title']})! 💕\n\n"
+        "Yuki is back and ready to chat with you! (⁠≧⁠▽⁠≦⁠)✨"
+    )
+    await msg.reply_text(text, parse_mode="HTML")
 
 
 def set_active_chatter(chat_id: int, user_id: int):
@@ -470,20 +638,35 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
         except Exception:
             pass
 
-        # Read context safely under chat lock
-        chat_lock = await context_manager.get_chat_lock(chat.id)
+        # Load user's selected persona
+        selected_persona_id = store.get_user_persona(user.id)
+        persona_system_prompt = get_persona_prompt(selected_persona_id)
+
+        # Read context safely under chat/user/persona lock
+        chat_lock = await context_manager.get_chat_lock(chat.id, user_id=user.id, persona=selected_persona_id)
         async with chat_lock:
             if is_owner(user.id, getattr(config, 'OWNER_IDS', [])):
                 user_display = "𓂀 𝑨𝒍𝒃𝒆𝒓𝒕 𝑰𝒏𝒇𝒆⃤𝒓𝒏𝒐 𓂀 (Creator/Owner)"
             else:
                 user_display = user.first_name or "Friend"
-            context_manager.add_message(chat.id, role="user", content=prompt, user_name=user_display)
-            conversation_history = context_manager.get_context(chat.id)
+            context_manager.add_message(
+                chat.id,
+                role="user",
+                content=prompt,
+                user_name=user_display,
+                user_id=user.id,
+                persona=selected_persona_id
+            )
+            conversation_history = context_manager.get_context(
+                chat.id,
+                user_id=user.id,
+                persona=selected_persona_id
+            )
 
         # Call AI Provider Manager concurrently without holding chat lock
         ai_resp = await provider_manager.chat(
             messages=conversation_history,
-            system_prompt=YUKI_PERSONA,
+            system_prompt=persona_system_prompt,
             max_tokens=config.AI_MAX_OUTPUT_TOKENS,
             timeout=config.AI_REQUEST_TIMEOUT,
             chat_id=chat.id,
@@ -502,7 +685,13 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
 
         # Write response back to context under chat lock
         async with chat_lock:
-            context_manager.add_message(chat.id, role="assistant", content=final_text)
+            context_manager.add_message(
+                chat.id,
+                role="assistant",
+                content=final_text,
+                user_id=user.id,
+                persona=selected_persona_id
+            )
 
         try:
             await send_reply_with_custom_emoji(msg, final_text)
