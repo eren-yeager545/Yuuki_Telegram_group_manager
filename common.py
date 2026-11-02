@@ -449,7 +449,7 @@ async def mybot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(text, parse_mode='HTML', reply_markup=build_mybot_keyboard())
 
 async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from handlers.ai_chat import handle_ai_chat
+    from handlers.ai_chat import handle_ai_chat, send_persona_selection_menu
     msg = update.effective_message
     if not msg:
         return
@@ -459,10 +459,20 @@ async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prompt = msg.reply_to_message.text.strip()
 
     if not prompt:
-        await msg.reply_text('🌸 Please ask me something using /ai or reply to a message desu~! 💕')
+        await send_persona_selection_menu(update, context)
         return
 
     await handle_ai_chat(update, context, prompt_override=prompt)
+
+
+async def mypersona_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from handlers.ai_chat import show_my_persona
+    await show_my_persona(update, context)
+
+
+async def resetpersona_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from handlers.ai_chat import reset_my_persona
+    await reset_my_persona(update, context)
 
 
 if __name__ == '__main__':

@@ -26,8 +26,13 @@ from common import start_cmd, help_cmd, ping_cmd, rules_cmd, stats_cmd, privacy_
 from broadcast import broadcast_cmd, broadcast_callback_handler, handle_broadcast_content
 from tictactoe import ttt_cmd, ttt_callback_handler
 from admin import *
-from common import ai_cmd
-from handlers.ai_chat import handle_ai_chat, should_trigger_yuki, process_active_interaction_and_reaction
+from common import ai_cmd, mypersona_cmd, resetpersona_cmd
+from handlers.ai_chat import (
+    handle_ai_chat,
+    should_trigger_yuki,
+    process_active_interaction_and_reaction,
+    persona_callback_handler
+)
 import store
 import html
 from handlers.afk import afk_cmd, format_afk_duration, extract_mentioned_afk_users
@@ -1452,6 +1457,8 @@ def main():
         ('ttt', ttt_cmd, 'Game Commands', 'Play Tic Tac Toe against bot or challenged user in reply', '/ttt'),
         ('afk', afk_cmd, 'Users Commands', 'Set your status to AFK with an optional reason', '/afk studying'),
         ('towhatsapp', towhatsapp_cmd, 'Utility Commands', 'Convert Telegram sticker pack to WhatsApp format', '/towhatsapp https://t.me/addstickers/pack_name'),
+        ('mypersona', mypersona_cmd, 'Utility Commands', 'Show your currently selected AI persona', '/mypersona'),
+        ('resetpersona', resetpersona_cmd, 'Utility Commands', 'Reset your AI persona to Yuki', '/resetpersona'),
     ]
     admin_cmds = [
         ('approve', approve_cmd, 'Group Management Commands', 'Approve a replied-to user or specified user ID to bypass moderation restrictions', '/approve'),
@@ -1534,6 +1541,7 @@ def main():
     app.add_handler(CallbackQueryHandler(broadcast_callback_handler, pattern='^bcast_'))
     app.add_handler(CallbackQueryHandler(ttt_callback_handler, pattern='^ttt_'))
     app.add_handler(CallbackQueryHandler(chat_join_request_callback_handler, pattern='^cjr:'))
+    app.add_handler(CallbackQueryHandler(persona_callback_handler, pattern='^persona:'))
     app.add_handler(CallbackQueryHandler(homepage_callback))
     app.add_handler(ChatJoinRequestHandler(chat_join_request_handler))
     app.add_handler(ChatMemberHandler(chat_member_router, ChatMemberHandler.MY_CHAT_MEMBER))
