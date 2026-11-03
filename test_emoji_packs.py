@@ -288,10 +288,11 @@ async def test_process_active_interaction_targeted_reactions():
             msg1.set_reaction.assert_called_once()
             mock_ai.assert_called_once()
 
-    # Follow up message from User A (active chatter) -> reacts!
+    # Follow up message from User A in group not directed to bot -> NO reaction!
+    # Normal conversations between group members must never trigger reactions.
     upd2 = MagicMock(spec=Update)
     msg2 = AsyncMock(spec=Message)
-    msg2.text = "How are you?"
+    msg2.text = "How are you everyone?"
     upd2.effective_message = msg2
     upd2.effective_chat = chat
     upd2.effective_user = user_a
@@ -299,9 +300,9 @@ async def test_process_active_interaction_targeted_reactions():
     with patch("handlers.ai_chat.should_trigger_yuki", return_value=(False, "")):
         await process_active_interaction_and_reaction(upd2, ctx)
         await asyncio.sleep(0.01)
-        msg2.set_reaction.assert_called_once()
+        msg2.set_reaction.assert_not_called()
 
-    # Unrelated User B sends message -> NO reaction!
+    # Unrelated User B sends normal message -> NO reaction!
     upd3 = MagicMock(spec=Update)
     msg3 = AsyncMock(spec=Message)
     msg3.text = "Hello everyone"
@@ -313,10 +314,8 @@ async def test_process_active_interaction_targeted_reactions():
         await process_active_interaction_and_reaction(upd3, ctx)
         await asyncio.sleep(0.01)
         msg3.set_reaction.assert_not_called()
-        # Active chatter is still User A
-        assert get_active_chatter(chat_id) == 101
 
-    # User B now interacts with Yuki -> Active chatter switches to User B!
+    # User B now directly interacts with Yuki -> Yuki reacts and handles AI chat!
     upd4 = MagicMock(spec=Update)
     msg4 = AsyncMock(spec=Message)
     msg4.text = "Yuki notice me!"
@@ -355,6 +354,7 @@ async def test_non_owner_all_pack_commands_denied():
 
 @pytest.mark.asyncio
 async def test_active_chatter_sticker_reaction():
+    # Ordinary sticker sent to group without direct bot interaction does NOT trigger reaction
     chat_id = -100555
     user_a = MagicMock(spec=User)
     user_a.id = 301
@@ -383,7 +383,7 @@ async def test_active_chatter_sticker_reaction():
     with patch("handlers.ai_chat.should_trigger_yuki", return_value=(False, "")):
         await process_active_interaction_and_reaction(upd, ctx)
         await asyncio.sleep(0.01)
-        msg.set_reaction.assert_called_once()
+        msg.set_reaction.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1186,3 +1186,62 @@ async def test_per_chat_reaction_quarantine_isolation():
 
     assert is_reaction_quarantined(chat_a, cid) is True
     assert is_reaction_quarantined(chat_b, cid) is False
+
+
+@pytest.mark.asyncio
+async def test_no_duplicate_reactions_to_same_message():
+    from handlers.ai_chat import try_react_to_message, _reacted_messages
+    _reacted_messages.clear()
+
+    chat_id = -1009988
+    save_emoji_pack("dup_test_pack", "Dup Test", [{"emoji": "🔥", "custom_emoji_id": ""}])
+
+    msg = AsyncMock(spec=Message)
+    msg.message_id = 999111
+
+    # First attempt: reaction should succeed
+    await try_react_to_message(msg, chat_id)
+    assert msg.set_reaction.call_count == 1
+
+    # Second attempt on the exact same message: reaction must be deduplicated
+    await try_react_to_message(msg, chat_id)
+    assert msg.set_reaction.call_count == 1  # Still 1, not called again
+
+
+@pytest.mark.asyncio
+async def test_command_triggers_reaction_without_duplicate():
+    from bot import add_registered_command
+    from telegram.ext import Application
+    from handlers.ai_chat import _reacted_messages
+    _reacted_messages.clear()
+
+    save_emoji_pack("cmd_react_pack", "Cmd React", [{"emoji": "🔥", "custom_emoji_id": ""}])
+
+    app = Application.builder().token("123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11").build()
+
+    cmd_called = False
+    async def sample_cmd(update, context):
+        nonlocal cmd_called
+        cmd_called = True
+
+    add_registered_command(app, "testcmd", sample_cmd, "Test", "/testcmd", "/testcmd")
+
+    # Retrieve registered command handler
+    handlers = app.handlers[0]
+    cmd_handler = next(h for h in handlers if getattr(h, "commands", None) and "testcmd" in h.commands)
+
+    upd = MagicMock(spec=Update)
+    msg = AsyncMock(spec=Message)
+    msg.message_id = 888222
+    upd.effective_message = msg
+    upd.effective_chat = MagicMock(spec=Chat, id=-1005544)
+    upd.effective_user = MagicMock(spec=User, id=12345, is_bot=False)
+
+    ctx = MagicMock()
+
+    # Call the wrapped callback
+    await cmd_handler.callback(upd, ctx)
+    await asyncio.sleep(0.01)
+
+    assert cmd_called is True
+    assert msg.set_reaction.call_count == 1

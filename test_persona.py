@@ -135,6 +135,10 @@ def test_persona_metadata_and_prompts():
     assert "Renji Abarai" in renji_p
     assert "Zabimaru" in renji_p
     assert "Hinglish" in renji_p
+    assert "Rukia Kuchiki" in renji_p
+    assert "Albert Inferno" in renji_p
+    assert "Bankai" in renji_p
+    assert "SIGNIFICANTLY REDUCE" in renji_p
 
     # Zero Two
     zt_p = get_persona_prompt("zero_two")

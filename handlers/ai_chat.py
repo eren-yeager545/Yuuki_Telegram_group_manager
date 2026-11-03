@@ -50,6 +50,7 @@ _active_chatters = {}
 VALID_TELEGRAM_REACTION_EMOJIS = {e.value for e in ReactionEmoji}
 _reaction_quarantine = {}  # (chat_id, custom_emoji_id) -> float (expiration timestamp)
 _recent_chat_reactions = {}  # chat_id -> list of reaction keys
+_reacted_messages = {}  # (chat_id, message_id) -> timestamp
 INTERACTION_TIMEOUT_SECONDS = 300.0  # 5 minutes inactivity timeout
 
 
@@ -266,14 +267,42 @@ def quarantine_reaction(chat_id: int, custom_emoji_id: str, ttl: float = 600.0):
         logger.warning(f"Custom reaction temporarily quarantined: chat_id={chat_id} cid={custom_emoji_id}")
 
 
+def mark_message_reacted(chat_id: int, message_id: int) -> bool:
+    """
+    Atomically checks and marks a message as reacted.
+    Returns True if this is the first reaction attempt for the message,
+    or False if the message was already reacted to (prevents duplicate reactions).
+    """
+    if not chat_id or not isinstance(message_id, int):
+        return True
+    now = time.time()
+    # Prune old reacted message keys older than 1 hour or if dictionary grows too large
+    if len(_reacted_messages) > 1000:
+        cutoff = now - 3600.0
+        keys_to_del = [k for k, ts in _reacted_messages.items() if ts < cutoff]
+        for k in keys_to_del:
+            _reacted_messages.pop(k, None)
+
+    key = (chat_id, message_id)
+    if key in _reacted_messages:
+        return False
+    _reacted_messages[key] = now
+    return True
+
+
 async def try_react_to_message(msg: Message, chat_id: int):
     """
     Try to add a random valid reaction to a message.
     Prefers custom emojis when permitted by Telegram and not quarantined for the chat.
     Falls back automatically to Unicode reactions when custom reactions fail or are quarantined.
     Quarantines failed custom reactions per-chat temporarily (TTL 10m) without globally disabling them in DB.
+    Prevents duplicate reactions to the same message.
     """
     try:
+        msg_id = getattr(msg, "message_id", None)
+        if isinstance(msg_id, int) and not mark_message_reacted(chat_id, msg_id):
+            logger.debug(f"Skipping duplicate reaction for chat_id={chat_id} msg_id={msg_id}")
+            return
         emojis = store.get_all_emojis()
         if not emojis:
             return
@@ -521,8 +550,14 @@ def find_matching_sticker(user_emoji: Optional[str], chat_id: Optional[int] = No
 
 async def process_active_interaction_and_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Evaluates incoming user message for active chatter interaction and targeted emoji reactions.
-    Triggers AI chat response if Yuki is explicitly addressed.
+    Evaluates incoming user message for direct interactions and targeted emoji reactions.
+    Triggers AI chat response if the bot is explicitly addressed.
+    Reactions are sent ONLY when someone directly interacts with the bot:
+      - Directly mentioning the bot (@username or text mention)
+      - Replying to the bot's message
+      - Direct message in private chat
+      - Explicit AI conversation feature interaction
+    Normal conversations between group members never trigger reactions.
     """
     msg = update.effective_message
     chat = update.effective_chat
@@ -531,7 +566,7 @@ async def process_active_interaction_and_reaction(update: Update, context: Conte
     if not msg or not chat or not user:
         return
 
-    # Do not react to bot/system messages or Yuki's own messages
+    # Do not react to bot/system messages or the bot's own messages
     if getattr(user, "is_bot", False):
         return
 
@@ -552,10 +587,7 @@ async def process_active_interaction_and_reaction(update: Update, context: Conte
             asyncio.create_task(try_react_to_message(msg, chat.id))
             await handle_ai_chat(update, context, prompt_override=prompt)
             return
-
-        if is_active_chatter(chat.id, user.id):
-            set_active_chatter(chat.id, user.id)
-            asyncio.create_task(try_react_to_message(msg, chat.id))
+        # Normal conversations between group members must never trigger reactions.
     except Exception as e:
         logger.error(
             f"Error processing active interaction/reaction for chat {chat.id} user {user.id}: {type(e).__name__}: {e}",
