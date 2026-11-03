@@ -492,3 +492,274 @@ async def test_no_ai_api_invoked_during_game():
         ctx.args = []
         await mafia.mafia_cmd(u, ctx)
         mock_ai.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_lobby_timer_expiry_start_game():
+    u1, _, _ = make_mock_update(make_mock_user(101, "Alice"), chat_id=-1001)
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+    ctx.bot.send_message = AsyncMock()
+    ctx.args = []
+    await mafia.mafia_cmd(u1, ctx)
+    game = ACTIVE_GAMES[-1001]
+
+    # Add players to meet minimum
+    for uid in (102, 103, 104, 105):
+        game.add_player(uid, f"User{uid}")
+
+    assert game.status == "lobby"
+    # Fast forward lobby timeout
+    await mafia.handle_lobby_timeout(game, ctx)
+    assert game.status == "night"
+    assert game.round_num == 1
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_lobby_timer_expiry_cancel_insufficient_players():
+    u1, _, _ = make_mock_update(make_mock_user(101, "Alice"), chat_id=-1001)
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+    ctx.bot.send_message = AsyncMock()
+    ctx.args = []
+    await mafia.mafia_cmd(u1, ctx)
+    game = ACTIVE_GAMES[-1001]
+    assert len(game.players) == 1
+
+    await mafia.handle_lobby_timeout(game, ctx)
+    assert -1001 not in ACTIVE_GAMES
+    assert game.status == "ended"
+    sent_msgs = [c[1]["text"] for c in ctx.bot.send_message.call_args_list if "text" in c[1]]
+    assert any("Lobby Expired" in m for m in sent_msgs)
+
+
+@pytest.mark.asyncio
+async def test_night_timer_expiry_transitions_to_discussion():
+    game = MafiaGame(chat_id=-1001, chat_title="Group", host_id=101, host_name="Alice")
+    for uid in (102, 103, 104, 105):
+        game.add_player(uid, f"P{uid}")
+    game.players[101].role = "mafia"
+    game.players[102].role = "detective"
+    game.players[103].role = "doctor"
+    game.players[104].role = "villager"
+    game.players[105].role = "villager"
+    game.status = "night"
+    game.round_num = 1
+    ACTIVE_GAMES[-1001] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Trigger resolve_night_phase (as night timer expiry does)
+    await mafia.resolve_night_phase(game, ctx)
+    assert game.status == "discussion"
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_discussion_timer_expiry_transitions_to_voting():
+    game = MafiaGame(chat_id=-1001, chat_title="Group", host_id=101, host_name="Alice")
+    for uid in (102, 103, 104, 105):
+        game.add_player(uid, f"P{uid}")
+    game.status = "discussion"
+    game.round_num = 1
+    ACTIVE_GAMES[-1001] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    await mafia.begin_voting_phase(game, ctx)
+    assert game.status == "voting"
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_voting_timer_expiry_finalizes_votes():
+    game = MafiaGame(chat_id=-1001, chat_title="Group", host_id=101, host_name="Alice")
+    for uid in (102, 103, 104, 105):
+        game.add_player(uid, f"P{uid}")
+    # Assign valid roles so win condition is not triggered on 0 mafia
+    game.players[101].role = "mafia"
+    game.players[102].role = "detective"
+    game.players[103].role = "doctor"
+    game.players[104].role = "villager"
+    game.players[105].role = "villager"
+
+    game.status = "voting"
+    game.round_num = 1
+    ACTIVE_GAMES[-1001] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    await mafia.resolve_voting_phase(game, ctx)
+    # With no votes cast (deadlock), it transitions to night 2
+    assert game.status == "night"
+    assert game.round_num == 2
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_phase_timer_cancellation_and_duplicate_prevention():
+    game = MafiaGame(chat_id=-1001, chat_title="Group", host_id=101, host_name="Alice")
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    cb_called = 0
+    async def dummy_cb(g, c):
+        nonlocal cb_called
+        cb_called += 1
+
+    # Start timer 1 for discussion
+    task1 = mafia.start_phase_timer(game, "discussion", 1, dummy_cb, ctx)
+    assert game.active_timer_phase == "discussion"
+    assert not task1.done()
+
+    # Immediately start timer 2 for voting -> cancels task1
+    task2 = mafia.start_phase_timer(game, "voting", 1, dummy_cb, ctx)
+    assert task1.cancelling() or task1.cancelled() or task1.done()
+    assert game.active_timer_phase == "voting"
+
+    # Cancel phase timer
+    game.cancel_phase_timer()
+    assert task2.cancelling() or task2.cancelled() or task2.done()
+    assert game.active_timer_phase is None
+    assert game.phase_task is None
+
+
+@pytest.mark.asyncio
+async def test_automatic_message_pinning_and_unpinning():
+    u1, _, _ = make_mock_update(make_mock_user(101, "Alice"), chat_id=-1001)
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+    start_msg_mock = MagicMock()
+    start_msg_mock.message_id = 999
+    ctx.bot.send_message = AsyncMock(return_value=start_msg_mock)
+    ctx.bot.pin_chat_message = AsyncMock()
+    ctx.bot.unpin_chat_message = AsyncMock()
+    ctx.args = []
+
+    await mafia.mafia_cmd(u1, ctx)
+    game = ACTIVE_GAMES[-1001]
+    for uid in (102, 103, 104, 105):
+        game.add_player(uid, f"User{uid}")
+
+    # Set a previous pinned mafia message in this chat
+    mafia.LAST_PINNED_MAFIA_MESSAGES[-1001] = 888
+
+    await mafia.start_mafia_game(game, ctx)
+
+    # Verifications:
+    # 1. Previous pinned message was unpinned
+    ctx.bot.unpin_chat_message.assert_called_once_with(chat_id=-1001, message_id=888)
+    # 2. New message was pinned with disable_notification=True
+    ctx.bot.pin_chat_message.assert_called_once_with(chat_id=-1001, message_id=999, disable_notification=True)
+    assert game.pinned_message_id == 999
+    assert mafia.LAST_PINNED_MAFIA_MESSAGES[-1001] == 999
+
+    # 3. When game ends, pinned message is preserved
+    await mafia.end_mafia_game(game, "town", ctx)
+    # unpin_chat_message shouldn't be called on end
+    assert ctx.bot.unpin_chat_message.call_count == 1
+    assert mafia.LAST_PINNED_MAFIA_MESSAGES[-1001] == 999
+
+
+@pytest.mark.asyncio
+async def test_message_pinning_permission_failure_graceful():
+    u1, _, _ = make_mock_update(make_mock_user(101, "Alice"), chat_id=-1001)
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+    start_msg_mock = MagicMock()
+    start_msg_mock.message_id = 999
+    ctx.bot.send_message = AsyncMock(return_value=start_msg_mock)
+    from telegram.error import BadRequest
+    ctx.bot.pin_chat_message = AsyncMock(side_effect=BadRequest("Not enough rights to pin messages"))
+    ctx.bot.unpin_chat_message = AsyncMock()
+    ctx.args = []
+
+    await mafia.mafia_cmd(u1, ctx)
+    game = ACTIVE_GAMES[-1001]
+    for uid in (102, 103, 104, 105):
+        game.add_player(uid, f"User{uid}")
+
+    # Game should start smoothly without raising an unhandled exception
+    started = await mafia.start_mafia_game(game, ctx)
+    assert started is True
+    assert game.status == "night"
+    game.cancel_phase_timer()
+
+@pytest.mark.asyncio
+async def test_full_lifecycle_and_simultaneous_games():
+    # Group 1 and Group 2 simultaneously
+    u1, _, _ = make_mock_update(make_mock_user(101, "Alice"), chat_id=-1001)
+    u2, _, _ = make_mock_update(make_mock_user(201, "Bob"), chat_id=-1002)
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+    start_msg1 = MagicMock()
+    start_msg1.message_id = 1111
+    start_msg2 = MagicMock()
+    start_msg2.message_id = 2222
+
+    async def mock_send(chat_id, text, **kwargs):
+        m = MagicMock()
+        if chat_id == -1001:
+            m.message_id = 1111
+        elif chat_id == -1002:
+            m.message_id = 2222
+        else:
+            m.message_id = 3333
+        return m
+
+    ctx.bot.send_message.side_effect = mock_send
+    ctx.args = []
+
+    # Create lobbies
+    await mafia.mafia_cmd(u1, ctx)
+    await mafia.mafia_cmd(u2, ctx)
+
+    g1 = ACTIVE_GAMES[-1001]
+    g2 = ACTIVE_GAMES[-1002]
+
+    # Populate players
+    for uid in (102, 103, 104, 105):
+        g1.add_player(uid, f"User{uid}")
+    for uid in (202, 203, 204, 205):
+        g2.add_player(uid, f"User{uid}")
+
+    # Start games
+    await mafia.start_mafia_game(g1, ctx)
+    await mafia.start_mafia_game(g2, ctx)
+
+    assert g1.status == "night"
+    assert g2.status == "night"
+    assert g1.pinned_message_id == 1111
+    assert g2.pinned_message_id == 2222
+    assert g1.game_id != g2.game_id
+
+    # Resolve Night 1 on g1
+    await mafia.resolve_night_phase(g1, ctx)
+    assert g1.status == "discussion"
+    assert g2.status == "night"  # g2 remains in night!
+
+    # Discussion ends on g1 -> starts voting
+    await mafia.begin_voting_phase(g1, ctx)
+    assert g1.status == "voting"
+    assert g2.status == "night"
+
+    # Eliminate all mafia in g1
+    mafia_p = [p for p in g1.players.values() if p.role == "mafia"][0]
+    town_ps = [p for p in g1.players.values() if p.role != "mafia"]
+    for tp in town_ps:
+        g1.day_votes[tp.user_id] = mafia_p.user_id
+
+    await mafia.resolve_voting_phase(g1, ctx)
+    # g1 ends
+    assert g1.status == "ended"
+    assert -1001 not in ACTIVE_GAMES
+
+    # g2 is still going
+    assert -1002 in ACTIVE_GAMES
+    assert g2.status == "night"
+
+    g2.cancel_phase_timer()

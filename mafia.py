@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 # Game configurations
 MIN_PLAYERS = 5
 MAX_PLAYERS = 16
+LOBBY_DURATION = 60        # seconds
 NIGHT_DURATION = 45        # seconds
 DISCUSSION_DURATION = 45   # seconds
 VOTING_DURATION = 45       # seconds
@@ -52,6 +53,8 @@ DOCTOR_SELF_HEAL = True
 
 # In-memory active games keyed by chat_id
 ACTIVE_GAMES: Dict[int, "MafiaGame"] = {}
+# Track last pinned mafia game announcement message ID per chat: chat_id -> message_id
+LAST_PINNED_MAFIA_MESSAGES: Dict[int, int] = {}
 
 
 @dataclass
@@ -87,6 +90,8 @@ class MafiaGame:
         self.round_num = 0
         self.phase_deadline = 0
         self.phase_task: Optional[asyncio.Task] = None
+        self.active_timer_phase: Optional[str] = None
+        self.pinned_message_id: Optional[int] = None
 
         # Night state
         self.night_mafia_targets: Dict[int, int] = {}       # mafia_user_id -> target_user_id
@@ -141,8 +146,10 @@ class MafiaGame:
 
     def cancel_phase_timer(self):
         if self.phase_task and not self.phase_task.done():
+            logger.debug(f"[Mafia {self.game_id}] Cancelling timer for phase '{self.active_timer_phase}'")
             self.phase_task.cancel()
-            self.phase_task = None
+        self.phase_task = None
+        self.active_timer_phase = None
 
     def assign_roles(self):
         """
@@ -259,6 +266,109 @@ def build_discussion_action_keyboard(game_id: str) -> InlineKeyboardMarkup:
 # CORE GAME FLOW & ASYNC LOOPS
 # ----------------------------------------------------------------------------
 
+def start_phase_timer(
+    game: MafiaGame,
+    phase: str,
+    duration: int,
+    callback,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    """
+    Schedules an isolated, robust timer for a given phase and game_id.
+    - Cancels any existing phase timer for this game.
+    - Prevents duplicate timers for the same game and phase.
+    - Guarantees termination condition: after duration (or when expired),
+      executes callback if game is still active in this phase.
+    - Properly catches Telegram edit/send failures, cancellations, and unexpected exceptions.
+    - Logs detailed debug events with game_id, phase, duration, and status transitions.
+    """
+    game.cancel_phase_timer()
+    game.active_timer_phase = phase
+    game.phase_deadline = time.time() + duration
+
+    logger.debug(
+        f"[Mafia {game.game_id}] Timer started for phase '{phase}' | "
+        f"Duration: {duration}s | Deadline: {game.phase_deadline:.2f}"
+    )
+
+    async def _timer_runner():
+        try:
+            # We can sleep in short slices or full duration.
+            # Using asyncio.sleep with remaining time ensures guaranteed termination
+            # without drift or busy loops.
+            while True:
+                remaining = game.phase_deadline - time.time()
+                if remaining <= 0:
+                    break
+                # Sleep up to remaining time or 5s slices to log remaining time
+                sleep_chunk = min(remaining, 5.0)
+                await asyncio.sleep(sleep_chunk)
+                current_rem = max(0, int(game.phase_deadline - time.time()))
+                logger.debug(
+                    f"[Mafia {game.game_id}] Phase '{phase}' timer running: {current_rem}s remaining"
+                )
+
+            logger.info(
+                f"[Mafia {game.game_id}] Timer expired for phase '{phase}'. Triggering transition."
+            )
+
+            if game.status == phase:
+                await callback(game, context)
+            else:
+                logger.debug(
+                    f"[Mafia {game.game_id}] Timer expired for phase '{phase}', but game.status is now '{game.status}'. Skipping callback."
+                )
+        except asyncio.CancelledError:
+            logger.debug(f"[Mafia {game.game_id}] Timer task cancelled for phase '{phase}'.")
+            raise
+        except Exception as e:
+            logger.error(
+                f"[Mafia {game.game_id}] Unexpected exception in timer for phase '{phase}': {e}",
+                exc_info=True
+            )
+            # Try to safely execute callback if game is still in this phase so game doesn't get stuck
+            if game.status == phase:
+                try:
+                    await callback(game, context)
+                except Exception as inner_e:
+                    logger.error(f"[Mafia {game.game_id}] Failed executing fallback callback for phase '{phase}': {inner_e}")
+        finally:
+            if game.active_timer_phase == phase:
+                game.active_timer_phase = None
+
+    task = asyncio.create_task(_timer_runner())
+    game.phase_task = task
+    return task
+
+
+async def handle_lobby_timeout(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Triggered when lobby timer expires:
+    - If len(players) >= MIN_PLAYERS: automatically start the game.
+    - Otherwise: cancel game and notify players.
+    """
+    logger.info(f"[Mafia {game.game_id}] Lobby timer expired. Player count: {len(game.players)}/{MIN_PLAYERS}")
+    if game.status != "lobby":
+        return
+
+    if len(game.players) >= MIN_PLAYERS:
+        await start_mafia_game(game, context)
+    else:
+        game.cancel_phase_timer()
+        game.status = "ended"
+        ACTIVE_GAMES.pop(game.chat_id, None)
+        cancel_msg = (
+            "⏳ <b>Lobby Expired!</b> 🌸\n\n"
+            f"The Mafia game recruitment timed out without reaching the required <b>{MIN_PLAYERS}</b> players "
+            f"(only <b>{len(game.players)}</b> joined).\n"
+            "The lobby has been disbanded. Start a new one with <code>/mafia</code> when you are ready!"
+        )
+        try:
+            await context.bot.send_message(chat_id=game.chat_id, text=cancel_msg, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"[Mafia {game.game_id}] Failed to send lobby timeout message: {e}")
+
+
 async def start_mafia_game(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
     Initializes role assignments, delivers private roles, and begins Night 1.
@@ -310,8 +420,79 @@ async def start_mafia_game(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE) 
     # Start Night 1
     game.status = "night"
     game.round_num = 1
+
+    # Pin game-start announcement in group
+    await send_and_pin_start_announcement(game, context)
+
     await begin_night_phase(game, context)
     return True
+
+
+async def send_and_pin_start_announcement(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Sends the game-start announcement message containing player list and initial game information,
+    and pins it using Telegram's pin-chat-message functionality.
+    - Automatically unpins the previous Mafia game announcement in this chat if tracked.
+    - Does not unpin unrelated messages or other administrators' pins.
+    - Tracks the pinned message ID separately for each game_id and chat.
+    - Handles cases where bot lacks permission to pin messages without interrupting the game.
+    - Does not send an extra notification just for pinning (disable_notification=True).
+    """
+    player_lines = []
+    for idx, p in enumerate(game.players.values(), 1):
+        player_lines.append(f"{idx}. {p.mention()}{' (Host)' if p.is_host else ''}")
+    players_text = "\n".join(player_lines)
+
+    announcement_text = (
+        "🎮 <b>The Mafia Game Has Begun!</b> 🌙✨\n\n"
+        f"<b>Game ID:</b> <code>{game.game_id}</code>\n"
+        f"<b>Host:</b> {format_player_mention(game.host_id, game.host_name)}\n"
+        f"<b>Total Citizens:</b> {len(game.players)}\n\n"
+        "📜 <b>Confirmed Town Council:</b>\n"
+        f"{players_text}\n\n"
+        "🎭 Secret roles have been delivered via private DM!\n"
+        "Keep your wits sharp, interrogate every clue, and root out the underworld conspirators. "
+        "Night 1 is underway!"
+    )
+
+    try:
+        start_msg = await context.bot.send_message(
+            chat_id=game.chat_id,
+            text=announcement_text,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"[Mafia {game.game_id}] Failed to send game-start announcement in {game.chat_id}: {e}")
+        return
+
+    # Unpin previous Mafia game announcement in this chat if exists
+    prev_pinned_id = LAST_PINNED_MAFIA_MESSAGES.get(game.chat_id)
+    if prev_pinned_id:
+        try:
+            logger.debug(f"[Mafia {game.game_id}] Unpinning previous Mafia announcement msg {prev_pinned_id} in {game.chat_id}")
+            await context.bot.unpin_chat_message(
+                chat_id=game.chat_id,
+                message_id=prev_pinned_id
+            )
+        except (BadRequest, Forbidden, TelegramError) as e:
+            logger.warning(f"[Mafia {game.game_id}] Could not unpin previous Mafia announcement {prev_pinned_id}: {e}")
+        except Exception as e:
+            logger.warning(f"[Mafia {game.game_id}] Unexpected error unpinning previous announcement: {e}")
+
+    # Pin the new start announcement message
+    try:
+        logger.debug(f"[Mafia {game.game_id}] Pinning start announcement message {start_msg.message_id} in {game.chat_id}")
+        await context.bot.pin_chat_message(
+            chat_id=game.chat_id,
+            message_id=start_msg.message_id,
+            disable_notification=True
+        )
+        game.pinned_message_id = start_msg.message_id
+        LAST_PINNED_MAFIA_MESSAGES[game.chat_id] = start_msg.message_id
+    except (BadRequest, Forbidden, TelegramError) as e:
+        logger.warning(f"[Mafia {game.game_id}] Lacking permission to pin message or Telegram error: {e}")
+    except Exception as e:
+        logger.error(f"[Mafia {game.game_id}] Unexpected error while pinning game announcement: {e}")
 
 
 async def begin_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE):
@@ -392,18 +573,7 @@ async def begin_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE)
                 logger.warning(f"Failed to send doctor prompt to {doc.user_id}: {e}")
 
     # Schedule night timeout
-    game.cancel_phase_timer()
-    game.phase_deadline = time.time() + NIGHT_DURATION
-
-    async def night_timer():
-        try:
-            await asyncio.sleep(NIGHT_DURATION)
-            if game.status == "night":
-                await resolve_night_phase(game, context)
-        except asyncio.CancelledError:
-            pass
-
-    game.phase_task = asyncio.create_task(night_timer())
+    start_phase_timer(game, "night", NIGHT_DURATION, resolve_night_phase, context)
 
 
 def check_all_night_actions_submitted(game: MafiaGame) -> bool:
@@ -495,18 +665,7 @@ async def begin_discussion_phase(game: MafiaGame, context: ContextTypes.DEFAULT_
         reply_markup=build_discussion_action_keyboard(game.game_id)
     )
 
-    game.cancel_phase_timer()
-    game.phase_deadline = time.time() + DISCUSSION_DURATION
-
-    async def disc_timer():
-        try:
-            await asyncio.sleep(DISCUSSION_DURATION)
-            if game.status == "discussion":
-                await begin_voting_phase(game, context)
-        except asyncio.CancelledError:
-            pass
-
-    game.phase_task = asyncio.create_task(disc_timer())
+    start_phase_timer(game, "discussion", DISCUSSION_DURATION, begin_voting_phase, context)
 
 
 async def begin_voting_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE):
@@ -527,18 +686,7 @@ async def begin_voting_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE
         reply_markup=build_voting_keyboard(game.game_id, alive)
     )
 
-    game.cancel_phase_timer()
-    game.phase_deadline = time.time() + VOTING_DURATION
-
-    async def vote_timer():
-        try:
-            await asyncio.sleep(VOTING_DURATION)
-            if game.status == "voting":
-                await resolve_voting_phase(game, context)
-        except asyncio.CancelledError:
-            pass
-
-    game.phase_task = asyncio.create_task(vote_timer())
+    start_phase_timer(game, "voting", VOTING_DURATION, resolve_voting_phase, context)
 
 
 async def resolve_voting_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE):
@@ -767,6 +915,7 @@ async def create_mafia_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE)
         min_players=MIN_PLAYERS
     )
     await msg.reply_html(lobby_text, reply_markup=build_lobby_keyboard(game.game_id, bot_username))
+    start_phase_timer(game, "lobby", LOBBY_DURATION, handle_lobby_timeout, context)
 
 
 async def join_mafia_lobby(update: Update, context: ContextTypes.DEFAULT_TYPE):
