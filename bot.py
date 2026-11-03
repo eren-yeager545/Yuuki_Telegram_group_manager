@@ -38,6 +38,7 @@ from handlers.ai_chat import (
 import store
 import html
 from handlers.afk import afk_cmd, format_afk_duration, extract_mentioned_afk_users
+from handlers.meters import love_cmd, look_cmd, brain_cmd, stupid_cmd, crush_cmd
 
 import tornado.web
 from telegram.ext._utils.webhookhandler import WebhookAppClass
@@ -1474,6 +1475,11 @@ def main():
         ('towhatsapp', towhatsapp_cmd, 'Utility Commands', 'Convert Telegram sticker pack to WhatsApp format', '/towhatsapp https://t.me/addstickers/pack_name'),
         ('mypersona', mypersona_cmd, 'Utility Commands', 'Show your currently selected AI persona', '/mypersona'),
         ('resetpersona', resetpersona_cmd, 'Utility Commands', 'Reset your AI persona to Yuki', '/resetpersona'),
+        ('love', love_cmd, 'Users Commands', 'Show love compatibility meter', '/love [@user]'),
+        ('look', look_cmd, 'Users Commands', 'Show looks meter', '/look [@user]'),
+        ('brain', brain_cmd, 'Users Commands', 'Show intelligence meter', '/brain [@user]'),
+        ('stupid', stupid_cmd, 'Users Commands', 'Show funny stupidity meter', '/stupid [@user]'),
+        ('crush', crush_cmd, 'Users Commands', 'Show crush compatibility meter', '/crush [@user]'),
     ]
     admin_cmds = [
         ('approve', approve_cmd, 'Group Management Commands', 'Approve a replied-to user or specified user ID to bypass moderation restrictions', '/approve'),
