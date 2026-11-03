@@ -449,8 +449,11 @@ async def mybot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(text, parse_mode='HTML', reply_markup=build_mybot_keyboard())
 
 async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from handlers.ai_chat import handle_ai_chat, send_persona_selection_menu
+    from handlers.ai_chat import handle_ai_chat, send_persona_selection_menu, try_react_to_message
+    import asyncio
     msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
     if not msg:
         return
 
@@ -462,6 +465,8 @@ async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_persona_selection_menu(update, context)
         return
 
+    if chat and user and not getattr(user, 'is_bot', False):
+        asyncio.create_task(try_react_to_message(msg, chat.id))
     await handle_ai_chat(update, context, prompt_override=prompt)
 
 

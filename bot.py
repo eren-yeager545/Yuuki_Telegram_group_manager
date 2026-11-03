@@ -32,7 +32,8 @@ from handlers.ai_chat import (
     handle_ai_chat,
     should_trigger_yuki,
     process_active_interaction_and_reaction,
-    persona_callback_handler
+    persona_callback_handler,
+    try_react_to_message
 )
 import store
 import html
@@ -159,7 +160,15 @@ def register_help(app: Application, category: str, command: str, usage: str, exa
 
 
 def add_registered_command(app: Application, name: str, callback, category: str, usage: str, example: str):
-    app.add_handler(CommandHandler(name, callback))
+    async def command_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+        if msg and chat and user and not getattr(user, 'is_bot', False):
+            asyncio.create_task(try_react_to_message(msg, chat.id))
+        return await callback(update, context)
+
+    app.add_handler(CommandHandler(name, command_wrapper))
     register_help(app, category, f'/{name}', usage, example)
 
 
@@ -996,21 +1005,25 @@ async def _internal_message_router(update: Update, context: ContextTypes.DEFAULT
             if first_word in ('.safe', '/safe'):
                 if not context.args and len(txt_check.split()) > 1:
                     context.args = txt_check.split()[1:]
+                asyncio.create_task(try_react_to_message(msg, chat.id))
                 await safe_cmd(update, context)
                 return
             elif first_word in ('.normie', '/normie'):
                 if not context.args and len(txt_check.split()) > 1:
                     context.args = txt_check.split()[1:]
+                asyncio.create_task(try_react_to_message(msg, chat.id))
                 await normie_cmd(update, context)
                 return
             elif first_word in ('.slist', '/slist'):
                 if not context.args and len(txt_check.split()) > 1:
                     context.args = txt_check.split()[1:]
+                asyncio.create_task(try_react_to_message(msg, chat.id))
                 await slist_cmd(update, context)
                 return
 
         txt_check = (msg.text or msg.caption or '').strip()
         if txt_check and re.match(r'^@all(\s|$)', txt_check, re.IGNORECASE):
+            asyncio.create_task(try_react_to_message(msg, chat.id))
             await tag_cmd(update, context)
             return
 
