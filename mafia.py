@@ -91,6 +91,7 @@ class MafiaGame:
         self.phase_deadline = 0
         self.phase_task: Optional[asyncio.Task] = None
         self.active_timer_phase: Optional[str] = None
+        self.timer_generation: int = 0
         self.pinned_message_id: Optional[int] = None
 
         # Night state
@@ -145,6 +146,7 @@ class MafiaGame:
         return [p for p in self.players.values() if p.role != "mafia" and (not alive_only or p.is_alive)]
 
     def cancel_phase_timer(self):
+        self.timer_generation += 1
         if self.phase_task and not self.phase_task.done():
             logger.debug(f"[Mafia {self.game_id}] Cancelling timer for phase '{self.active_timer_phase}'")
             self.phase_task.cancel()
@@ -274,66 +276,72 @@ def start_phase_timer(
     context: ContextTypes.DEFAULT_TYPE
 ):
     """
-    Schedules an isolated, robust timer for a given phase and game_id.
+    Schedules an isolated, robust timer for a given phase, chat_id, and game_id.
     - Cancels any existing phase timer for this game.
-    - Prevents duplicate timers for the same game and phase.
-    - Guarantees termination condition: after duration (or when expired),
-      executes callback if game is still active in this phase.
+    - Prevents duplicate timer executions using timer_generation and phase checks.
+    - Guarantees termination condition: when deadline expires,
+      executes callback if game is still active in this phase and generation matches.
     - Properly catches Telegram edit/send failures, cancellations, and unexpected exceptions.
     - Logs detailed debug events with game_id, phase, duration, and status transitions.
     """
     game.cancel_phase_timer()
+    gen = game.timer_generation
     game.active_timer_phase = phase
     game.phase_deadline = time.time() + duration
 
     logger.debug(
-        f"[Mafia {game.game_id}] Timer started for phase '{phase}' | "
+        f"[Mafia {game.game_id}] Timer started for phase '{phase}' (gen {gen}) | "
         f"Duration: {duration}s | Deadline: {game.phase_deadline:.2f}"
     )
 
     async def _timer_runner():
         try:
-            # We can sleep in short slices or full duration.
-            # Using asyncio.sleep with remaining time ensures guaranteed termination
-            # without drift or busy loops.
             while True:
                 remaining = game.phase_deadline - time.time()
                 if remaining <= 0:
                     break
-                # Sleep up to remaining time or 5s slices to log remaining time
                 sleep_chunk = min(remaining, 5.0)
                 await asyncio.sleep(sleep_chunk)
+                if game.timer_generation != gen or game.status != phase:
+                    logger.debug(
+                        f"[Mafia {game.game_id}] Phase '{phase}' (gen {gen}) preempted/cancelled. Exiting timer runner."
+                    )
+                    return
                 current_rem = max(0, int(game.phase_deadline - time.time()))
                 logger.debug(
                     f"[Mafia {game.game_id}] Phase '{phase}' timer running: {current_rem}s remaining"
                 )
 
             logger.info(
-                f"[Mafia {game.game_id}] Timer expired for phase '{phase}'. Triggering transition."
+                f"[Mafia {game.game_id}] Timer expired for phase '{phase}' (gen {gen}). Triggering transition."
             )
 
-            if game.status == phase:
+            if game.timer_generation == gen and game.status == phase:
+                game.timer_generation += 1
+                game.active_timer_phase = None
                 await callback(game, context)
             else:
                 logger.debug(
-                    f"[Mafia {game.game_id}] Timer expired for phase '{phase}', but game.status is now '{game.status}'. Skipping callback."
+                    f"[Mafia {game.game_id}] Timer expired for phase '{phase}' (gen {gen}), but status is '{game.status}' (cur gen {game.timer_generation}). Skipping callback."
                 )
         except asyncio.CancelledError:
-            logger.debug(f"[Mafia {game.game_id}] Timer task cancelled for phase '{phase}'.")
+            logger.debug(f"[Mafia {game.game_id}] Timer task cancelled for phase '{phase}' (gen {gen}).")
             raise
         except Exception as e:
             logger.error(
-                f"[Mafia {game.game_id}] Unexpected exception in timer for phase '{phase}': {e}",
+                f"[Mafia {game.game_id}] Unexpected exception in timer for phase '{phase}' (gen {gen}): {e}",
                 exc_info=True
             )
             # Try to safely execute callback if game is still in this phase so game doesn't get stuck
-            if game.status == phase:
+            if game.timer_generation == gen and game.status == phase:
                 try:
+                    game.timer_generation += 1
+                    game.active_timer_phase = None
                     await callback(game, context)
                 except Exception as inner_e:
                     logger.error(f"[Mafia {game.game_id}] Failed executing fallback callback for phase '{phase}': {inner_e}")
         finally:
-            if game.active_timer_phase == phase:
+            if game.timer_generation == gen and game.active_timer_phase == phase:
                 game.active_timer_phase = None
 
     task = asyncio.create_task(_timer_runner())
@@ -572,8 +580,11 @@ async def begin_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE)
             except Exception as e:
                 logger.warning(f"Failed to send doctor prompt to {doc.user_id}: {e}")
 
-    # Schedule night timeout
-    start_phase_timer(game, "night", NIGHT_DURATION, resolve_night_phase, context)
+    # Schedule night timeout (passing is_timeout=True)
+    async def _on_night_timeout(g, ctx):
+        await resolve_night_phase(g, ctx, is_timeout=True)
+
+    start_phase_timer(game, "night", NIGHT_DURATION, _on_night_timeout, context)
 
 
 def check_all_night_actions_submitted(game: MafiaGame) -> bool:
@@ -593,25 +604,58 @@ def check_all_night_actions_submitted(game: MafiaGame) -> bool:
     return True
 
 
-async def resolve_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE):
+async def resolve_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE, is_timeout: bool = False):
     """Resolves night actions deterministically and starts Day discussion."""
     game.cancel_phase_timer()
     if game.status != "night":
         return
 
-    # Determine Mafia target by plurality
+    # 1. Inactivity penalties for required night action roles (only if deadline timed out)
+    # Living Mafia, Doctor, Detective must submit actions; Villagers have no night action.
+    inactive_eliminated: List[MafiaPlayer] = []
+
+    if is_timeout:
+        # Mafia inactivity
+        mafia_alive = game.get_mafia_players(alive_only=True)
+        for m in mafia_alive:
+            if m.user_id not in game.night_mafia_targets:
+                inactive_eliminated.append(m)
+
+        # Detective inactivity
+        for p in game.get_alive_players():
+            if p.role == "detective" and game.night_detective_target is None:
+                inactive_eliminated.append(p)
+
+        # Doctor inactivity
+        for p in game.get_alive_players():
+            if p.role == "doctor" and game.night_doctor_target is None:
+                inactive_eliminated.append(p)
+
+    for inact_p in inactive_eliminated:
+        if inact_p.is_alive:
+            inact_p.is_alive = False
+            try:
+                await context.bot.send_message(
+                    chat_id=inact_p.user_id,
+                    text=get_farewell_dm_text(),
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+
+    # 2. Determine Mafia target by plurality
     final_victim_id: Optional[int] = None
     if game.night_mafia_targets:
         counts = Counter(game.night_mafia_targets.values())
-        # Most common target; deterministic tie break by lowest target id
         top_candidates = counts.most_common()
         top_vote_cnt = top_candidates[0][1]
         tied_targets = [t for t, cnt in top_candidates if cnt == top_vote_cnt]
         final_victim_id = min(tied_targets)
 
-    # Check Doctor protection
+    # Check Doctor protection (only if Doctor was active/alive)
+    doctor_survived = any(p.role == "doctor" and p.is_alive for p in game.players.values())
     saved_by_doctor = False
-    if final_victim_id and final_victim_id == game.night_doctor_target:
+    if doctor_survived and final_victim_id and final_victim_id == game.night_doctor_target:
         saved_by_doctor = True
         final_victim_id = None
 
@@ -620,7 +664,6 @@ async def resolve_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYP
         victim_player = game.players[final_victim_id]
         if victim_player.is_alive:
             victim_player.is_alive = False
-            # Send farewell message to victim
             try:
                 await context.bot.send_message(
                     chat_id=victim_player.user_id,
@@ -629,12 +672,6 @@ async def resolve_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYP
                 )
             except Exception:
                 pass
-
-    # Check game over immediately after night deaths
-    win = game.check_win_condition()
-    if win:
-        await end_mafia_game(game, win, context)
-        return
 
     # Morning announcement in group
     survivors = game.get_alive_players()
@@ -648,7 +685,25 @@ async def resolve_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYP
         survivor_count=len(survivors),
         doctor_saved=saved_by_doctor
     )
+
+    if inactive_eliminated:
+        inact_lines = [
+            f"• {format_player_mention(p.user_id, p.name)} ({get_role_display_name(p.role)})"
+            for p in inactive_eliminated
+        ]
+        morning_text += (
+            f"\n\n⚡ <b>Inactivity Penalties:</b>\n"
+            f"The following citizens failed to perform their nocturnal duty before the deadline and perished in the fog:\n"
+            + "\n".join(inact_lines)
+        )
+
     await context.bot.send_message(chat_id=game.chat_id, text=morning_text, parse_mode="HTML")
+
+    # Check game over immediately after night deaths and inactivity eliminations
+    win = game.check_win_condition()
+    if win:
+        await end_mafia_game(game, win, context)
+        return
 
     # Transition to daytime discussion
     await begin_discussion_phase(game, context)
@@ -686,31 +741,54 @@ async def begin_voting_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE
         reply_markup=build_voting_keyboard(game.game_id, alive)
     )
 
-    start_phase_timer(game, "voting", VOTING_DURATION, resolve_voting_phase, context)
+    async def _on_voting_timeout(g, ctx):
+        await resolve_voting_phase(g, ctx, is_timeout=True)
+
+    start_phase_timer(game, "voting", VOTING_DURATION, _on_voting_timeout, context)
 
 
-async def resolve_voting_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE):
-    """Tallies votes and eliminates player if plurality is reached."""
+async def resolve_voting_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE, is_timeout: bool = False):
+    """Tallies votes, eliminates inactive non-voters, and eliminates player if plurality is reached."""
     game.cancel_phase_timer()
     if game.status != "voting":
         return
 
-    alive = game.get_alive_players()
-    alive_ids = {p.user_id for p in alive}
+    alive_before = game.get_alive_players()
+    alive_ids_before = {p.user_id for p in alive_before}
 
-    # Count votes
+    # 1. Eliminate inactive players who did not cast a vote or skip before deadline (only if timed out)
+    inactive_eliminated: List[MafiaPlayer] = []
+    if is_timeout:
+        for p in alive_before:
+            if p.user_id not in game.day_votes:
+                inactive_eliminated.append(p)
+
+    for inact_p in inactive_eliminated:
+        if inact_p.is_alive:
+            inact_p.is_alive = False
+            try:
+                await context.bot.send_message(
+                    chat_id=inact_p.user_id,
+                    text=get_farewell_dm_text(),
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+
+    # 2. Count votes from players who submitted valid votes and are alive
     valid_votes = {
         voter: target
         for voter, target in game.day_votes.items()
-        if voter in alive_ids
+        if voter in alive_ids_before and game.players[voter].is_alive
     }
+
+    alive_targets_ids = {p.user_id for p in game.get_alive_players()}
 
     lynched_player: Optional[MafiaPlayer] = None
     max_votes = 0
 
     if valid_votes:
-        # Separate player targets from skip (-1)
-        player_votes = [t for t in valid_votes.values() if t in alive_ids]
+        player_votes = [t for t in valid_votes.values() if t in alive_targets_ids]
         skip_count = sum(1 for t in valid_votes.values() if t == -1)
 
         if player_votes:
@@ -718,13 +796,12 @@ async def resolve_voting_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TY
             top_candidates = counter.most_common()
             top_target, top_cnt = top_candidates[0]
 
-            # Check if tied with another player or exceeded by skips
             tied = len([t for t, cnt in top_candidates if cnt == top_cnt]) > 1
             if not tied and top_cnt > skip_count:
                 lynched_player = game.players.get(top_target)
                 max_votes = top_cnt
 
-    if lynched_player:
+    if lynched_player and lynched_player.is_alive:
         lynched_player.is_alive = False
         # Credit elimination
         for voter, target in valid_votes.items():
@@ -753,6 +830,18 @@ async def resolve_voting_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TY
         vote_count=max_votes,
         survivor_count=len(survivors)
     )
+
+    if inactive_eliminated:
+        inact_lines = [
+            f"• {format_player_mention(p.user_id, p.name)} ({get_role_display_name(p.role)})"
+            for p in inactive_eliminated
+        ]
+        lynch_msg += (
+            f"\n\n⚡ <b>Inactivity Penalties:</b>\n"
+            f"The following citizens failed to cast a vote before the deadline and were banished for non-participation:\n"
+            + "\n".join(inact_lines)
+        )
+
     await context.bot.send_message(chat_id=game.chat_id, text=lynch_msg, parse_mode="HTML")
 
     # Check victory conditions
@@ -1341,11 +1430,16 @@ async def mafia_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         try:
             target_id = int(parts[2])
         except (ValueError, IndexError):
-            await query.answer()
+            await query.answer("Invalid target.", show_alert=True)
+            return
+
+        target_player = game.players.get(target_id)
+        if not target_player or not target_player.is_alive:
+            await query.answer("Target player is no longer alive!", show_alert=True)
             return
 
         game.night_mafia_targets[user.id] = target_id
-        target_name = game.players[target_id].name if target_id in game.players else "Target"
+        target_name = target_player.name
         await query.answer(f"Target selected: {target_name} 🎯")
         try:
             await query.edit_message_text(f"🔴 Target confirmed: <b>{html.escape(target_name)}</b>. Awaiting dawn...", parse_mode="HTML")
@@ -1370,14 +1464,19 @@ async def mafia_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         try:
             target_id = int(parts[2])
         except (ValueError, IndexError):
-            await query.answer()
+            await query.answer("Invalid target.", show_alert=True)
+            return
+
+        target_player = game.players.get(target_id)
+        if not target_player or not target_player.is_alive:
+            await query.answer("Target player is no longer alive!", show_alert=True)
+            return
+
+        if target_id == user.id:
+            await query.answer("You cannot investigate yourself!", show_alert=True)
             return
 
         game.night_detective_target = target_id
-        target_player = game.players.get(target_id)
-        if not target_player:
-            await query.answer("Target not found.")
-            return
 
         is_threat = (target_player.role == "mafia")
         res_text = (
@@ -1409,12 +1508,20 @@ async def mafia_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         try:
             target_id = int(parts[2])
         except (ValueError, IndexError):
-            await query.answer()
+            await query.answer("Invalid target.", show_alert=True)
+            return
+
+        target_player = game.players.get(target_id)
+        if not target_player or not target_player.is_alive:
+            await query.answer("Target player is no longer alive!", show_alert=True)
+            return
+
+        if not DOCTOR_SELF_HEAL and target_id == user.id:
+            await query.answer("You cannot protect yourself!", show_alert=True)
             return
 
         game.night_doctor_target = target_id
-        target_player = game.players.get(target_id)
-        target_name = target_player.name if target_player else "Patient"
+        target_name = target_player.name
 
         await query.answer(f"Protection granted to {target_name}!")
         try:
