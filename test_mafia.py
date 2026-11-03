@@ -763,3 +763,341 @@ async def test_full_lifecycle_and_simultaneous_games():
     assert g2.status == "night"
 
     g2.cancel_phase_timer()
+
+
+# =========================================================================
+# REQUIRED SPECIFIC ISSUE TESTS (TEST 1 - TEST 9)
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_scenario_1_mafia_targets_doctor_doctor_protects_self():
+    """TEST 1: Mafia targets Doctor on Night 1. Doctor protects themselves. Doctor survives."""
+    game = MafiaGame(chat_id=-1001, chat_title="Group", host_id=101, host_name="Alice")
+    for uid in (102, 103, 104, 105):
+        game.add_player(uid, f"P{uid}")
+
+    game.players[101].role = "mafia"
+    game.players[102].role = "detective"
+    game.players[103].role = "doctor"
+    game.players[104].role = "villager"
+    game.players[105].role = "villager"
+    game.status = "night"
+    game.round_num = 1
+    ACTIVE_GAMES[-1001] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # 1. Mafia targets Doctor 103
+    maf_cb = MagicMock(spec=Update)
+    q_maf = MagicMock(spec=CallbackQuery)
+    q_maf.data = f"mafia_night_mkill:{game.game_id}:103"
+    q_maf.from_user = make_mock_user(101, "Alice")
+    q_maf.answer = AsyncMock()
+    q_maf.edit_message_text = AsyncMock()
+    maf_cb.callback_query = q_maf
+    await mafia.mafia_callback_handler(maf_cb, ctx)
+
+    # Doctor is still alive before night resolution!
+    assert game.players[103].is_alive is True
+
+    # 2. Doctor protects themselves 103
+    doc_cb = MagicMock(spec=Update)
+    q_doc = MagicMock(spec=CallbackQuery)
+    q_doc.data = f"mafia_night_dheal:{game.game_id}:103"
+    q_doc.from_user = make_mock_user(103, "P103")
+    q_doc.answer = AsyncMock()
+    q_doc.edit_message_text = AsyncMock()
+    doc_cb.callback_query = q_doc
+    await mafia.mafia_callback_handler(doc_cb, ctx)
+
+    # 3. Detective checks player 104
+    det_cb = MagicMock(spec=Update)
+    q_det = MagicMock(spec=CallbackQuery)
+    q_det.data = f"mafia_night_dcheck:{game.game_id}:104"
+    q_det.from_user = make_mock_user(102, "P102")
+    q_det.answer = AsyncMock()
+    q_det.edit_message_text = AsyncMock()
+    det_cb.callback_query = q_det
+    await mafia.mafia_callback_handler(det_cb, ctx)
+
+    # All actions submitted -> Night resolved
+    # Doctor protected themselves, Doctor MUST survive
+    assert game.players[103].is_alive is True
+    assert game.status == "discussion"
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_scenario_2_mafia_targets_other_doctor_protects_other():
+    """TEST 2: Mafia targets another player. Doctor protects that player. The protected player survives."""
+    game = MafiaGame(chat_id=-1001, chat_title="Group", host_id=101, host_name="Alice")
+    for uid in (102, 103, 104, 105):
+        game.add_player(uid, f"P{uid}")
+
+    game.players[101].role = "mafia"
+    game.players[102].role = "detective"
+    game.players[103].role = "doctor"
+    game.players[104].role = "villager"
+    game.players[105].role = "villager"
+    game.status = "night"
+    game.round_num = 1
+    ACTIVE_GAMES[-1001] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Mafia targets 104
+    game.night_mafia_targets[101] = 104
+    # Doctor protects 104
+    game.night_doctor_target = 104
+    # Detective checks 101
+    game.night_detective_target = 101
+
+    await mafia.resolve_night_phase(game, ctx)
+    assert game.players[104].is_alive is True
+    assert game.status == "discussion"
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_scenario_3_doctor_inactivity_penalty():
+    """TEST 3: Doctor does not submit protection within 45 seconds. The configured inactivity penalty is applied."""
+    game = MafiaGame(chat_id=-1001, chat_title="Group", host_id=101, host_name="Alice")
+    for uid in (102, 103, 104, 105):
+        game.add_player(uid, f"P{uid}")
+
+    game.players[101].role = "mafia"
+    game.players[102].role = "detective"
+    game.players[103].role = "doctor"
+    game.players[104].role = "villager"
+    game.players[105].role = "villager"
+    game.status = "night"
+    game.round_num = 1
+    ACTIVE_GAMES[-1001] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Mafia and detective submit, doctor does NOT submit before timeout
+    game.night_mafia_targets[101] = 104
+    game.night_detective_target = 105
+    game.night_doctor_target = None
+
+    # Simulate night timeout expiration
+    await mafia.resolve_night_phase(game, ctx, is_timeout=True)
+
+    # Doctor 103 must be eliminated due to inactivity penalty
+    assert game.players[103].is_alive is False
+    # Player 104 was targeted without doctor protection, so eliminated as victim
+    assert game.players[104].is_alive is False
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_scenario_4_voting_inactivity_penalty():
+    """TEST 4: A living player does not vote within 45 seconds. The player is eliminated."""
+    game = MafiaGame(chat_id=-1001, chat_title="Group", host_id=101, host_name="Alice")
+    for uid in (102, 103, 104, 105):
+        game.add_player(uid, f"P{uid}")
+
+    game.players[101].role = "mafia"
+    game.players[102].role = "detective"
+    game.players[103].role = "doctor"
+    game.players[104].role = "villager"
+    game.players[105].role = "villager"
+    game.status = "voting"
+    game.round_num = 1
+    ACTIVE_GAMES[-1001] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Players 101, 102, 103, 104 vote; Player 105 does NOT vote
+    game.day_votes = {
+        101: -1,
+        102: -1,
+        103: -1,
+        104: -1
+    }
+
+    # Simulate voting deadline expiration
+    await mafia.resolve_voting_phase(game, ctx, is_timeout=True)
+
+    # Player 105 must be eliminated due to inactivity
+    assert game.players[105].is_alive is False
+    # The others who voted remain alive
+    assert game.players[101].is_alive is True
+    assert game.players[102].is_alive is True
+    assert game.players[103].is_alive is True
+    assert game.players[104].is_alive is True
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_scenario_5_all_players_active_no_penalty():
+    """TEST 5: All players submit their required actions before the deadline. No one receives an inactivity penalty."""
+    game = MafiaGame(chat_id=-1001, chat_title="Group", host_id=101, host_name="Alice")
+    for uid in (102, 103, 104, 105):
+        game.add_player(uid, f"P{uid}")
+
+    game.players[101].role = "mafia"
+    game.players[102].role = "detective"
+    game.players[103].role = "doctor"
+    game.players[104].role = "villager"
+    game.players[105].role = "villager"
+    game.status = "night"
+    game.round_num = 1
+    ACTIVE_GAMES[-1001] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # All required night roles submit
+    game.night_mafia_targets[101] = 104
+    game.night_doctor_target = 104
+    game.night_detective_target = 101
+
+    await mafia.resolve_night_phase(game, ctx, is_timeout=True)
+
+    # No inactivity penalties, and doctor saved 104 -> all 5 alive!
+    assert all(p.is_alive for p in game.players.values())
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_scenario_6_mafia_inactivity_penalty():
+    """TEST 6: Mafia does not select a target before the deadline. The configured inactivity penalty is applied."""
+    game = MafiaGame(chat_id=-1001, chat_title="Group", host_id=101, host_name="Alice")
+    for uid in (102, 103, 104, 105):
+        game.add_player(uid, f"P{uid}")
+
+    game.players[101].role = "mafia"
+    game.players[102].role = "detective"
+    game.players[103].role = "doctor"
+    game.players[104].role = "villager"
+    game.players[105].role = "villager"
+    game.status = "night"
+    game.round_num = 1
+    ACTIVE_GAMES[-1001] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Doctor and Detective submit, Mafia 101 does NOT
+    game.night_doctor_target = 104
+    game.night_detective_target = 101
+
+    await mafia.resolve_night_phase(game, ctx, is_timeout=True)
+
+    # Mafia 101 eliminated due to inactivity!
+    assert game.players[101].is_alive is False
+    # All mafia eliminated -> Town wins immediately!
+    assert game.status == "ended"
+    assert -1001 not in ACTIVE_GAMES
+
+
+@pytest.mark.asyncio
+async def test_scenario_7_multiple_games_simultaneous_isolation():
+    """TEST 7: Multiple games run simultaneously in different groups. Their timers and player states remain independent."""
+    game1 = MafiaGame(chat_id=-1001, chat_title="Group 1", host_id=101, host_name="Alice")
+    for uid in (102, 103, 104, 105):
+        game1.add_player(uid, f"P{uid}")
+
+    game2 = MafiaGame(chat_id=-1002, chat_title="Group 2", host_id=201, host_name="Bob")
+    for uid in (202, 203, 204, 205):
+        game2.add_player(uid, f"P{uid}")
+
+    ACTIVE_GAMES[-1001] = game1
+    ACTIVE_GAMES[-1002] = game2
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Start timer on game 1 in night phase
+    game1.status = "night"
+    game2.status = "night"
+
+    t1 = mafia.start_phase_timer(game1, "night", 45, mafia.resolve_night_phase, ctx)
+    t2 = mafia.start_phase_timer(game2, "night", 45, mafia.resolve_night_phase, ctx)
+
+    assert game1.game_id != game2.game_id
+    assert game1.active_timer_phase == "night"
+    assert game2.active_timer_phase == "night"
+
+    # Cancel game1 timer -> game2 timer must still be active!
+    game1.cancel_phase_timer()
+    assert game1.phase_task is None
+    assert game2.phase_task is not None
+    assert not t2.done()
+
+    game2.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_scenario_8_timer_expires_during_transition():
+    """TEST 8: The timer expires while the game is transitioning between phases. No duplicate timeout or incorrect elimination occurs."""
+    game = MafiaGame(chat_id=-1001, chat_title="Group", host_id=101, host_name="Alice")
+    for uid in (102, 103, 104, 105):
+        game.add_player(uid, f"P{uid}")
+    game.players[101].role = "mafia"
+    game.players[102].role = "detective"
+    game.players[103].role = "doctor"
+    game.players[104].role = "villager"
+    game.players[105].role = "villager"
+    game.status = "night"
+    ACTIVE_GAMES[-1001] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    call_count = 0
+    async def sample_callback(g, c):
+        nonlocal call_count
+        call_count += 1
+
+    # Start short timer
+    mafia.start_phase_timer(game, "night", 1, sample_callback, ctx)
+    # Transition game status manually to 'discussion'
+    game.status = "discussion"
+    game.cancel_phase_timer()
+
+    # Fast forward / sleep
+    await asyncio.sleep(1.2)
+    # Callback must NOT have run because phase changed and timer was cancelled
+    assert call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_scenario_9_game_ends_automatically_on_victory_after_timeout():
+    """TEST 9: The game ends automatically when a victory condition is reached after timeout processing."""
+    game = MafiaGame(chat_id=-1001, chat_title="Group", host_id=101, host_name="Alice")
+    for uid in (102, 103, 104, 105):
+        game.add_player(uid, f"P{uid}")
+    game.players[101].role = "mafia"
+    game.players[102].role = "detective"
+    game.players[103].role = "doctor"
+    game.players[104].role = "villager"
+    game.players[105].role = "villager"
+    game.status = "voting"
+    ACTIVE_GAMES[-1001] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # In voting phase: All town members fail to vote, but Mafia votes to skip
+    game.day_votes = {101: -1}
+
+    # Voting timeout triggers
+    await mafia.resolve_voting_phase(game, ctx, is_timeout=True)
+
+    # 102, 103, 104, 105 all eliminated for voting inactivity
+    assert game.players[102].is_alive is False
+    assert game.players[103].is_alive is False
+    assert game.players[104].is_alive is False
+    assert game.players[105].is_alive is False
+    assert game.players[101].is_alive is True
+
+    # 1 Mafia vs 0 Town -> Mafia wins automatically!
+    assert game.status == "ended"
+    assert -1001 not in ACTIVE_GAMES
