@@ -108,7 +108,7 @@ def extract_mentioned_afk_users(update: Update, chat_id: int = None):
                 logger.error(f"Error checking AFK for replied user: {e}")
 
     # 2. Entity mentions checking
-    entities = (msg.entities or []) + (msg.caption_entities or [])
+    entities = list(msg.entities or []) + list(msg.caption_entities or [])
     txt = msg.text or msg.caption or ""
 
     for entity in entities:
