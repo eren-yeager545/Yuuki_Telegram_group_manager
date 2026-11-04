@@ -115,10 +115,16 @@ class MafiaGame:
         self.timer_generation: int = 0
         self.pinned_message_id: Optional[int] = None
 
-        # Night state
+        self.phase_token: int = 0
+        self.roles_assigned: bool = False
+        self.start_lock: asyncio.Lock = asyncio.Lock()
+        self.resolution_lock: asyncio.Lock = asyncio.Lock()
+
+        # Per-player action tracking
+        self.night_actions: Dict[int, int] = {}             # user_id -> target_user_id
         self.night_mafia_targets: Dict[int, int] = {}       # mafia_user_id -> target_user_id
-        self.night_detective_target: Optional[int] = None
-        self.night_doctor_target: Optional[int] = None
+        self._night_detective_target: Optional[int] = None
+        self._night_doctor_target: Optional[int] = None
 
         # Day voting state
         self.day_votes: Dict[int, int] = {}                 # voter_id -> target_id (-1 for skip)
@@ -133,6 +139,46 @@ class MafiaGame:
 
         # Add host as first player
         self.add_player(host_id, host_name, host_username, is_host=True)
+
+    @property
+    def night_detective_target(self) -> Optional[int]:
+        for p in self.players.values():
+            if p.role == "detective" and p.is_alive and p.user_id in self.night_actions:
+                return self.night_actions[p.user_id]
+        return self._night_detective_target
+
+    @night_detective_target.setter
+    def night_detective_target(self, val: Optional[int]):
+        self._night_detective_target = val
+        if val is not None:
+            for p in self.players.values():
+                if p.role == "detective" and p.is_alive:
+                    self.night_actions[p.user_id] = val
+                    break
+        else:
+            for p in self.players.values():
+                if p.role == "detective":
+                    self.night_actions.pop(p.user_id, None)
+
+    @property
+    def night_doctor_target(self) -> Optional[int]:
+        for p in self.players.values():
+            if p.role == "doctor" and p.is_alive and p.user_id in self.night_actions:
+                return self.night_actions[p.user_id]
+        return self._night_doctor_target
+
+    @night_doctor_target.setter
+    def night_doctor_target(self, val: Optional[int]):
+        self._night_doctor_target = val
+        if val is not None:
+            for p in self.players.values():
+                if p.role == "doctor" and p.is_alive:
+                    self.night_actions[p.user_id] = val
+                    break
+        else:
+            for p in self.players.values():
+                if p.role == "doctor":
+                    self.night_actions.pop(p.user_id, None)
 
     def add_player(self, user_id: int, name: str, username: Optional[str] = None, is_host: bool = False, is_bot: bool = False, npc_personality: Optional[str] = None) -> bool:
         if self.status != "lobby":
@@ -223,7 +269,12 @@ class MafiaGame:
 
     def cancel_phase_timer(self):
         self.timer_generation += 1
-        if self.phase_task and not self.phase_task.done():
+        current_task = None
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            pass
+        if self.phase_task and not self.phase_task.done() and self.phase_task != current_task:
             logger.debug(f"[Mafia {self.game_id}] Cancelling timer for phase '{self.active_timer_phase}'")
             self.phase_task.cancel()
         self.phase_task = None
@@ -257,9 +308,35 @@ class MafiaGame:
         villager_count = count - len(roles_pool)
         roles_pool.extend(["villager"] * villager_count)
 
+        if self.roles_assigned:
+            logger.info(f"[Mafia {self.game_id}] Roles already assigned; skipping reassignment.")
+            self.validate_roles()
+            return
+
         random.shuffle(roles_pool)
         for player, role in zip(self.players.values(), roles_pool):
             player.role = role
+
+        self.roles_assigned = True
+        self.validate_roles()
+
+    def validate_roles(self):
+        assert len(self.players) >= MIN_PLAYERS, f"Need at least {MIN_PLAYERS} players."
+        valid_roles = {"mafia", "detective", "doctor", "villager"}
+        seen_players = set()
+        assigned_roles = []
+
+        for p_id, p in self.players.items():
+            assert p.role in valid_roles, f"Player {p_id} has invalid role {p.role}"
+            assert p_id not in seen_players, f"Duplicate player {p_id} in role distribution"
+            seen_players.add(p_id)
+            assigned_roles.append(p.role)
+
+        assert len(seen_players) == len(self.players), "Every registered player must have exactly one role."
+        assert len(assigned_roles) == len(self.players), "Total assigned roles must equal registered players."
+        assert "mafia" in assigned_roles, "Role distribution must contain at least one Mafia."
+        assert "detective" in assigned_roles, "Role distribution must contain at least one Detective."
+        assert "doctor" in assigned_roles, "Role distribution must contain at least one Doctor."
 
     def check_win_condition(self) -> Optional[str]:
         """
@@ -420,6 +497,7 @@ def start_phase_timer(
     """
     game.cancel_phase_timer()
     gen = game.timer_generation
+    token = game.phase_token
     game.active_timer_phase = phase
     game.phase_deadline = time.time() + duration
 
@@ -436,9 +514,9 @@ def start_phase_timer(
                     break
                 sleep_chunk = min(remaining, 5.0)
                 await asyncio.sleep(sleep_chunk)
-                if game.timer_generation != gen or game.status != phase:
+                if game.timer_generation != gen or game.phase_token != token or game.status != phase:
                     logger.debug(
-                        f"[Mafia {game.game_id}] Phase '{phase}' (gen {gen}) preempted/cancelled. Exiting timer runner."
+                        f"[Mafia {game.game_id}] Phase '{phase}' (gen {gen}, token {token}) preempted/cancelled. Exiting timer runner."
                     )
                     return
                 current_rem = max(0, int(game.phase_deadline - time.time()))
@@ -450,8 +528,7 @@ def start_phase_timer(
                 f"[Mafia {game.game_id}] Timer expired for phase '{phase}' (gen {gen}). Triggering transition."
             )
 
-            if game.timer_generation == gen and game.status == phase:
-                game.timer_generation += 1
+            if game.timer_generation == gen and game.phase_token == token and game.status == phase:
                 game.active_timer_phase = None
                 await callback(game, context)
             else:
@@ -467,15 +544,14 @@ def start_phase_timer(
                 exc_info=True
             )
             # Try to safely execute callback if game is still in this phase so game doesn't get stuck
-            if game.timer_generation == gen and game.status == phase:
+            if game.timer_generation == gen and game.phase_token == token and game.status == phase:
                 try:
-                    game.timer_generation += 1
                     game.active_timer_phase = None
                     await callback(game, context)
                 except Exception as inner_e:
                     logger.error(f"[Mafia {game.game_id}] Failed executing fallback callback for phase '{phase}': {inner_e}")
         finally:
-            if game.timer_generation == gen and game.active_timer_phase == phase:
+            if game.timer_generation == gen and game.phase_token == token and game.active_timer_phase == phase:
                 game.active_timer_phase = None
 
     task = asyncio.create_task(_timer_runner())
@@ -513,64 +589,75 @@ async def handle_lobby_timeout(game: MafiaGame, context: ContextTypes.DEFAULT_TY
 
 async def start_mafia_game(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
-    Initializes role assignments, delivers private roles, and begins Night 1.
+    Initializes permanent role assignments, delivers private roles, and begins Night 1.
     If private DM fails for any player, halts and alerts in group with instructions.
+    Protected against concurrent start calls and never reshuffles assigned roles.
     """
-    if len(game.players) < MIN_PLAYERS:
-        return False
+    async with game.start_lock:
+        if game.status != "lobby":
+            return False
 
-    game.assign_roles()
-    bot_info = context.bot
-    bot_username = getattr(bot_info, 'username', 'YuukiBot')
+        if len(game.players) < MIN_PLAYERS:
+            return False
 
-    # Verify and send role DMs
-    failed_deliveries: List[MafiaPlayer] = []
-    mafia_teammates = [
-        {'user_id': p.user_id, 'name': p.name}
-        for p in game.get_mafia_players(alive_only=False)
-    ]
+        game.assign_roles()
+        bot_info = context.bot
+        bot_username = getattr(bot_info, 'username', 'YuukiBot')
 
-    for p in game.players.values():
-        if p.is_bot or p.user_id < 0:
-            p.dm_verified = True
-            continue
-        role_dm = get_role_dm_text(p.role, teammates=mafia_teammates)
-        try:
-            await context.bot.send_message(
-                chat_id=p.user_id,
-                text=role_dm,
-                parse_mode="HTML"
+        # Verify and send role DMs to unverified human players
+        failed_deliveries: List[MafiaPlayer] = []
+        mafia_teammates = [
+            {'user_id': p.user_id, 'name': p.name}
+            for p in game.get_mafia_players(alive_only=False)
+        ]
+
+        for p in game.players.values():
+            if p.is_bot or p.user_id < 0:
+                p.dm_verified = True
+                continue
+            if p.dm_verified:
+                continue
+            role_dm = get_role_dm_text(p.role, teammates=mafia_teammates)
+            try:
+                await context.bot.send_message(
+                    chat_id=p.user_id,
+                    text=role_dm,
+                    parse_mode="HTML"
+                )
+                p.dm_verified = True
+            except (Forbidden, BadRequest, TelegramError) as e:
+                logger.warning(f"[Mafia {game.game_id}] Failed to deliver secret role to user {p.user_id}: {e}")
+                failed_deliveries.append(p)
+
+        if failed_deliveries:
+            game.status = "lobby"
+            failed_tags = ", ".join([p.mention() for p in failed_deliveries])
+            err_msg = (
+                "⚠️ <b>Cannot Start Game: Private Delivery Failed!</b> 📬\n\n"
+                f"The following players have not started a private chat with Yuki or have blocked the bot:\n{failed_tags}\n\n"
+                f"👉 <b>How to fix:</b> Each unverified player must tap the button below to start Yuki in private, "
+                f"then press <b>▶️ Start Game</b> again!"
             )
-            p.dm_verified = True
-        except (Forbidden, BadRequest, TelegramError) as e:
-            logger.warning(f"Failed to deliver secret role to user {p.user_id}: {e}")
-            failed_deliveries.append(p)
+            retry_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💬 Start Bot in Private", url=f"https://t.me/{bot_username}?start=mafia_reg")],
+                [InlineKeyboardButton("▶️ Retry Start Game", callback_data=f"mafia_start:{game.game_id}")]
+            ])
+            try:
+                await context.bot.send_message(chat_id=game.chat_id, text=err_msg, parse_mode="HTML", reply_markup=retry_kb)
+            except Exception as e:
+                logger.warning(f"[Mafia {game.game_id}] Failed to send delivery failure message: {e}")
+            return False
 
-    if failed_deliveries:
-        game.status = "lobby"
-        failed_tags = ", ".join([p.mention() for p in failed_deliveries])
-        err_msg = (
-            "⚠️ <b>Cannot Start Game: Private Delivery Failed!</b> 📬\n\n"
-            f"The following players have not started a private chat with Yuki or have blocked the bot:\n{failed_tags}\n\n"
-            f"👉 <b>How to fix:</b> Each unverified player must tap the button below to start Yuki in private, "
-            f"then press <b>▶️ Start Game</b> again!"
-        )
-        retry_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💬 Start Bot in Private", url=f"https://t.me/{bot_username}?start=mafia_reg")],
-            [InlineKeyboardButton("▶️ Retry Start Game", callback_data=f"mafia_start:{game.game_id}")]
-        ])
-        await context.bot.send_message(chat_id=game.chat_id, text=err_msg, parse_mode="HTML", reply_markup=retry_kb)
-        return False
+        # Start Night 1
+        game.status = "night"
+        game.round_num = 1
+        game.phase_token += 1
 
-    # Start Night 1
-    game.status = "night"
-    game.round_num = 1
+        # Pin game-start announcement in group
+        await send_and_pin_start_announcement(game, context)
 
-    # Pin game-start announcement in group
-    await send_and_pin_start_announcement(game, context)
-
-    await begin_night_phase(game, context)
-    return True
+        await begin_night_phase(game, context)
+        return True
 
 
 async def send_and_pin_start_announcement(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE):
@@ -645,9 +732,11 @@ async def begin_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE)
     Transitions to night phase and prompts night action holders via private DM.
     """
     game.status = "night"
+    game.phase_token += 1
+    game.night_actions.clear()
     game.night_mafia_targets.clear()
-    game.night_detective_target = None
-    game.night_doctor_target = None
+    game._night_detective_target = None
+    game._night_doctor_target = None
 
     alive_players = game.get_alive_players()
     alive_count = len(alive_players)
@@ -739,7 +828,8 @@ def process_npc_night_actions(game: MafiaGame):
     - Zero external AI APIs used. Pure Python state-based logic.
     - NPC Mafia: Targets living non-mafia player.
     - NPC Detective: Investigates a living citizen other than self.
-    - NPC Doctor: Protects a living citizen (self or fellow citizen).
+    - NPC Doctor: Protects an eligible living citizen (self or fellow citizen).
+    Actions are stored in per-player dictionaries without overwriting human actions.
     """
     alive_players = game.get_alive_players()
     if not alive_players:
@@ -749,24 +839,30 @@ def process_npc_night_actions(game: MafiaGame):
     alive_mafia_npcs = [p for p in game.get_mafia_players(alive_only=True) if p.is_bot]
     potential_targets = [p for p in alive_players if p.role != "mafia"] or [p for p in alive_players if not p.is_bot]
     if potential_targets:
+        human_targets = [t for uid, t in game.night_mafia_targets.items() if uid in game.players and not game.players[uid].is_bot]
         for m in alive_mafia_npcs:
             if m.user_id not in game.night_mafia_targets:
-                chosen = random.choice(potential_targets)
-                game.night_mafia_targets[m.user_id] = chosen.user_id
+                if human_targets and any(p.user_id == human_targets[0] and p.is_alive for p in potential_targets):
+                    chosen_id = human_targets[0]
+                else:
+                    chosen = random.choice(potential_targets)
+                    chosen_id = chosen.user_id
+                game.night_mafia_targets[m.user_id] = chosen_id
+                game.night_actions[m.user_id] = chosen_id
                 logger.info(
-                    f"[Mafia {game.game_id}] NPC Mafia {m.user_id} ({m.name}) targeted {chosen.user_id} ({chosen.name})"
+                    f"[Mafia {game.game_id}] NPC Mafia {m.user_id} ({m.name}) targeted {chosen_id}"
                 )
 
     # 2. NPC Detective Action
     alive_det_npcs = [p for p in alive_players if p.role == "detective" and p.is_bot]
     for d in alive_det_npcs:
-        if game.night_detective_target is None:
+        if d.user_id not in game.night_actions:
             det_options = [p for p in alive_players if p.user_id != d.user_id and p.user_id not in game.npc_detective_memory]
             if not det_options:
                 det_options = [p for p in alive_players if p.user_id != d.user_id]
             if det_options:
                 chosen = random.choice(det_options)
-                game.night_detective_target = chosen.user_id
+                game.night_actions[d.user_id] = chosen.user_id
                 game.npc_detective_memory[chosen.user_id] = 'mafia' if chosen.role == 'mafia' else 'town'
                 logger.info(
                     f"[Mafia {game.game_id}] NPC Detective {d.user_id} ({d.name}) investigated {chosen.user_id} (result: {chosen.role})"
@@ -775,11 +871,11 @@ def process_npc_night_actions(game: MafiaGame):
     # 3. NPC Doctor Action
     alive_doc_npcs = [p for p in alive_players if p.role == "doctor" and p.is_bot]
     for doc in alive_doc_npcs:
-        if game.night_doctor_target is None:
+        if doc.user_id not in game.night_actions:
             doc_options = alive_players if DOCTOR_SELF_HEAL else [p for p in alive_players if p.user_id != doc.user_id]
             if doc_options:
                 chosen = random.choice(doc_options)
-                game.night_doctor_target = chosen.user_id
+                game.night_actions[doc.user_id] = chosen.user_id
                 logger.info(
                     f"[Mafia {game.game_id}] NPC Doctor {doc.user_id} ({doc.name}) protected {chosen.user_id} ({chosen.name})"
                 )
@@ -836,17 +932,17 @@ async def announce_inactivity_elimination(player: MafiaPlayer, game: MafiaGame, 
 
 
 def check_all_night_actions_submitted(game: MafiaGame) -> bool:
-    """Checks if all alive special roles have submitted their night actions."""
+    """Checks if all alive special roles (Mafia, Detective, Doctor) have submitted their night actions."""
     mafia_alive = game.get_mafia_players(alive_only=True)
-    if any(m.user_id not in game.night_mafia_targets for m in mafia_alive):
+    if any(m.user_id not in game.night_mafia_targets and m.user_id not in game.night_actions for m in mafia_alive):
         return False
 
-    has_alive_detective = any(p.role == "detective" and p.is_alive for p in game.players.values())
-    if has_alive_detective and game.night_detective_target is None:
+    detectives_alive = [p for p in game.players.values() if p.role == "detective" and p.is_alive]
+    if any(d.user_id not in game.night_actions for d in detectives_alive):
         return False
 
-    has_alive_doctor = any(p.role == "doctor" and p.is_alive for p in game.players.values())
-    if has_alive_doctor and game.night_doctor_target is None:
+    doctors_alive = [p for p in game.players.values() if p.role == "doctor" and p.is_alive]
+    if any(doc.user_id not in game.night_actions for doc in doctors_alive):
         return False
 
     return True
@@ -855,74 +951,89 @@ def check_all_night_actions_submitted(game: MafiaGame) -> bool:
 async def resolve_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE, is_timeout: bool = False):
     """
     Resolves night actions deterministically and starts Day discussion.
-    Protection and inactivity penalties are resolved in the correct order:
-    1. Active Doctor protection is recorded and verified.
-    2. Inactivity penalties are assessed: Required nocturnal roles who failed to act are identified.
-       A successfully protected player receives the protection effect according to the game rules
-       and is not incorrectly eliminated through the inactivity-resolution process.
-    3. Mafia kill is resolved: Protected players survive if targeted.
+    Guarantees:
+    - Resolves exactly once per night phase.
+    - Timer resolution never cancels its own running task.
+    - Synchronizes NPC actions on timeout before resolving.
+    - Inactivity elimination for living Mafia, Detective, Doctor who failed to act.
+    - Villagers are not eliminated for night inactivity.
+    - Doctor protection NEVER prevents inactivity elimination. Protection only prevents eligible attacks.
+    - Victory conditions checked immediately after inactivity eliminations.
+    - Plurality Mafia kill resolved with Doctor protection shield.
+    - Victory conditions checked again after victim death.
     """
-    game.cancel_phase_timer()
-    if game.status != "night":
-        return
+    async with game.resolution_lock:
+        if game.status != "night":
+            return
+        game.cancel_phase_timer()
+        game.status = "resolving_night"
 
-    # Check Doctor protection validity (Doctor submitted protection and was alive going into the phase)
-    doctor_survived = any(p.role == "doctor" and p.is_alive for p in game.players.values())
-    protected_player_id = game.night_doctor_target if doctor_survived else None
+    if is_timeout:
+        process_npc_night_actions(game)
 
-    # 1. Inactivity penalties for required night action roles (only if deadline timed out)
-    # Living Mafia, Doctor, Detective must submit actions; Villagers have no night action.
+    # 1. Record all protected player IDs from living Doctors who submitted a target
+    protected_player_ids: Set[int] = set()
+    for doc in game.players.values():
+        if doc.role == "doctor" and doc.is_alive:
+            target = game.night_actions.get(doc.user_id)
+            if target is not None:
+                protected_player_ids.add(target)
+
+    # 2. Inactivity penalties for required night action roles (only if deadline timed out)
+    # Living human Mafia, Doctor, Detective must submit actions; Villagers have no night action.
+    # IMPORTANT: Doctor protection NEVER prevents inactivity elimination.
     inactive_eliminated: List[MafiaPlayer] = []
 
     if is_timeout:
-        # Mafia inactivity
-        mafia_alive = game.get_mafia_players(alive_only=True)
-        for m in mafia_alive:
-            if m.user_id not in game.night_mafia_targets:
-                if protected_player_id is not None and m.user_id == protected_player_id:
-                    logger.info(
-                        f"[Mafia {game.game_id}] Mafia player {m.user_id} ({m.name}) missed night action but was protected by Doctor. Shielded from inactivity elimination."
-                    )
-                else:
-                    inactive_eliminated.append(m)
-
-        # Detective inactivity
         for p in game.get_alive_players():
-            if p.role == "detective" and game.night_detective_target is None:
-                if protected_player_id is not None and p.user_id == protected_player_id:
-                    logger.info(
-                        f"[Mafia {game.game_id}] Detective {p.user_id} ({p.name}) missed check but was protected by Doctor. Shielded from inactivity elimination."
-                    )
-                else:
+            if p.is_bot:
+                continue
+            if p.role == "mafia":
+                if p.user_id not in game.night_mafia_targets and p.user_id not in game.night_actions:
                     inactive_eliminated.append(p)
-
-        # Doctor inactivity
-        for p in game.get_alive_players():
-            if p.role == "doctor" and game.night_doctor_target is None:
-                inactive_eliminated.append(p)
+            elif p.role == "detective":
+                if p.user_id not in game.night_actions:
+                    inactive_eliminated.append(p)
+            elif p.role == "doctor":
+                if p.user_id not in game.night_actions:
+                    inactive_eliminated.append(p)
 
     for inact_p in inactive_eliminated:
         if inact_p.is_alive:
             inact_p.is_alive = False
             await announce_inactivity_elimination(inact_p, game, context)
 
-    # 2. Determine Mafia target by plurality
+    # Check victory conditions immediately after inactivity eliminations
+    win_after_inact = game.check_win_condition()
+    if win_after_inact:
+        await end_mafia_game(game, win_after_inact, context)
+        return
+
+    # 3. Determine Mafia attack target by plurality vote among living Mafia members who submitted targets
+    mafia_votes: List[int] = []
+    alive_mafia = game.get_mafia_players(alive_only=True)
+    for m in alive_mafia:
+        tgt = game.night_mafia_targets.get(m.user_id) or game.night_actions.get(m.user_id)
+        if tgt is not None and tgt in game.players and game.players[tgt].is_alive:
+            mafia_votes.append(tgt)
+
     final_victim_id: Optional[int] = None
-    if game.night_mafia_targets:
-        counts = Counter(game.night_mafia_targets.values())
+    if mafia_votes:
+        counts = Counter(mafia_votes)
         top_candidates = counts.most_common()
         top_vote_cnt = top_candidates[0][1]
         tied_targets = [t for t, cnt in top_candidates if cnt == top_vote_cnt]
         final_victim_id = min(tied_targets)
 
-    # Check Doctor protection against Mafia attack
+    # 4. Check Doctor protection against Mafia attack
     saved_by_doctor = False
-    if protected_player_id and final_victim_id and final_victim_id == protected_player_id:
-        saved_by_doctor = True
-        logger.info(
-            f"[Mafia {game.game_id}] Victim {final_victim_id} was successfully saved by Doctor protection!"
-        )
-        final_victim_id = None
+    if final_victim_id is not None:
+        if final_victim_id in protected_player_ids:
+            saved_by_doctor = True
+            logger.info(
+                f"[Mafia {game.game_id}] Victim {final_victim_id} was successfully saved by Doctor protection!"
+            )
+            final_victim_id = None
 
     victim_player: Optional[MafiaPlayer] = None
     if final_victim_id and final_victim_id in game.players:
@@ -962,9 +1073,12 @@ async def resolve_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYP
             + "\n".join(inact_lines)
         )
 
-    await context.bot.send_message(chat_id=game.chat_id, text=morning_text, parse_mode="HTML")
+    try:
+        await context.bot.send_message(chat_id=game.chat_id, text=morning_text, parse_mode="HTML")
+    except Exception as e:
+        logger.warning(f"[Mafia {game.game_id}] Failed to send morning announcement: {e}")
 
-    # Check game over immediately after night deaths and inactivity eliminations
+    # Check victory conditions after victim elimination
     win = game.check_win_condition()
     if win:
         await end_mafia_game(game, win, context)
@@ -977,6 +1091,7 @@ async def resolve_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYP
 async def begin_discussion_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE):
     """Starts daytime discussion with prompts, optional NPC commentary, and timer before voting."""
     game.status = "discussion"
+    game.phase_token += 1
     disc_text = get_discussion_start_text(day_num=game.round_num, duration=DISCUSSION_DURATION)
 
     alive_npcs = [p for p in game.get_alive_players() if p.is_bot]
@@ -1046,6 +1161,7 @@ def process_npc_voting(game: MafiaGame):
 async def begin_voting_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE):
     """Opens voting phase with inline buttons for alive citizens and casts NPC votes."""
     game.status = "voting"
+    game.phase_token += 1
     game.day_votes.clear()
 
     process_npc_voting(game)
@@ -1070,19 +1186,33 @@ async def begin_voting_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE
 
 
 async def resolve_voting_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE, is_timeout: bool = False):
-    """Tallies votes, eliminates inactive non-voters, and eliminates player if plurality is reached."""
-    game.cancel_phase_timer()
-    if game.status != "voting":
-        return
+    """
+    Tallies votes, eliminates inactive non-voters, and eliminates player if plurality is reached.
+    Guarantees:
+    - Resolves exactly once.
+    - Timer runner does not cancel itself.
+    - All living human players must vote or explicitly skip.
+    - Players failing to vote before timeout are eliminated for inactivity.
+    - Victory conditions checked immediately after inactivity eliminations.
+    - Dead players' votes are completely ignored.
+    - Votes against dead players are rejected.
+    """
+    async with game.resolution_lock:
+        if game.status != "voting":
+            return
+        game.cancel_phase_timer()
+        game.status = "resolving_voting"
+
+    if is_timeout:
+        process_npc_voting(game)
 
     alive_before = game.get_alive_players()
-    alive_ids_before = {p.user_id for p in alive_before}
 
-    # 1. Eliminate inactive players who did not cast a vote or skip before deadline (only if timed out)
+    # 1. Inactivity elimination on timeout: human living players who did not vote or skip
     inactive_eliminated: List[MafiaPlayer] = []
     if is_timeout:
         for p in alive_before:
-            if p.user_id not in game.day_votes:
+            if not p.is_bot and p.user_id not in game.day_votes:
                 inactive_eliminated.append(p)
 
     for inact_p in inactive_eliminated:
@@ -1090,19 +1220,25 @@ async def resolve_voting_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TY
             inact_p.is_alive = False
             await announce_inactivity_elimination(inact_p, game, context)
 
-    # 2. Count votes from players who submitted valid votes and are alive
+    # Check victory conditions after inactivity eliminations
+    win_after_inact = game.check_win_condition()
+    if win_after_inact:
+        await end_mafia_game(game, win_after_inact, context)
+        return
+
+    # 2. Count votes from players who submitted valid votes and ARE CURRENTLY ALIVE
+    alive_targets_ids = {p.user_id for p in game.get_alive_players()}
     valid_votes = {
         voter: target
         for voter, target in game.day_votes.items()
-        if voter in alive_ids_before and game.players[voter].is_alive
+        if voter in alive_targets_ids and game.players[voter].is_alive
     }
-
-    alive_targets_ids = {p.user_id for p in game.get_alive_players()}
 
     lynched_player: Optional[MafiaPlayer] = None
     max_votes = 0
 
     if valid_votes:
+        # Ignore votes targeting players who are no longer alive
         player_votes = [t for t in valid_votes.values() if t in alive_targets_ids]
         skip_count = sum(1 for t in valid_votes.values() if t == -1)
 
@@ -1157,9 +1293,12 @@ async def resolve_voting_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TY
             + "\n".join(inact_lines)
         )
 
-    await context.bot.send_message(chat_id=game.chat_id, text=lynch_msg, parse_mode="HTML")
+    try:
+        await context.bot.send_message(chat_id=game.chat_id, text=lynch_msg, parse_mode="HTML")
+    except Exception as e:
+        logger.warning(f"[Mafia {game.game_id}] Failed to send lynch announcement: {e}")
 
-    # Check victory conditions
+    # Check victory conditions after lynch
     win = game.check_win_condition()
     if win:
         await end_mafia_game(game, win, context)
@@ -1962,6 +2101,7 @@ async def mafia_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             return
 
         game.night_mafia_targets[user.id] = target_id
+        game.night_actions[user.id] = target_id
         target_name = target_player.name
         logger.info(
             f"[Mafia {game.game_id}] Mafia player {user.id} selected target {target_id} ({target_name})"
@@ -2034,6 +2174,7 @@ async def mafia_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             return
 
         game.night_detective_target = target_id
+        game.night_actions[user.id] = target_id
         logger.info(
             f"[Mafia {game.game_id}] Detective {user.id} checked target {target_id} ({target_player.name})"
         )
@@ -2112,6 +2253,7 @@ async def mafia_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             return
 
         game.night_doctor_target = target_id
+        game.night_actions[user.id] = target_id
         target_name = target_player.name
         logger.info(
             f"[Mafia {game.game_id}] Doctor {user.id} protected target {target_id} ({target_name})"
