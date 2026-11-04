@@ -2879,7 +2879,7 @@ async def extract_custom_emoji_info(update: Update, context: ContextTypes.DEFAUL
     # 2. Reply message entities or sticker
     reply_msg = getattr(msg, "reply_to_message", None)
     if not cid and reply_msg:
-        entities = (getattr(reply_msg, "entities", None) or []) + (getattr(reply_msg, "caption_entities", None) or [])
+        entities = list(getattr(reply_msg, "entities", None) or []) + list(getattr(reply_msg, "caption_entities", None) or [])
         for entity in entities:
             etype = getattr(entity, "type", None)
             if etype in (MessageEntity.CUSTOM_EMOJI, "custom_emoji") and getattr(entity, "custom_emoji_id", None):
@@ -2900,7 +2900,7 @@ async def extract_custom_emoji_info(update: Update, context: ContextTypes.DEFAUL
 
     # 3. Current message entities
     if not cid:
-        entities = (getattr(msg, "entities", None) or []) + (getattr(msg, "caption_entities", None) or [])
+        entities = list(getattr(msg, "entities", None) or []) + list(getattr(msg, "caption_entities", None) or [])
         for entity in entities:
             etype = getattr(entity, "type", None)
             if etype in (MessageEntity.CUSTOM_EMOJI, "custom_emoji") and getattr(entity, "custom_emoji_id", None):

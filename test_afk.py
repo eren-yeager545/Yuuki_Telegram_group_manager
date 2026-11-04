@@ -432,3 +432,32 @@ async def test_datadel_clears_afk(tmp_path, monkeypatch):
 
     store.delete_user_data(888)
     assert store.get_afk(888) is None
+
+
+@pytest.mark.asyncio
+async def test_afk_extract_with_tuple_entities(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, 'DB_PATH', str(tmp_path / "test_afk.db"))
+    store.init_db()
+
+    store.upsert_user(991, "TupleUser", "tuple_user")
+    store.set_afk(991, "tuple entity test", int(time.time()) - 50)
+
+    update = MagicMock()
+    msg = MagicMock()
+    update.effective_message = msg
+    msg.from_user.id = 8888
+    msg.reply_to_message = None
+
+    entity = MagicMock()
+    entity.type = MessageEntity.MENTION
+    entity.offset = 3
+    entity.length = 11
+    # Test tuple for entities and empty tuple for caption_entities (as python-telegram-bot v22.1 returns)
+    msg.entities = (entity,)
+    msg.caption_entities = ()
+    msg.text = "Hi @tuple_user"
+
+    afk_users = extract_mentioned_afk_users(update, -100)
+    assert len(afk_users) == 1
+    assert afk_users[0][0] == 991
+    assert afk_users[0][3] == "tuple entity test"

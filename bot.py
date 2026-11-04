@@ -821,7 +821,7 @@ async def process_night_mode(update: Update, context: ContextTypes.DEFAULT_TYPE)
         detected_type = "Paid media"
 
     if not detected_type:
-        entities = (msg.entities or []) + (msg.caption_entities or [])
+        entities = list(msg.entities or []) + list(msg.caption_entities or [])
         found_link = None
         txt_src = msg.text or msg.caption or ''
         for ent in entities:
@@ -1052,14 +1052,17 @@ async def _internal_message_router(update: Update, context: ContextTypes.DEFAULT
             for m_uid, m_first, m_uname, m_reason, m_since in mentioned_afk_users:
                 if m_uid == user.id:
                     continue
-                disp_tag = format_user_tag(m_uid, m_first, m_uname)
-                dur_str = format_afk_duration(now - m_since)
-                await msg.reply_text(
-                    f"🌸 {disp_tag} is currently AFK!\n💭 Reason: {html.escape(m_reason)}\n⏰ Away for: {dur_str}",
-                    parse_mode="HTML"
-                )
+                try:
+                    disp_tag = format_user_tag(m_uid, m_first, m_uname)
+                    dur_str = format_afk_duration(now - m_since)
+                    await msg.reply_text(
+                        f"🌸 {disp_tag} is currently AFK!\n💭 Reason: {html.escape(m_reason)}\n⏰ Away for: {dur_str}",
+                        parse_mode="HTML"
+                    )
+                except Exception as notify_err:
+                    logger.error(f"Failed to send AFK notification for user {m_uid}: {notify_err}", exc_info=True)
         except Exception as e:
-            logger.error(f"Error handling AFK mention notifications: {e}")
+            logger.error(f"Error handling AFK mention notifications: {e}", exc_info=True)
         fed = get_chat_federation(chat.id)
         if fed and get_fed_ban(fed[0], user.id):
             try:
@@ -1090,7 +1093,7 @@ async def _internal_message_router(update: Update, context: ContextTypes.DEFAULT
         has_voice = bool(msg.voice)
 
         if not is_approved and not is_safe and not is_admin_or_owner:
-            entities = (msg.entities or []) + (msg.caption_entities or [])
+            entities = list(msg.entities or []) + list(msg.caption_entities or [])
             has_hashtag = any(str(getattr(ent, 'type', '')) in ('hashtag', 'MessageEntityType.HASHTAG') for ent in entities) or bool(re.search(r'(?:^|\s)#[A-Za-z0-9_]+', lower))
             has_mention = any(str(getattr(ent, 'type', '')) in ('mention', 'text_mention') for ent in entities) or bool(re.search(r'(?:^|\s)@[A-Za-z0-9_]+', lower))
             has_inline_mention = any(str(getattr(ent, 'type', '')) in ('text_mention',) for ent in entities) or ('tg://user?id=' in lower)

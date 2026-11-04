@@ -30,6 +30,7 @@ from mafia_dialogue import (
     get_night_start_text,
     get_morning_announcement,
     get_discussion_start_text,
+    get_npc_discussion_text,
     get_voting_start_text,
     get_lynch_announcement,
     get_accusation_text,
@@ -549,7 +550,10 @@ def start_phase_timer(
                     game.active_timer_phase = None
                     await callback(game, context)
                 except Exception as inner_e:
-                    logger.error(f"[Mafia {game.game_id}] Failed executing fallback callback for phase '{phase}': {inner_e}")
+                    logger.error(
+                        f"[Mafia {game.game_id}] Failed executing fallback callback for phase '{phase}': {inner_e}",
+                        exc_info=True
+                    )
         finally:
             if game.timer_generation == gen and game.phase_token == token and game.active_timer_phase == phase:
                 game.active_timer_phase = None

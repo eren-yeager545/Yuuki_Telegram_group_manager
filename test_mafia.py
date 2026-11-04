@@ -1858,3 +1858,52 @@ async def test_reg_25_game_cleanup_does_not_affect_other_games():
     assert g2.phase_task is not None
 
     g2.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_npc_discussion_text_in_discussion_phase():
+    """Verify begin_discussion_phase executes get_npc_discussion_text properly without error."""
+    game = MafiaGame(chat_id=-3030, chat_title="NPC Discussion Test", host_id=1, host_name="Host")
+    game.add_player(2, "Human2")
+    game.add_player(3, "Human3")
+    game.add_player(4, "Human4")
+    # Add NPC
+    game.add_player(-1001, "Yuki (NPC)", is_bot=True, npc_personality="yuki")
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Call begin_discussion_phase directly
+    await mafia.begin_discussion_phase(game, ctx)
+
+    assert game.status == "discussion"
+    ctx.bot.send_message.assert_called_once()
+    sent_text = ctx.bot.send_message.call_args[1]["text"]
+    assert "Council Chatter:" in sent_text
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_night_phase_timer_resilience_and_traceback_logging(caplog):
+    """Verify timer runner catches unexpected exceptions, logs exc_info, and runs fallback without crashing."""
+    import logging
+    game = MafiaGame(chat_id=-4040, chat_title="Timer Test", host_id=1, host_name="Host")
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    call_count = 0
+    async def failing_callback(g, c):
+        nonlocal call_count
+        call_count += 1
+        raise RuntimeError("Simulated callback failure")
+
+    with caplog.at_level(logging.ERROR):
+        task = mafia.start_phase_timer(game, "test_phase", 0, failing_callback, ctx)
+        game.status = "test_phase"
+        await task
+
+    # Callback was invoked
+    assert call_count >= 1
+    # Check that traceback was logged with exc_info
+    assert any("Failed executing fallback callback" in record.message or "Unexpected exception in timer" in record.message for record in caplog.records)
+    assert any(record.exc_info is not None for record in caplog.records)
