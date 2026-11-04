@@ -12,10 +12,14 @@ from typing import List, Optional
 
 def format_player_mention(user_id: int, name: str) -> str:
     escaped_name = html.escape(name or 'Player')
+    if user_id < 0:
+        return f"<b>{escaped_name}</b>"
     return f"<b>{escaped_name}</b> (<a href=\"tg://user?id={user_id}\">profile</a>)"
 
 
 def format_player_tag(user_id: int, name: str, username: Optional[str] = None) -> str:
+    if user_id < 0:
+        return f"<b>{html.escape(name or 'Player')}</b>"
     if username:
         clean = username.lstrip('@')
         return f"@{clean}"
@@ -313,6 +317,33 @@ SUSPICION_ALERT_TEMPLATES = [
     "⚠️ <b>Suspicion Mounts Against {target_tag}!</b> Several citizens have turned their eyes and votes toward them. The pressure is on!",
     "🔥 <b>The Heat Rises!</b> Multiple players are questioning <b>{target_tag}</b>. Will they be able to clear their name before the gavel falls?"
 ]
+
+NPC_DISCUSSION_TEMPLATES = {
+    'yuki': [
+        "🌸 <b>{npc_tag}:</b> <i>\"Hehe~ I've been watching everyone closely! {target_tag} seems awfully nervous today, don't you think? (⁠≧⁠▽⁠≦⁠)\"</i>",
+        "🌸 <b>{npc_tag}:</b> <i>\"Nya~ let's find the sneaky wolf hiding among our lovely town! Could it be {target_tag}? ✨\"</i>",
+        "🌸 <b>{npc_tag}:</b> <i>\"Hmm... intuition tells me {target_tag} is deflecting! We can't let the shadows win, desu! 💕\"</i>",
+        "🌸 <b>{npc_tag}:</b> <i>\"Keep your eyes peeled, everyone! The quietest players are often cooking up secret plans~ 🍡\"</i>",
+    ],
+    'phantom': [
+        "🗡️ <b>{npc_tag}:</b> <i>\"Quit stalling. Look at the voting trail—{target_tag} has been coordinating with the syndicate from round one.\"</i>",
+        "🗡️ <b>{npc_tag}:</b> <i>\"The math doesn't lie. If we don't take down {target_tag} right now, town loses majority tonight.\"</i>",
+        "🗡️ <b>{npc_tag}:</b> <i>\"Stop defending suspects without evidence. Either {target_tag} hangs today, or we give Mafia an easy kill.\"</i>",
+        "🗡️ <b>{npc_tag}:</b> <i>\"Hesitation gets citizens killed. Lock in your targets and strike decisively.\"</i>",
+    ],
+    'rukia': [
+        "❄️ <b>{npc_tag}:</b> <i>\"Logic dictates we analyze the facts calmly. {target_tag}'s statements contradict previous testimonies.\"</i>",
+        "❄️ <b>{npc_tag}:</b> <i>\"Emotional outbursts will only assist the syndicate. We must scrutinize {target_tag}'s claims systematically.\"</i>",
+        "❄️ <b>{npc_tag}:</b> <i>\"Remain observant. An honest citizen explains their reasoning clearly without evasive maneuvers.\"</i>",
+        "❄️ <b>{npc_tag}:</b> <i>\"Hasty consensus is dangerous. Let us verify every clue before casting our decisive ballots.\"</i>",
+    ]
+}
+
+
+def get_npc_discussion_text(npc_tag: str, personality: str, target_tag: Optional[str] = None) -> str:
+    templates = NPC_DISCUSSION_TEMPLATES.get(personality.lower(), NPC_DISCUSSION_TEMPLATES['yuki'])
+    template = random.choice(templates)
+    return template.format(npc_tag=npc_tag, target_tag=target_tag or "someone")
 
 # ---------------------------------------------------------
 # FAREWELL (PRIVATE DM TO ELIMINATED PLAYER)

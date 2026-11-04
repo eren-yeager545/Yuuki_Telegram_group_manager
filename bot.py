@@ -1227,47 +1227,90 @@ async def _internal_message_router(update: Update, context: ContextTypes.DEFAULT
                 active_quizzes.pop(chat.id, None)
                 return
 
-        # Filters matching logic (triggers ONLY when the message matches the trigger separately)
+        # Filters matching logic: exact matching and keyword matching, supporting text, sticker, photo, video, voice, document/pdf
         clean_text = txt.strip().lower()
         filters_list = get_filters(chat.id)
         filter_triggered = False
+
         for keyword, reply, f_type in filters_list:
             kw_clean = keyword.strip().lower()
+            if not kw_clean:
+                continue
+
             matched = False
-            if f_type == 'text' and clean_text == kw_clean:
-                matched = True
-            elif f_type == 'sticker' and ((has_sticker and (kw_clean in (msg.sticker.emoji or '').lower() or kw_clean in (msg.sticker.set_name or '').lower())) or clean_text == kw_clean):
-                matched = True
-            elif f_type == 'voice' and clean_text == kw_clean:
-                matched = True
-            elif f_type == 'link' and clean_text == kw_clean:
-                matched = True
-            elif f_type in ('document', 'pdf') and clean_text == kw_clean:
-                matched = True
+            text_matches = (clean_text == kw_clean) or bool(
+                re.search(r'(?:\b|^)' + re.escape(kw_clean) + r'(?:\b|$)', clean_text)
+            )
+
+            if f_type == 'text':
+                matched = text_matches
+            elif f_type == 'sticker':
+                sticker_matches = False
+                if has_sticker and msg.sticker:
+                    stk_emoji = (msg.sticker.emoji or '').lower()
+                    stk_set = (msg.sticker.set_name or '').lower()
+                    sticker_matches = (kw_clean in stk_emoji) or (kw_clean in stk_set)
+                matched = sticker_matches or text_matches
+            elif f_type in ('voice', 'link', 'document', 'pdf', 'photo', 'video'):
+                matched = text_matches
+            else:
+                matched = text_matches
 
             if matched:
                 filter_triggered = True
-                if f_type == 'sticker':
-                    try:
-                        await msg.reply_sticker(reply)
-                    except Exception:
+                logger.info(
+                    f"Filter triggered in chat {chat.id}: keyword='{keyword}' type='{f_type}' msg_id={msg.message_id}"
+                )
+                try:
+                    if f_type == 'sticker':
+                        try:
+                            await msg.reply_sticker(reply)
+                        except Exception as e:
+                            logger.warning(f"Filter reply_sticker error in chat {chat.id}: {e}")
+                            await msg.reply_text(reply)
+                    elif f_type == 'voice':
+                        try:
+                            await msg.reply_voice(reply)
+                        except Exception as e:
+                            logger.warning(f"Filter reply_voice error in chat {chat.id}: {e}")
+                            await msg.reply_text(reply)
+                    elif f_type in ('document', 'pdf'):
+                        file_id = reply
+                        caption = None
+                        if '||' in reply:
+                            file_id, caption = reply.split('||', 1)
+                        try:
+                            await msg.reply_document(document=file_id, caption=caption if caption else None)
+                        except Exception as e:
+                            logger.warning(f"Filter reply_document error in chat {chat.id}: {e}")
+                            await msg.reply_text(caption if caption else "📄 Document")
+                    elif f_type == 'photo':
+                        file_id = reply
+                        caption = None
+                        if '||' in reply:
+                            file_id, caption = reply.split('||', 1)
+                        try:
+                            await msg.reply_photo(photo=file_id, caption=caption if caption else None)
+                        except Exception as e:
+                            logger.warning(f"Filter reply_photo error in chat {chat.id}: {e}")
+                            await msg.reply_text(caption if caption else "🖼️ Photo")
+                    elif f_type == 'video':
+                        file_id = reply
+                        caption = None
+                        if '||' in reply:
+                            file_id, caption = reply.split('||', 1)
+                        try:
+                            await msg.reply_video(video=file_id, caption=caption if caption else None)
+                        except Exception as e:
+                            logger.warning(f"Filter reply_video error in chat {chat.id}: {e}")
+                            await msg.reply_text(caption if caption else "🎥 Video")
+                    else:
                         await msg.reply_text(reply)
-                elif f_type == 'voice':
-                    try:
-                        await msg.reply_voice(reply)
-                    except Exception:
-                        await msg.reply_text(reply)
-                elif f_type in ('document', 'pdf'):
-                    file_id = reply
-                    caption = None
-                    if '||' in reply:
-                        file_id, caption = reply.split('||', 1)
-                    try:
-                        await msg.reply_document(document=file_id, caption=caption if caption else None)
-                    except Exception:
-                        await msg.reply_text(caption if caption else "📄 Document")
-                else:
-                    await msg.reply_text(reply)
+                except Exception as delivery_err:
+                    logger.error(
+                        f"Telegram delivery exception for filter '{keyword}' in chat {chat.id}: {delivery_err}",
+                        exc_info=True
+                    )
                 break
 
         if filter_triggered:

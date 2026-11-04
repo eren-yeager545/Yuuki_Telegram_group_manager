@@ -2176,3 +2176,112 @@ def test_six_command_forms_and_night_mode_exemption(monkeypatch, tmp_path):
 
     asyncio.run(admin.slist_cmd(up_slist_slash, context))
     assert "no safe users configured" in msg_slist_slash.reply_html.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_group_filters_photo_video_and_keyword_matching():
+    """Verify group filter delivery for photos, videos, and keyword boundaries."""
+    from bot import _internal_message_router
+    import store
+    from unittest.mock import MagicMock, AsyncMock, patch
+    from telegram import Update, Message, Chat, User
+
+    chat_id = -10099
+    # Add photo and video filters
+    store.save_filter(chat_id, "sunset", "photo_file_123||Beautiful Sunset", "photo")
+    store.save_filter(chat_id, "clip", "video_file_456||Awesome Clip", "video")
+    store.save_filter(chat_id, "hello", "Hey there citizen!", "text")
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # 1. Test text keyword filter matching inside sentence
+    u1 = MagicMock(spec=Update)
+    c1 = Chat(id=chat_id, type="supergroup", title="Test Group")
+    m1 = MagicMock(spec=Message)
+    m1.message_id = 101
+    m1.text = "Hello everyone in town!"
+    m1.caption = None
+    m1.sticker = None
+    m1.voice = None
+    m1.photo = None
+    m1.video = None
+    m1.document = None
+    m1.animation = None
+    m1.audio = None
+    m1.video_note = None
+    m1.contact = None
+    m1.poll = None
+    m1.forward_origin = None
+    m1.sender_chat = None
+    m1.reply_to_message = None
+    m1.reply_text = AsyncMock()
+    u1.effective_chat = c1
+    u1.effective_user = User(id=777, first_name="Tester", is_bot=False)
+    u1.effective_message = m1
+    u1.message = m1
+
+    with patch("admin.is_target_admin", AsyncMock(return_value=False)):
+        await _internal_message_router(u1, ctx)
+
+    m1.reply_text.assert_called_with("Hey there citizen!")
+
+    # 2. Test photo filter reply
+    u2 = MagicMock(spec=Update)
+    m2 = MagicMock(spec=Message)
+    m2.message_id = 102
+    m2.text = "Look at this sunset over the village"
+    m2.caption = None
+    m2.sticker = None
+    m2.voice = None
+    m2.photo = None
+    m2.video = None
+    m2.document = None
+    m2.animation = None
+    m2.audio = None
+    m2.video_note = None
+    m2.contact = None
+    m2.poll = None
+    m2.forward_origin = None
+    m2.sender_chat = None
+    m2.reply_to_message = None
+    m2.reply_photo = AsyncMock()
+    u2.effective_chat = c1
+    u2.effective_user = User(id=777, first_name="Tester", is_bot=False)
+    u2.effective_message = m2
+    u2.message = m2
+
+    with patch("admin.is_target_admin", AsyncMock(return_value=False)):
+        await _internal_message_router(u2, ctx)
+
+    m2.reply_photo.assert_called_with(photo="photo_file_123", caption="Beautiful Sunset")
+
+    # 3. Test video filter reply
+    u3 = MagicMock(spec=Update)
+    m3 = MagicMock(spec=Message)
+    m3.message_id = 103
+    m3.text = "Check out this clip"
+    m3.caption = None
+    m3.sticker = None
+    m3.voice = None
+    m3.photo = None
+    m3.video = None
+    m3.document = None
+    m3.animation = None
+    m3.audio = None
+    m3.video_note = None
+    m3.contact = None
+    m3.poll = None
+    m3.forward_origin = None
+    m3.sender_chat = None
+    m3.reply_to_message = None
+    m3.reply_video = AsyncMock()
+    u3.effective_chat = c1
+    u3.effective_user = User(id=777, first_name="Tester", is_bot=False)
+    u3.effective_message = m3
+    u3.message = m3
+
+    with patch("admin.is_target_admin", AsyncMock(return_value=False)):
+        await _internal_message_router(u3, ctx)
+
+    m3.reply_video.assert_called_with(video="video_file_456", caption="Awesome Clip")

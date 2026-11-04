@@ -1101,3 +1101,52 @@ async def test_scenario_9_game_ends_automatically_on_victory_after_timeout():
     # 1 Mafia vs 0 Town -> Mafia wins automatically!
     assert game.status == "ended"
     assert -1001 not in ACTIVE_GAMES
+
+
+@pytest.mark.asyncio
+async def test_mafia_npc_opt_callback_routing():
+    """Verify that mafia_npc_opt:{game_id}:yes and :no callbacks route correctly."""
+    game = MafiaGame(chat_id=-1001, chat_title="Group", host_id=101, host_name="Alice")
+    for uid in (102, 103, 104, 105):
+        game.add_player(uid, f"User{uid}")
+    ACTIVE_GAMES[-1001] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Test YES callback
+    cb_yes = MagicMock(spec=Update)
+    q_yes = MagicMock(spec=CallbackQuery)
+    q_yes.data = f"mafia_npc_opt:{game.game_id}:yes"
+    q_yes.from_user = make_mock_user(101, "Alice")
+    q_yes.answer = AsyncMock()
+    q_yes.edit_message_text = AsyncMock()
+    cb_yes.callback_query = q_yes
+
+    with patch("admin.is_target_admin", AsyncMock(return_value=True)):
+        await mafia.mafia_callback_handler(cb_yes, ctx)
+
+    q_yes.answer.assert_called_with("Opening NPC options...")
+    assert game.npc_configured is True
+    q_yes.edit_message_text.assert_called_once()
+
+    # Test NO callback
+    game2 = MafiaGame(chat_id=-1002, chat_title="Group2", host_id=201, host_name="Bob")
+    for uid in (202, 203, 204, 205):
+        game2.add_player(uid, f"User{uid}")
+    ACTIVE_GAMES[-1002] = game2
+
+    cb_no = MagicMock(spec=Update)
+    q_no = MagicMock(spec=CallbackQuery)
+    q_no.data = f"mafia_npc_opt:{game2.game_id}:no"
+    q_no.from_user = make_mock_user(201, "Bob")
+    q_no.answer = AsyncMock()
+    q_no.edit_message_text = AsyncMock()
+    cb_no.callback_query = q_no
+
+    with patch("admin.is_target_admin", AsyncMock(return_value=True)):
+        await mafia.mafia_callback_handler(cb_no, ctx)
+
+    q_no.answer.assert_called_with("NPCs disabled. Starting game! 🌸")
+    assert game2.status == "night"
+    game2.cancel_phase_timer()

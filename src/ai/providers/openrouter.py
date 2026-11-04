@@ -297,10 +297,10 @@ class OpenRouterProvider(AIProvider):
                             if isinstance(message_obj, dict):
                                 content_val = message_obj.get("content")
                                 content_text = _extract_content_text(content_val)
-                                if content_text:
+                                if content_text and content_text.strip():
                                     usage = data.get("usage")
                                     return AIResponse(
-                                        text=content_text,
+                                        text=content_text.strip(),
                                         provider=self.name,
                                         model=self.model,
                                         usage=usage
