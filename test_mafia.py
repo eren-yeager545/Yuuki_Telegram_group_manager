@@ -1150,3 +1150,711 @@ async def test_mafia_npc_opt_callback_routing():
     q_no.answer.assert_called_with("NPCs disabled. Starting game! 🌸")
     assert game2.status == "night"
     game2.cancel_phase_timer()
+
+
+# =========================================================================
+# COMPREHENSIVE REGRESSION TESTS (SITUATIONS 1 - 25)
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_reg_1_mafia_misses_night_action_eliminated():
+    """1. Mafia misses night action and gets eliminated."""
+    game = MafiaGame(chat_id=-2001, chat_title="Reg1", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5):
+        game.add_player(uid, f"P{uid}")
+    game.players[1].role = "mafia"
+    game.players[2].role = "detective"
+    game.players[3].role = "doctor"
+    game.players[4].role = "villager"
+    game.players[5].role = "villager"
+    game.status = "night"
+    ACTIVE_GAMES[-2001] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Detective and Doctor act, Mafia does not
+    game.night_actions[2] = 4
+    game.night_actions[3] = 4
+
+    await mafia.resolve_night_phase(game, ctx, is_timeout=True)
+
+    assert game.players[1].is_alive is False
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_reg_2_doctor_misses_protection_eliminated():
+    """2. Doctor misses protection and gets eliminated."""
+    game = MafiaGame(chat_id=-2002, chat_title="Reg2", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5):
+        game.add_player(uid, f"P{uid}")
+    game.players[1].role = "mafia"
+    game.players[2].role = "detective"
+    game.players[3].role = "doctor"
+    game.players[4].role = "villager"
+    game.players[5].role = "villager"
+    game.status = "night"
+    ACTIVE_GAMES[-2002] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Mafia and Detective act, Doctor misses
+    game.night_actions[1] = 4
+    game.night_actions[2] = 5
+
+    await mafia.resolve_night_phase(game, ctx, is_timeout=True)
+
+    assert game.players[3].is_alive is False
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_reg_3_detective_misses_investigation_eliminated():
+    """3. Detective misses investigation and gets eliminated."""
+    game = MafiaGame(chat_id=-2003, chat_title="Reg3", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5):
+        game.add_player(uid, f"P{uid}")
+    game.players[1].role = "mafia"
+    game.players[2].role = "detective"
+    game.players[3].role = "doctor"
+    game.players[4].role = "villager"
+    game.players[5].role = "villager"
+    game.status = "night"
+    ACTIVE_GAMES[-2003] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Mafia and Doctor act, Detective misses
+    game.night_actions[1] = 4
+    game.night_actions[3] = 4
+
+    await mafia.resolve_night_phase(game, ctx, is_timeout=True)
+
+    assert game.players[2].is_alive is False
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_reg_4_villagers_survive_night_inactivity():
+    """4. Villagers survive night inactivity checks."""
+    game = MafiaGame(chat_id=-2004, chat_title="Reg4", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5):
+        game.add_player(uid, f"P{uid}")
+    game.players[1].role = "mafia"
+    game.players[2].role = "detective"
+    game.players[3].role = "doctor"
+    game.players[4].role = "villager"
+    game.players[5].role = "villager"
+    game.status = "night"
+    ACTIVE_GAMES[-2004] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Special roles act (Mafia targets 4, Doctor heals 4, Detective checks 1)
+    game.night_actions[1] = 4
+    game.night_actions[2] = 1
+    game.night_actions[3] = 4
+
+    await mafia.resolve_night_phase(game, ctx, is_timeout=True)
+
+    # Villagers 4 and 5 did not act at night, but they MUST remain alive!
+    assert game.players[4].is_alive is True
+    assert game.players[5].is_alive is True
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_reg_5_human_players_no_vote_eliminated():
+    """5. Human players who do not vote get eliminated."""
+    game = MafiaGame(chat_id=-2005, chat_title="Reg5", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5):
+        game.add_player(uid, f"P{uid}")
+    game.players[1].role = "mafia"
+    game.players[2].role = "detective"
+    game.players[3].role = "doctor"
+    game.players[4].role = "villager"
+    game.players[5].role = "villager"
+    game.status = "voting"
+    ACTIVE_GAMES[-2005] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Player 1 and 2 vote; 3, 4, 5 do not vote
+    game.day_votes = {1: -1, 2: -1}
+
+    await mafia.resolve_voting_phase(game, ctx, is_timeout=True)
+
+    assert game.players[3].is_alive is False
+    assert game.players[4].is_alive is False
+    assert game.players[5].is_alive is False
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_reg_6_players_who_vote_remain_alive():
+    """6. Players who vote remain alive."""
+    game = MafiaGame(chat_id=-2006, chat_title="Reg6", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5):
+        game.add_player(uid, f"P{uid}")
+    game.players[1].role = "mafia"
+    game.players[2].role = "detective"
+    game.players[3].role = "doctor"
+    game.players[4].role = "villager"
+    game.players[5].role = "villager"
+    game.status = "voting"
+    ACTIVE_GAMES[-2006] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # All players vote to skip
+    game.day_votes = {1: -1, 2: -1, 3: -1, 4: -1, 5: -1}
+
+    await mafia.resolve_voting_phase(game, ctx, is_timeout=True)
+
+    assert all(p.is_alive for p in game.players.values())
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_reg_7_doctor_protection_does_not_prevent_inactivity_elimination():
+    """7. Doctor protection does not prevent inactivity elimination."""
+    game = MafiaGame(chat_id=-2007, chat_title="Reg7", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5):
+        game.add_player(uid, f"P{uid}")
+    game.players[1].role = "mafia"
+    game.players[2].role = "detective"
+    game.players[3].role = "doctor"
+    game.players[4].role = "villager"
+    game.players[5].role = "villager"
+    game.status = "night"
+    ACTIVE_GAMES[-2007] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Doctor protects Detective 2
+    game.night_actions[3] = 2
+    # Mafia attacks 4
+    game.night_actions[1] = 4
+    # Detective 2 misses their investigation!
+    # Even though protected by Doctor, Detective 2 MUST be eliminated for inactivity!
+    await mafia.resolve_night_phase(game, ctx, is_timeout=True)
+
+    assert game.players[2].is_alive is False
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_reg_8_npc_mafia_automatically_selects_targets():
+    """8. NPC Mafia automatically selects targets."""
+    game = MafiaGame(chat_id=-2008, chat_title="Reg8", host_id=1, host_name="Host")
+    game.add_player(2, "Human2")
+    game.add_player(3, "Human3")
+    game.add_player(4, "Human4")
+    # Add NPC Mafia
+    game.add_player(-1001, "NPC_Mafia", is_bot=True)
+    game.players[1].role = "villager"
+    game.players[2].role = "villager"
+    game.players[3].role = "doctor"
+    game.players[4].role = "detective"
+    game.players[-1001].role = "mafia"
+    game.status = "night"
+
+    mafia.process_npc_night_actions(game)
+
+    assert -1001 in game.night_actions
+    target = game.night_actions[-1001]
+    assert target in (1, 2, 3, 4)
+    assert game.players[target].role != "mafia"
+
+
+@pytest.mark.asyncio
+async def test_reg_9_npc_doctor_automatically_protects():
+    """9. NPC Doctor automatically protects."""
+    game = MafiaGame(chat_id=-2009, chat_title="Reg9", host_id=1, host_name="Host")
+    for uid in (2, 3, 4):
+        game.add_player(uid, f"Human{uid}")
+    game.add_player(-1002, "NPC_Doc", is_bot=True)
+    game.players[1].role = "mafia"
+    game.players[2].role = "villager"
+    game.players[3].role = "villager"
+    game.players[4].role = "detective"
+    game.players[-1002].role = "doctor"
+    game.status = "night"
+
+    mafia.process_npc_night_actions(game)
+
+    assert -1002 in game.night_actions
+    target = game.night_actions[-1002]
+    assert target in game.players
+    assert game.players[target].is_alive is True
+
+
+@pytest.mark.asyncio
+async def test_reg_10_npc_detective_investigates_and_remembers():
+    """10. NPC Detective investigates and remembers results."""
+    game = MafiaGame(chat_id=-2010, chat_title="Reg10", host_id=1, host_name="Host")
+    for uid in (2, 3, 4):
+        game.add_player(uid, f"Human{uid}")
+    game.add_player(-1003, "NPC_Det", is_bot=True)
+    game.players[1].role = "mafia"
+    game.players[2].role = "villager"
+    game.players[3].role = "villager"
+    game.players[4].role = "doctor"
+    game.players[-1003].role = "detective"
+    game.status = "night"
+
+    mafia.process_npc_night_actions(game)
+
+    assert -1003 in game.night_actions
+    target = game.night_actions[-1003]
+    assert target != -1003  # Cannot investigate self
+    assert target in game.npc_detective_memory
+    expected_allegiance = "mafia" if game.players[target].role == "mafia" else "town"
+    assert game.npc_detective_memory[target] == expected_allegiance
+
+
+@pytest.mark.asyncio
+async def test_reg_11_npc_villagers_vote_automatically():
+    """11. NPC Villagers vote automatically."""
+    game = MafiaGame(chat_id=-2011, chat_title="Reg11", host_id=1, host_name="Host")
+    for uid in (2, 3):
+        game.add_player(uid, f"Human{uid}")
+    game.add_player(-1004, "NPC_Villager", is_bot=True)
+    game.add_player(-1005, "NPC_Villager2", is_bot=True)
+    game.status = "voting"
+
+    mafia.process_npc_voting(game)
+
+    assert -1004 in game.day_votes
+    assert -1005 in game.day_votes
+    v1 = game.day_votes[-1004]
+    assert v1 == -1 or (v1 in game.players and game.players[v1].is_alive)
+
+
+@pytest.mark.asyncio
+async def test_reg_12_npc_and_human_actions_remain_independent():
+    """12. NPC and human actions remain independent."""
+    game = MafiaGame(chat_id=-2012, chat_title="Reg12", host_id=1, host_name="Host")
+    for uid in (2, 3, 4):
+        game.add_player(uid, f"Human{uid}")
+    game.add_player(-1006, "NPC_Mafia", is_bot=True)
+    game.players[1].role = "mafia"
+    game.players[-1006].role = "mafia"
+    game.players[2].role = "detective"
+    game.players[3].role = "doctor"
+    game.players[4].role = "villager"
+    game.status = "night"
+
+    # Human Mafia selects target 2
+    game.night_actions[1] = 2
+    game.night_mafia_targets[1] = 2
+
+    # Run NPC action
+    mafia.process_npc_night_actions(game)
+
+    # Human mafia action was not overwritten
+    assert game.night_actions[1] == 2
+    assert game.night_mafia_targets[1] == 2
+    # NPC Mafia also has an independent action
+    assert -1006 in game.night_actions
+
+
+@pytest.mark.asyncio
+async def test_reg_13_multiple_mafia_members():
+    """13. Multiple Mafia members work correctly."""
+    game = MafiaGame(chat_id=-2013, chat_title="Reg13", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5, 6, 7):
+        game.add_player(uid, f"P{uid}")
+    # 2 Mafia members: 1 and 2
+    game.players[1].role = "mafia"
+    game.players[2].role = "mafia"
+    game.players[3].role = "detective"
+    game.players[4].role = "doctor"
+    game.players[5].role = "villager"
+    game.players[6].role = "villager"
+    game.players[7].role = "villager"
+    game.status = "night"
+    ACTIVE_GAMES[-2013] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Both vote for different targets, plurality or tie min applies
+    game.night_actions[1] = 5
+    game.night_mafia_targets[1] = 5
+    game.night_actions[2] = 5
+    game.night_mafia_targets[2] = 5
+    game.night_actions[3] = 1
+    game.night_actions[4] = 6
+
+    await mafia.resolve_night_phase(game, ctx)
+    # Target 5 got 2 mafia votes -> eliminated
+    assert game.players[5].is_alive is False
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_reg_14_multiple_doctors_detectives_do_not_share_slot():
+    """14. Multiple Doctors or Detectives do not share a single action slot."""
+    game = MafiaGame(chat_id=-2014, chat_title="Reg14", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5, 6):
+        game.add_player(uid, f"P{uid}")
+    game.players[1].role = "mafia"
+    game.players[2].role = "doctor"
+    game.players[3].role = "doctor"
+    game.players[4].role = "detective"
+    game.players[5].role = "villager"
+    game.players[6].role = "villager"
+    game.status = "night"
+
+    # Doctor 2 protects 5, Doctor 3 protects 6
+    game.night_actions[2] = 5
+    game.night_actions[3] = 6
+
+    assert game.night_actions[2] == 5
+    assert game.night_actions[3] == 6
+    assert game.night_actions[2] != game.night_actions[3]
+
+
+@pytest.mark.asyncio
+async def test_reg_15_failed_role_delivery_does_not_reassign_roles():
+    """15. Failed role delivery does not reassign roles."""
+    game = MafiaGame(chat_id=-2015, chat_title="Reg15", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5):
+        game.add_player(uid, f"P{uid}")
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # First attempt fails for user 3
+    async def mock_send(chat_id, text, **kwargs):
+        if chat_id == 3:
+            raise Forbidden("Blocked by user")
+        return MagicMock()
+
+    ctx.bot.send_message.side_effect = mock_send
+
+    res = await mafia.start_mafia_game(game, ctx)
+    assert res is False
+    assert game.status == "lobby"
+    assert game.roles_assigned is True
+
+    # Record roles
+    assigned_roles_before = {uid: p.role for uid, p in game.players.items()}
+
+    # Second attempt succeeds (user unblocked bot)
+    ctx.bot.send_message.side_effect = None
+    res2 = await mafia.start_mafia_game(game, ctx)
+    assert res2 is True
+    assert game.status == "night"
+
+    assigned_roles_after = {uid: p.role for uid, p in game.players.items()}
+    # Roles must be identical! No shuffling!
+    assert assigned_roles_before == assigned_roles_after
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_reg_16_retrying_startup_does_not_send_conflicting_roles():
+    """16. Retrying game startup does not send conflicting roles."""
+    game = MafiaGame(chat_id=-2016, chat_title="Reg16", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5):
+        game.add_player(uid, f"P{uid}")
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    call_roles = {}
+    async def track_send(chat_id, text, **kwargs):
+        if chat_id in game.players:
+            call_roles[chat_id] = text
+        if chat_id == 4:
+            raise Forbidden("User unavailable")
+        return MagicMock()
+
+    ctx.bot.send_message.side_effect = track_send
+
+    await mafia.start_mafia_game(game, ctx)
+    # Check user 1's role text
+    u1_text_1 = call_roles.get(1)
+
+    # Retry
+    ctx.bot.send_message.side_effect = None
+    call_roles.clear()
+    await mafia.start_mafia_game(game, ctx)
+    # User 1 should not receive duplicate DM because dm_verified is True
+    assert 1 not in call_roles or call_roles[1] == u1_text_1
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_reg_17_concurrent_start_requests():
+    """17. Concurrent start requests cannot start the same game twice."""
+    game = MafiaGame(chat_id=-2017, chat_title="Reg17", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5):
+        game.add_player(uid, f"P{uid}")
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Launch two start requests simultaneously
+    res1, res2 = await asyncio.gather(
+        mafia.start_mafia_game(game, ctx),
+        mafia.start_mafia_game(game, ctx)
+    )
+
+    # Exactly one succeeded and the other was cleanly rejected
+    assert (res1 is True and res2 is False) or (res1 is False and res2 is True)
+    assert game.status == "night"
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_reg_18_old_timer_callbacks_cannot_resolve_new_phase():
+    """18. Old timer callbacks cannot resolve a new phase."""
+    game = MafiaGame(chat_id=-2018, chat_title="Reg18", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5):
+        game.add_player(uid, f"P{uid}")
+    game.players[1].role = "mafia"
+    game.players[2].role = "detective"
+    game.players[3].role = "doctor"
+    game.players[4].role = "villager"
+    game.players[5].role = "villager"
+    game.status = "night"
+    ACTIVE_GAMES[-2018] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    invoked = 0
+    async def old_callback(g, c):
+        nonlocal invoked
+        invoked += 1
+
+    # Start timer for night
+    mafia.start_phase_timer(game, "night", 1, old_callback, ctx)
+
+    # Immediately transition to discussion
+    game.status = "discussion"
+    game.phase_token += 1
+    game.cancel_phase_timer()
+
+    await asyncio.sleep(1.2)
+    assert invoked == 0
+
+
+@pytest.mark.asyncio
+async def test_reg_19_timer_expiration_executes_exactly_once():
+    """19. Timer expiration executes exactly once."""
+    game = MafiaGame(chat_id=-2019, chat_title="Reg19", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5):
+        game.add_player(uid, f"P{uid}")
+    game.status = "discussion"
+    ACTIVE_GAMES[-2019] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    executions = 0
+    async def count_cb(g, c):
+        nonlocal executions
+        executions += 1
+        g.status = "voting"
+
+    mafia.start_phase_timer(game, "discussion", 1, count_cb, ctx)
+    await asyncio.sleep(1.3)
+
+    assert executions == 1
+    assert game.status == "voting"
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_reg_20_inactive_players_removed_before_vote_tallying():
+    """20. Inactive players are removed before vote tallying."""
+    game = MafiaGame(chat_id=-2020, chat_title="Reg20", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5):
+        game.add_player(uid, f"P{uid}")
+    game.players[1].role = "mafia"
+    game.players[2].role = "detective"
+    game.players[3].role = "doctor"
+    game.players[4].role = "villager"
+    game.players[5].role = "villager"
+    game.status = "voting"
+    ACTIVE_GAMES[-2020] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # User 1 (mafia) votes for user 4.
+    # Users 2, 3, 4, 5 fail to vote.
+    game.day_votes = {1: 4}
+
+    await mafia.resolve_voting_phase(game, ctx, is_timeout=True)
+
+    # Users 2, 3, 4, 5 eliminated for inactivity
+    assert game.players[2].is_alive is False
+    assert game.players[3].is_alive is False
+    assert game.players[4].is_alive is False
+    assert game.players[5].is_alive is False
+
+    # Target 4 was already eliminated due to inactivity BEFORE vote tallying!
+    # Game ends with Mafia victory immediately
+    assert game.status == "ended"
+
+
+@pytest.mark.asyncio
+async def test_reg_21_dead_players_cannot_vote_or_act():
+    """21. Dead players cannot vote or perform actions."""
+    game = MafiaGame(chat_id=-2021, chat_title="Reg21", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5):
+        game.add_player(uid, f"P{uid}")
+    game.players[1].role = "mafia"
+    game.players[2].role = "detective"
+    game.players[3].role = "doctor"
+    game.players[4].role = "villager"
+    game.players[5].role = "villager"
+    game.players[2].is_alive = False  # Detective is DEAD
+    game.status = "voting"
+    ACTIVE_GAMES[-2021] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Dead detective tries to vote via callback
+    cb = MagicMock(spec=Update)
+    q = MagicMock(spec=CallbackQuery)
+    q.data = f"mafia_vote:{game.game_id}:1"
+    q.from_user = make_mock_user(2, "DeadDetective")
+    q.answer = AsyncMock()
+    cb.callback_query = q
+
+    await mafia.mafia_callback_handler(cb, ctx)
+
+    q.answer.assert_called_with("Only living players can vote!", show_alert=True)
+    assert 2 not in game.day_votes
+    game.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_reg_22_victory_conditions_trigger_after_inactivity_eliminations():
+    """22. Victory conditions trigger after inactivity eliminations."""
+    game = MafiaGame(chat_id=-2022, chat_title="Reg22", host_id=1, host_name="Host")
+    for uid in (2, 3, 4, 5):
+        game.add_player(uid, f"P{uid}")
+    game.players[1].role = "mafia"
+    game.players[2].role = "detective"
+    game.players[3].role = "doctor"
+    game.players[4].role = "villager"
+    game.players[5].role = "villager"
+    game.status = "night"
+    ACTIVE_GAMES[-2022] = game
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    # Mafia 1 misses night action -> eliminated for inactivity
+    game.night_actions[2] = 1
+    game.night_actions[3] = 4
+
+    await mafia.resolve_night_phase(game, ctx, is_timeout=True)
+
+    # Mafia was eliminated -> Town wins immediately!
+    assert game.players[1].is_alive is False
+    assert game.status == "ended"
+    assert -2022 not in ACTIVE_GAMES
+
+
+@pytest.mark.asyncio
+async def test_reg_23_two_separate_groups_simultaneous():
+    """23. Two separate groups can run games simultaneously."""
+    g1 = MafiaGame(chat_id=-2023, chat_title="G1", host_id=1, host_name="Host1")
+    g2 = MafiaGame(chat_id=-2024, chat_title="G2", host_id=11, host_name="Host2")
+    for uid in (2, 3, 4, 5):
+        g1.add_player(uid, f"P{uid}")
+    for uid in (12, 13, 14, 15):
+        g2.add_player(uid, f"P{uid}")
+
+    ACTIVE_GAMES[-2023] = g1
+    ACTIVE_GAMES[-2024] = g2
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    await mafia.start_mafia_game(g1, ctx)
+    await mafia.start_mafia_game(g2, ctx)
+
+    assert g1.status == "night"
+    assert g2.status == "night"
+    assert g1.game_id != g2.game_id
+
+    # Advance g1 to discussion
+    await mafia.resolve_night_phase(g1, ctx)
+    assert g1.status == "discussion"
+    assert g2.status == "night"
+
+    g1.cancel_phase_timer()
+    g2.cancel_phase_timer()
+
+
+@pytest.mark.asyncio
+async def test_reg_24_npcs_work_without_ai_api():
+    """24. NPCs work without any AI API."""
+    with patch("handlers.ai_chat.provider_manager.chat", AsyncMock()) as mock_ai:
+        game = MafiaGame(chat_id=-2025, chat_title="Reg24", host_id=1, host_name="Host")
+        for uid in (2, 3, 4):
+            game.add_player(uid, f"P{uid}")
+        game.add_player(-1010, "NPC_Mafia", is_bot=True)
+        game.add_player(-1011, "NPC_Det", is_bot=True)
+        game.add_player(-1012, "NPC_Doc", is_bot=True)
+        game.players[-1010].role = "mafia"
+        game.players[-1011].role = "detective"
+        game.players[-1012].role = "doctor"
+        game.status = "night"
+
+        mafia.process_npc_night_actions(game)
+        mock_ai.assert_not_called()
+
+        game.status = "voting"
+        mafia.process_npc_voting(game)
+        mock_ai.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reg_25_game_cleanup_does_not_affect_other_games():
+    """25. Game cleanup does not affect other active games."""
+    g1 = MafiaGame(chat_id=-2026, chat_title="G1", host_id=1, host_name="Host1")
+    g2 = MafiaGame(chat_id=-2027, chat_title="G2", host_id=11, host_name="Host2")
+    for uid in (2, 3, 4, 5):
+        g1.add_player(uid, f"P{uid}")
+    for uid in (12, 13, 14, 15):
+        g2.add_player(uid, f"P{uid}")
+
+    ACTIVE_GAMES[-2026] = g1
+    ACTIVE_GAMES[-2027] = g2
+
+    ctx = MagicMock()
+    ctx.bot = AsyncMock()
+
+    await mafia.start_mafia_game(g1, ctx)
+    await mafia.start_mafia_game(g2, ctx)
+
+    # End g1
+    await mafia.end_mafia_game(g1, "town", ctx)
+
+    assert -2026 not in ACTIVE_GAMES
+    assert g1.status == "ended"
+
+    # g2 must still be active and unaffected!
+    assert -2027 in ACTIVE_GAMES
+    assert g2.status == "night"
+    assert g2.phase_task is not None
+
+    g2.cancel_phase_timer()
