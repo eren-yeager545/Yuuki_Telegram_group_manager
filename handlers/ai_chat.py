@@ -712,8 +712,8 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE, pro
             is_detailed_req = any(kw in prompt.lower() for kw in ["explain in detail", "detailed explanation", "essay", "full guide", "step by step"])
             final_text = ai_resp.text if is_detailed_req else format_short_response(ai_resp.text, max_words=50)
 
-            if not final_text:
-                final_text = FALLBACK_YUKI_RESPONSE
+            if not final_text or not final_text.strip():
+                final_text = get_cute_fallback_response()
 
         # Write response back to context under chat lock
         async with chat_lock:

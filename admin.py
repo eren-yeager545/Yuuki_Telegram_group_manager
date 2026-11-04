@@ -712,6 +712,15 @@ async def filter_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             filter_type = 'document'
             cap = reply_msg.caption or ''
             reply_content = f"{reply_msg.document.file_id}||{cap}"
+        elif reply_msg.photo:
+            filter_type = 'photo'
+            best_photo = reply_msg.photo[-1]
+            cap = reply_msg.caption or ''
+            reply_content = f"{best_photo.file_id}||{cap}"
+        elif reply_msg.video:
+            filter_type = 'video'
+            cap = reply_msg.caption or ''
+            reply_content = f"{reply_msg.video.file_id}||{cap}"
         elif reply_msg.sticker:
             filter_type = 'sticker'
             reply_content = reply_msg.sticker.file_id
@@ -731,7 +740,7 @@ async def filter_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not text or '|' not in text:
-        await update.message.reply_text('Usage: /filter [text|sticker|voice|link|document] keyword | reply OR reply to a message with /filter trigger_word')
+        await update.message.reply_text('Usage: /filter [text|sticker|voice|link|document|photo|video] keyword | reply OR reply to a message with /filter trigger_word')
         return
 
     parts = [x.strip() for x in text.split('|', 1)]
@@ -741,7 +750,7 @@ async def filter_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filter_type = 'text'
     keyword = left_part
 
-    if len(left_words) == 2 and left_words[0].lower() in ('text', 'sticker', 'voice', 'link', 'document', 'pdf'):
+    if len(left_words) == 2 and left_words[0].lower() in ('text', 'sticker', 'voice', 'link', 'document', 'pdf', 'photo', 'video'):
         filter_type = left_words[0].lower()
         if filter_type == 'pdf':
             filter_type = 'document'

@@ -126,26 +126,39 @@ class GroqProvider(AIProvider):
         )
 
         async with httpx.AsyncClient(timeout=http_timeout) as client:
-            try:
-                resp = await client.post(url, json=payload, headers=headers)
-            except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException) as te:
-                err_msg = f"Groq API timeout for model '{self.model}': {type(te).__name__}"
-                logger.warning(_redact_key(err_msg, api_key))
-                raise AIProviderError(
-                    message=err_msg,
-                    error_code=ProviderErrorCode.TIMEOUT,
-                    suggested_cooldown=DEFAULT_TIMEOUT_COOLDOWN,
-                    raw_error=te
-                ) from te
-            except httpx.RequestError as re:
-                err_msg = f"Groq API network error for model '{self.model}': {type(re).__name__}"
-                logger.warning(_redact_key(err_msg, api_key))
-                raise AIProviderError(
-                    message=err_msg,
-                    error_code=ProviderErrorCode.NETWORK_ERROR,
-                    suggested_cooldown=DEFAULT_TIMEOUT_COOLDOWN,
-                    raw_error=re
-                ) from re
+            max_retries = 1
+            retry_count = 0
+            while True:
+                try:
+                    resp = await client.post(url, json=payload, headers=headers)
+                except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.TimeoutException) as te:
+                    err_msg = f"Groq API timeout for model '{self.model}': {type(te).__name__}"
+                    logger.warning(_redact_key(err_msg, api_key))
+                    raise AIProviderError(
+                        message=err_msg,
+                        error_code=ProviderErrorCode.TIMEOUT,
+                        suggested_cooldown=DEFAULT_TIMEOUT_COOLDOWN,
+                        raw_error=te
+                    ) from te
+                except httpx.RequestError as re:
+                    if retry_count < max_retries:
+                        retry_count += 1
+                        logger.info(f"Groq API network glitch. Retrying attempt {retry_count}/{max_retries}...")
+                        continue
+                    err_msg = f"Groq API network error for model '{self.model}': {type(re).__name__}"
+                    logger.warning(_redact_key(err_msg, api_key))
+                    raise AIProviderError(
+                        message=err_msg,
+                        error_code=ProviderErrorCode.NETWORK_ERROR,
+                        suggested_cooldown=DEFAULT_TIMEOUT_COOLDOWN,
+                        raw_error=re
+                    ) from re
+
+                if resp.status_code >= 500 and retry_count < max_retries:
+                    retry_count += 1
+                    logger.info(f"Groq API temporary server error {resp.status_code}. Retrying attempt {retry_count}/{max_retries}...")
+                    continue
+                break
 
             if resp.status_code == 200:
                 try:
@@ -192,10 +205,10 @@ class GroqProvider(AIProvider):
                             if isinstance(message_obj, dict):
                                 content_val = message_obj.get("content")
                                 content_text = _extract_content_text(content_val)
-                                if content_text:
+                                if content_text and content_text.strip():
                                     usage = data.get("usage")
                                     return AIResponse(
-                                        text=content_text,
+                                        text=content_text.strip(),
                                         provider=self.name,
                                         model=self.model,
                                         usage=usage

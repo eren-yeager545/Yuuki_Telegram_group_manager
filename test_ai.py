@@ -1822,3 +1822,50 @@ async def test_health_tracker_status_display_unknown_and_actual_status():
     await asyncio.sleep(0.02)
     assert len(alerts) == 3
     assert "Status: 500" in alerts[2]
+
+
+@pytest.mark.asyncio
+async def test_empty_ai_response_triggers_failover_and_non_empty_telegram_reply():
+    """Verify empty/whitespace AI response triggers provider failover and never sends empty message."""
+    from src.ai.manager import AIProviderManager
+    from src.ai.providers.base import AIProviderError, ProviderErrorCode, AIResponse
+    from handlers.ai_chat import get_cute_fallback_response
+
+    # Mock manager with a failing provider that returns empty response, and a secondary provider that returns valid response
+    mgr = AIProviderManager(
+        provider_order=["groq", "openrouter"],
+        gemini_keys=[],
+        groq_keys=["groq_key_1"],
+        openrouter_keys=["openrouter_key_1"]
+    )
+
+    groq_p = mgr.providers["groq"]
+    openrouter_p = mgr.providers["openrouter"]
+
+    # Groq returns empty text
+    groq_p.generate_response_with_key = AsyncMock(return_value=AIResponse(text="   ", provider="groq", model="test"))
+    # OpenRouter returns valid text
+    openrouter_p.generate_response_with_key = AsyncMock(return_value=AIResponse(text="Hello from OpenRouter!", provider="openrouter", model="test"))
+
+    resp = await mgr.chat(
+        messages=[{"role": "user", "content": "hi"}],
+        system_prompt="system",
+        max_tokens=50,
+        timeout=10.0
+    )
+
+    # Should have failed over to OpenRouter
+    assert resp.provider == "openrouter"
+    assert resp.text == "Hello from OpenRouter!"
+
+    # Test cute fallback when all providers fail
+    openrouter_p.generate_response_with_key = AsyncMock(side_effect=Exception("API down"))
+    fallback_resp = await mgr.chat(
+        messages=[{"role": "user", "content": "hi"}],
+        system_prompt="system",
+        max_tokens=50,
+        timeout=10.0
+    )
+    assert fallback_resp.provider == "fallback"
+    cute_fb = get_cute_fallback_response()
+    assert bool(cute_fb.strip())

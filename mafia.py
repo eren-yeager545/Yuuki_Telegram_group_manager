@@ -45,16 +45,35 @@ logger = logging.getLogger(__name__)
 # Game configurations
 MIN_PLAYERS = 5
 MAX_PLAYERS = 16
-LOBBY_DURATION = 60        # seconds
-NIGHT_DURATION = 45        # seconds
+LOBBY_DURATION = 120       # seconds (2 minutes)
+NIGHT_DURATION = 60        # seconds (1 minute)
 DISCUSSION_DURATION = 45   # seconds
-VOTING_DURATION = 45       # seconds
+VOTING_DURATION = 60       # seconds (1 minute)
 DOCTOR_SELF_HEAL = True
 
 # In-memory active games keyed by chat_id
 ACTIVE_GAMES: Dict[int, "MafiaGame"] = {}
 # Track last pinned mafia game announcement message ID per chat: chat_id -> message_id
 LAST_PINNED_MAFIA_MESSAGES: Dict[int, int] = {}
+
+NPC_PROFILES = [
+    {"name": "Yuki (NPC)", "personality": "yuki"},
+    {"name": "Phantom (NPC)", "personality": "phantom"},
+    {"name": "Rukia (NPC)", "personality": "rukia"},
+    {"name": "Kenshin (NPC)", "personality": "rukia"},
+    {"name": "Shadow (NPC)", "personality": "phantom"},
+    {"name": "Sakura (NPC)", "personality": "yuki"},
+    {"name": "Byakuya (NPC)", "personality": "rukia"},
+    {"name": "Kagura (NPC)", "personality": "yuki"},
+    {"name": "Ren (NPC)", "personality": "phantom"},
+    {"name": "Kira (NPC)", "personality": "phantom"},
+    {"name": "Gin (NPC)", "personality": "yuki"},
+    {"name": "Shunsui (NPC)", "personality": "rukia"},
+    {"name": "Yoruichi (NPC)", "personality": "yuki"},
+    {"name": "Grimmjow (NPC)", "personality": "phantom"},
+    {"name": "Ulquiorra (NPC)", "personality": "rukia"},
+    {"name": "Aizen (NPC)", "personality": "phantom"},
+]
 
 
 @dataclass
@@ -65,6 +84,8 @@ class MafiaPlayer:
     role: str = "villager"    # 'mafia', 'detective', 'doctor', 'villager'
     is_alive: bool = True
     is_host: bool = False
+    is_bot: bool = False      # True for NPC
+    npc_personality: Optional[str] = None  # 'yuki', 'phantom', 'rukia'
     dm_verified: bool = False
     voted_for: Optional[int] = None   # -1 for skip, user_id for player
     night_action_target: Optional[int] = None
@@ -106,10 +127,14 @@ class MafiaGame:
         # Elimination stats
         self.elimination_credits: Dict[int, int] = {}       # user_id -> count
 
+        # NPC tracking
+        self.npc_detective_memory: Dict[int, str] = {}      # target_id -> 'mafia' or 'town'
+        self.npc_configured: bool = False
+
         # Add host as first player
         self.add_player(host_id, host_name, host_username, is_host=True)
 
-    def add_player(self, user_id: int, name: str, username: Optional[str] = None, is_host: bool = False) -> bool:
+    def add_player(self, user_id: int, name: str, username: Optional[str] = None, is_host: bool = False, is_bot: bool = False, npc_personality: Optional[str] = None) -> bool:
         if self.status != "lobby":
             return False
         if user_id in self.players:
@@ -121,9 +146,60 @@ class MafiaGame:
             user_id=user_id,
             name=name,
             username=username,
-            is_host=is_host
+            is_host=is_host,
+            is_bot=is_bot,
+            npc_personality=npc_personality,
+            dm_verified=is_bot
         )
         return True
+
+    def add_npcs(self, count: int) -> int:
+        """
+        Adds up to `count` NPC players without exceeding MAX_PLAYERS (16).
+        Uses unique negative IDs (-1001, -1002, ...) and predefined profiles.
+        Adjusts curr_npc_id on every iteration.
+        """
+        if self.status != "lobby":
+            return 0
+        added = 0
+        used_names = {p.name for p in self.players.values()}
+        used_ids = set(self.players.keys())
+
+        profile_idx = 0
+        curr_npc_id = -1001
+
+        while len(self.players) < MAX_PLAYERS and added < count:
+            while curr_npc_id in used_ids:
+                curr_npc_id -= 1
+
+            if profile_idx < len(NPC_PROFILES):
+                prof = NPC_PROFILES[profile_idx]
+                profile_idx += 1
+                npc_name = prof["name"]
+                npc_pers = prof["personality"]
+            else:
+                npc_name = f"Citizen #{abs(curr_npc_id)} (NPC)"
+                npc_pers = random.choice(["yuki", "phantom", "rukia"])
+
+            if npc_name in used_names:
+                curr_npc_id -= 1
+                continue
+
+            success = self.add_player(
+                user_id=curr_npc_id,
+                name=npc_name,
+                username=None,
+                is_host=False,
+                is_bot=True,
+                npc_personality=npc_pers
+            )
+            if success:
+                used_names.add(npc_name)
+                used_ids.add(curr_npc_id)
+                added += 1
+            curr_npc_id -= 1
+
+        return added
 
     def remove_player(self, user_id: int) -> bool:
         if self.status != "lobby":
@@ -217,7 +293,65 @@ def build_lobby_keyboard(game_id: str, bot_username: str) -> InlineKeyboardMarku
             InlineKeyboardButton("▶️ Start Game", callback_data=f"mafia_start:{game_id}")
         ],
         [
-            InlineKeyboardButton("💬 Start Bot in Private", url=f"https://t.me/{bot_username}?start=mafia_reg")
+            InlineKeyboardButton("🎭 Add NPCs", callback_data=f"mafia_npc_menu:{game_id}"),
+            InlineKeyboardButton("💬 Private Bot", url=f"https://t.me/{bot_username}?start=mafia_reg")
+        ]
+    ]
+    return InlineKeyboardMarkup(kb)
+
+
+def build_npc_prompt_keyboard(game_id: str) -> InlineKeyboardMarkup:
+    """Inline buttons: YES / NO when lobby is ready to start. Consistent game_id in parts[1]."""
+    kb = [
+        [
+            InlineKeyboardButton("YES", callback_data=f"mafia_npc_opt:{game_id}:yes"),
+            InlineKeyboardButton("NO", callback_data=f"mafia_npc_opt:{game_id}:no")
+        ]
+    ]
+    return InlineKeyboardMarkup(kb)
+
+
+def build_npc_config_keyboard(game_id: str, current_count: int) -> InlineKeyboardMarkup:
+    """Options: Custom NPC Count and Fill Players to 16."""
+    remaining = MAX_PLAYERS - current_count
+    kb = []
+    custom_row = []
+    for count in (1, 2, 3, 5):
+        if count <= remaining:
+            custom_row.append(
+                InlineKeyboardButton(f"+{count} NPC", callback_data=f"mafia_npc_add:{game_id}:{count}")
+            )
+    if custom_row:
+        kb.append(custom_row)
+
+    second_row = [
+        InlineKeyboardButton("1. Custom NPC Count", callback_data=f"mafia_npc_custom_input:{game_id}"),
+        InlineKeyboardButton(f"2. Fill Players to 16 ({remaining} added)", callback_data=f"mafia_npc_add:{game_id}:{remaining}")
+    ]
+    kb.append(second_row)
+
+    if current_count >= MIN_PLAYERS:
+        kb.append([InlineKeyboardButton("▶️ Start Game Now", callback_data=f"mafia_npc_start_now:{game_id}")])
+
+    return InlineKeyboardMarkup(kb)
+
+
+def build_insufficient_npc_keyboard(game_id: str, current_count: int) -> InlineKeyboardMarkup:
+    """
+    Offers when lobby does not have minimum players:
+    - Add NPCs to reach the minimum.
+    - Custom NPC Count.
+    - Fill Players to 16.
+    """
+    needed_for_min = max(0, MIN_PLAYERS - current_count)
+    needed_for_16 = max(0, MAX_PLAYERS - current_count)
+    kb = [
+        [
+            InlineKeyboardButton(f"➕ Add NPCs to reach minimum ({needed_for_min})", callback_data=f"mafia_npc_add:{game_id}:{needed_for_min}")
+        ],
+        [
+            InlineKeyboardButton("🔢 Custom NPC Count", callback_data=f"mafia_npc_custom_input:{game_id}"),
+            InlineKeyboardButton(f"👥 Fill Players to 16 ({needed_for_16})", callback_data=f"mafia_npc_add:{game_id}:{needed_for_16}")
         ]
     ]
     return InlineKeyboardMarkup(kb)
@@ -397,6 +531,9 @@ async def start_mafia_game(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE) 
     ]
 
     for p in game.players.values():
+        if p.is_bot or p.user_id < 0:
+            p.dm_verified = True
+            continue
         role_dm = get_role_dm_text(p.role, teammates=mafia_teammates)
         try:
             await context.bot.send_message(
@@ -529,6 +666,8 @@ async def begin_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE)
     potential_victims = [p for p in alive_players if p.role != "mafia"] or alive_players
 
     for m in mafia_alive:
+        if m.is_bot or m.user_id < 0:
+            continue
         prompt_text = (
             f"🔴 <b>Mafia Meeting: Night {game.round_num}</b> 🗡️\n\n"
             "Choose a target to eliminate tonight. If there are multiple Mafia members, "
@@ -547,6 +686,8 @@ async def begin_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE)
     # 2. Detective: Can investigate any living player other than themselves
     for d in alive_players:
         if d.role == "detective":
+            if d.is_bot or d.user_id < 0:
+                continue
             det_targets = [p for p in alive_players if p.user_id != d.user_id]
             prompt_text = (
                 f"🕵️ <b>Detective Investigation: Night {game.round_num}</b> 🔍\n\n"
@@ -565,6 +706,8 @@ async def begin_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE)
     # 3. Doctor: Can protect any living player (including self if DOCTOR_SELF_HEAL is True)
     for doc in alive_players:
         if doc.role == "doctor":
+            if doc.is_bot or doc.user_id < 0:
+                continue
             doc_targets = alive_players if DOCTOR_SELF_HEAL else [p for p in alive_players if p.user_id != doc.user_id]
             prompt_text = (
                 f"🩺 <b>Doctor's Clinic: Night {game.round_num}</b> 💉\n\n"
@@ -580,11 +723,116 @@ async def begin_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE)
             except Exception as e:
                 logger.warning(f"Failed to send doctor prompt to {doc.user_id}: {e}")
 
+    # Execute deterministic rule-based NPC night decisions (No AI APIs used)
+    process_npc_night_actions(game)
+
     # Schedule night timeout (passing is_timeout=True)
     async def _on_night_timeout(g, ctx):
         await resolve_night_phase(g, ctx, is_timeout=True)
 
     start_phase_timer(game, "night", NIGHT_DURATION, _on_night_timeout, context)
+
+
+def process_npc_night_actions(game: MafiaGame):
+    """
+    Submits deterministic rule-based night actions for all alive NPC players.
+    - Zero external AI APIs used. Pure Python state-based logic.
+    - NPC Mafia: Targets living non-mafia player.
+    - NPC Detective: Investigates a living citizen other than self.
+    - NPC Doctor: Protects a living citizen (self or fellow citizen).
+    """
+    alive_players = game.get_alive_players()
+    if not alive_players:
+        return
+
+    # 1. NPC Mafia Action
+    alive_mafia_npcs = [p for p in game.get_mafia_players(alive_only=True) if p.is_bot]
+    potential_targets = [p for p in alive_players if p.role != "mafia"] or [p for p in alive_players if not p.is_bot]
+    if potential_targets:
+        for m in alive_mafia_npcs:
+            if m.user_id not in game.night_mafia_targets:
+                chosen = random.choice(potential_targets)
+                game.night_mafia_targets[m.user_id] = chosen.user_id
+                logger.info(
+                    f"[Mafia {game.game_id}] NPC Mafia {m.user_id} ({m.name}) targeted {chosen.user_id} ({chosen.name})"
+                )
+
+    # 2. NPC Detective Action
+    alive_det_npcs = [p for p in alive_players if p.role == "detective" and p.is_bot]
+    for d in alive_det_npcs:
+        if game.night_detective_target is None:
+            det_options = [p for p in alive_players if p.user_id != d.user_id and p.user_id not in game.npc_detective_memory]
+            if not det_options:
+                det_options = [p for p in alive_players if p.user_id != d.user_id]
+            if det_options:
+                chosen = random.choice(det_options)
+                game.night_detective_target = chosen.user_id
+                game.npc_detective_memory[chosen.user_id] = 'mafia' if chosen.role == 'mafia' else 'town'
+                logger.info(
+                    f"[Mafia {game.game_id}] NPC Detective {d.user_id} ({d.name}) investigated {chosen.user_id} (result: {chosen.role})"
+                )
+
+    # 3. NPC Doctor Action
+    alive_doc_npcs = [p for p in alive_players if p.role == "doctor" and p.is_bot]
+    for doc in alive_doc_npcs:
+        if game.night_doctor_target is None:
+            doc_options = alive_players if DOCTOR_SELF_HEAL else [p for p in alive_players if p.user_id != doc.user_id]
+            if doc_options:
+                chosen = random.choice(doc_options)
+                game.night_doctor_target = chosen.user_id
+                logger.info(
+                    f"[Mafia {game.game_id}] NPC Doctor {doc.user_id} ({doc.name}) protected {chosen.user_id} ({chosen.name})"
+                )
+
+
+async def announce_inactivity_elimination(player: MafiaPlayer, game: MafiaGame, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Announces player elimination due to inactivity in both group and private DM.
+    Follows exact Part 3 requirements:
+    - Group announcement:
+      🔴 Player eliminated due to inactivity!
+      Player: @username
+      Reason: Failed to submit the required action before the timer expired.
+      The player has been removed from the active game.
+    - Private DM:
+      🔴 You have been eliminated!
+      You were eliminated from the Mafia game because you did not submit your required action before the timer expired.
+      You can spectate the remaining game, but you cannot participate in further rounds.
+    Handles Telegram DM restrictions gracefully and does not interrupt game.
+    """
+    username_display = f"@{player.username.lstrip('@')}" if player.username else player.mention()
+    group_text = (
+        "🔴 <b>Player eliminated due to inactivity!</b>\n\n"
+        f"<b>Player:</b> {username_display}\n\n"
+        "<b>Reason:</b> Failed to submit the required action before the timer expired.\n\n"
+        "The player has been removed from the active game."
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=game.chat_id,
+            text=group_text,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.warning(f"[Mafia {game.game_id}] Failed to send inactivity announcement to group {game.chat_id}: {e}")
+
+    # Private DM to eliminated player (only for real users, user_id > 0)
+    if player.user_id > 0 and not getattr(player, 'is_bot', False):
+        dm_text = (
+            "🔴 <b>You have been eliminated!</b>\n\n"
+            "You were eliminated from the Mafia game because you did not submit your required action before the timer expired.\n\n"
+            "You can spectate the remaining game, but you cannot participate in further rounds."
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=player.user_id,
+                text=dm_text,
+                parse_mode="HTML"
+            )
+        except (Forbidden, BadRequest, TelegramError) as e:
+            logger.debug(f"[Mafia {game.game_id}] Inactivity DM failed for user {player.user_id} (restricted/blocked): {e}")
+        except Exception as e:
+            logger.warning(f"[Mafia {game.game_id}] Inactivity DM unexpected error for user {player.user_id}: {e}")
 
 
 def check_all_night_actions_submitted(game: MafiaGame) -> bool:
@@ -605,10 +853,22 @@ def check_all_night_actions_submitted(game: MafiaGame) -> bool:
 
 
 async def resolve_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE, is_timeout: bool = False):
-    """Resolves night actions deterministically and starts Day discussion."""
+    """
+    Resolves night actions deterministically and starts Day discussion.
+    Protection and inactivity penalties are resolved in the correct order:
+    1. Active Doctor protection is recorded and verified.
+    2. Inactivity penalties are assessed: Required nocturnal roles who failed to act are identified.
+       A successfully protected player receives the protection effect according to the game rules
+       and is not incorrectly eliminated through the inactivity-resolution process.
+    3. Mafia kill is resolved: Protected players survive if targeted.
+    """
     game.cancel_phase_timer()
     if game.status != "night":
         return
+
+    # Check Doctor protection validity (Doctor submitted protection and was alive going into the phase)
+    doctor_survived = any(p.role == "doctor" and p.is_alive for p in game.players.values())
+    protected_player_id = game.night_doctor_target if doctor_survived else None
 
     # 1. Inactivity penalties for required night action roles (only if deadline timed out)
     # Living Mafia, Doctor, Detective must submit actions; Villagers have no night action.
@@ -619,12 +879,22 @@ async def resolve_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYP
         mafia_alive = game.get_mafia_players(alive_only=True)
         for m in mafia_alive:
             if m.user_id not in game.night_mafia_targets:
-                inactive_eliminated.append(m)
+                if protected_player_id is not None and m.user_id == protected_player_id:
+                    logger.info(
+                        f"[Mafia {game.game_id}] Mafia player {m.user_id} ({m.name}) missed night action but was protected by Doctor. Shielded from inactivity elimination."
+                    )
+                else:
+                    inactive_eliminated.append(m)
 
         # Detective inactivity
         for p in game.get_alive_players():
             if p.role == "detective" and game.night_detective_target is None:
-                inactive_eliminated.append(p)
+                if protected_player_id is not None and p.user_id == protected_player_id:
+                    logger.info(
+                        f"[Mafia {game.game_id}] Detective {p.user_id} ({p.name}) missed check but was protected by Doctor. Shielded from inactivity elimination."
+                    )
+                else:
+                    inactive_eliminated.append(p)
 
         # Doctor inactivity
         for p in game.get_alive_players():
@@ -634,14 +904,7 @@ async def resolve_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYP
     for inact_p in inactive_eliminated:
         if inact_p.is_alive:
             inact_p.is_alive = False
-            try:
-                await context.bot.send_message(
-                    chat_id=inact_p.user_id,
-                    text=get_farewell_dm_text(),
-                    parse_mode="HTML"
-                )
-            except Exception:
-                pass
+            await announce_inactivity_elimination(inact_p, game, context)
 
     # 2. Determine Mafia target by plurality
     final_victim_id: Optional[int] = None
@@ -652,11 +915,13 @@ async def resolve_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYP
         tied_targets = [t for t, cnt in top_candidates if cnt == top_vote_cnt]
         final_victim_id = min(tied_targets)
 
-    # Check Doctor protection (only if Doctor was active/alive)
-    doctor_survived = any(p.role == "doctor" and p.is_alive for p in game.players.values())
+    # Check Doctor protection against Mafia attack
     saved_by_doctor = False
-    if doctor_survived and final_victim_id and final_victim_id == game.night_doctor_target:
+    if protected_player_id and final_victim_id and final_victim_id == protected_player_id:
         saved_by_doctor = True
+        logger.info(
+            f"[Mafia {game.game_id}] Victim {final_victim_id} was successfully saved by Doctor protection!"
+        )
         final_victim_id = None
 
     victim_player: Optional[MafiaPlayer] = None
@@ -710,9 +975,20 @@ async def resolve_night_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYP
 
 
 async def begin_discussion_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE):
-    """Starts daytime discussion with prompts and timer before voting."""
+    """Starts daytime discussion with prompts, optional NPC commentary, and timer before voting."""
     game.status = "discussion"
     disc_text = get_discussion_start_text(day_num=game.round_num, duration=DISCUSSION_DURATION)
+
+    alive_npcs = [p for p in game.get_alive_players() if p.is_bot]
+    if alive_npcs:
+        speaker = random.choice(alive_npcs)
+        pers = speaker.npc_personality or "yuki"
+        other_alive = [p for p in game.get_alive_players() if p.user_id != speaker.user_id]
+        target = random.choice(other_alive) if other_alive else None
+        target_tag = target.mention() if target else "a suspect"
+        npc_comment = get_npc_discussion_text(speaker.mention(), pers, target_tag)
+        disc_text += f"\n\n💬 <b>Council Chatter:</b>\n{npc_comment}"
+
     await context.bot.send_message(
         chat_id=game.chat_id,
         text=disc_text,
@@ -723,10 +999,56 @@ async def begin_discussion_phase(game: MafiaGame, context: ContextTypes.DEFAULT_
     start_phase_timer(game, "discussion", DISCUSSION_DURATION, begin_voting_phase, context)
 
 
+def process_npc_voting(game: MafiaGame):
+    """
+    Submits deterministic rule-based day votes for all alive NPC players.
+    - Zero external AI APIs used. Pure Python state-based logic.
+    - NPC Detective: Votes for confirmed Mafia if known and alive.
+    - NPC Mafia: Votes against non-mafia suspects or follows majority.
+    - NPC Villager/Doctor: Votes against random living suspects or skips.
+    """
+    alive_players = game.get_alive_players()
+    alive_npcs = [p for p in alive_players if p.is_bot]
+    if not alive_npcs:
+        return
+
+    known_mafia_ids = [
+        target_id for target_id, allegiance in game.npc_detective_memory.items()
+        if allegiance == 'mafia' and any(p.user_id == target_id and p.is_alive for p in alive_players)
+    ]
+
+    for npc in alive_npcs:
+        if npc.user_id in game.day_votes:
+            continue
+
+        if npc.role == "detective" and known_mafia_ids:
+            game.day_votes[npc.user_id] = known_mafia_ids[0]
+            logger.info(f"[Mafia {game.game_id}] NPC Detective {npc.user_id} voted for confirmed Mafia {known_mafia_ids[0]}")
+        elif npc.role == "mafia":
+            non_mafia_alive = [p for p in alive_players if p.role != "mafia"]
+            if non_mafia_alive:
+                target = random.choice(non_mafia_alive)
+                game.day_votes[npc.user_id] = target.user_id
+                logger.info(f"[Mafia {game.game_id}] NPC Mafia {npc.user_id} voted for {target.user_id}")
+            else:
+                game.day_votes[npc.user_id] = -1
+        else:
+            candidates = [p for p in alive_players if p.user_id != npc.user_id]
+            if candidates and random.random() < 0.8:
+                target = random.choice(candidates)
+                game.day_votes[npc.user_id] = target.user_id
+                logger.info(f"[Mafia {game.game_id}] NPC {npc.user_id} ({npc.role}) voted for {target.user_id}")
+            else:
+                game.day_votes[npc.user_id] = -1
+                logger.info(f"[Mafia {game.game_id}] NPC {npc.user_id} ({npc.role}) voted to skip")
+
+
 async def begin_voting_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TYPE):
-    """Opens voting phase with inline buttons for alive citizens."""
+    """Opens voting phase with inline buttons for alive citizens and casts NPC votes."""
     game.status = "voting"
     game.day_votes.clear()
+
+    process_npc_voting(game)
 
     alive = game.get_alive_players()
     vote_announcement = get_voting_start_text(
@@ -766,14 +1088,7 @@ async def resolve_voting_phase(game: MafiaGame, context: ContextTypes.DEFAULT_TY
     for inact_p in inactive_eliminated:
         if inact_p.is_alive:
             inact_p.is_alive = False
-            try:
-                await context.bot.send_message(
-                    chat_id=inact_p.user_id,
-                    text=get_farewell_dm_text(),
-                    parse_mode="HTML"
-                )
-            except Exception:
-                pass
+            await announce_inactivity_elimination(inact_p, game, context)
 
     # 2. Count votes from players who submitted valid votes and are alive
     valid_votes = {
@@ -1360,28 +1675,197 @@ async def mafia_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             return
 
         if len(game.players) < MIN_PLAYERS:
-            await query.answer(f"Need at least {MIN_PLAYERS} players! Currently: {len(game.players)}", show_alert=True)
+            await query.answer("Insufficient players! Choose NPC options below.", show_alert=False)
+            prompt_txt = (
+                f"🎭 <b>Insufficient Players!</b>\n\n"
+                f"Currently joined: <b>{len(game.players)}/{MIN_PLAYERS}</b> required citizens.\n"
+                "Would you like to add NPC players to start this game?"
+            )
+            try:
+                await query.message.reply_html(
+                    prompt_txt,
+                    reply_markup=build_insufficient_npc_keyboard(game.game_id, len(game.players))
+                )
+            except Exception:
+                pass
+            return
+
+        if not game.npc_configured:
+            await query.answer()
+            prompt_txt = "🎭 <b>Would you like to add NPC players to this game?</b>"
+            try:
+                await query.message.reply_html(
+                    prompt_txt,
+                    reply_markup=build_npc_prompt_keyboard(game.game_id)
+                )
+            except Exception:
+                pass
             return
 
         await query.answer("Starting Mafia game... 🌙")
         await start_mafia_game(game, context)
         return
 
+    # NPC Menu / Callbacks
+    if action == "mafia_npc_menu":
+        from admin import is_target_admin
+        is_admin_user = await is_target_admin(game.chat_id, user.id, context)
+        if user.id != game.host_id and not is_admin_user:
+            await query.answer("Only the game host or group admin can configure NPCs! 🌸", show_alert=True)
+            return
+        await query.answer()
+        cur_cnt = len(game.players)
+        if cur_cnt < MIN_PLAYERS:
+            kb = build_insufficient_npc_keyboard(game.game_id, cur_cnt)
+        else:
+            kb = build_npc_config_keyboard(game.game_id, cur_cnt)
+        try:
+            await query.message.reply_html("🎭 <b>NPC Player Configuration</b>\nChoose an option:", reply_markup=kb)
+        except Exception:
+            pass
+        return
+
+    if action == "mafia_npc_opt":
+        # parts: mafia_npc_opt:<game_id>:yes or mafia_npc_opt:<game_id>:no
+        real_game_id = parts[1] if len(parts) > 1 else game_id
+        opt = parts[2] if len(parts) > 2 else "no"
+        from admin import is_target_admin
+        is_admin_user = await is_target_admin(game.chat_id, user.id, context)
+        if user.id != game.host_id and not is_admin_user:
+            await query.answer("Only the game host or group admin can configure NPCs! 🌸", show_alert=True)
+            return
+
+        if opt == "no":
+            game.npc_configured = True
+            await query.answer("NPCs disabled. Starting game! 🌸")
+            if len(game.players) >= MIN_PLAYERS:
+                await start_mafia_game(game, context)
+            else:
+                await query.message.reply_html(f"Need at least {MIN_PLAYERS} players to start without NPCs!")
+            return
+        else:
+            game.npc_configured = True
+            await query.answer("Opening NPC options...")
+            cur_cnt = len(game.players)
+            cfg_kb = build_npc_config_keyboard(game.game_id, cur_cnt)
+            try:
+                await query.edit_message_text(
+                    f"🎭 <b>NPC Player Configuration</b>\n\nCurrent citizens: <b>{cur_cnt}/{MAX_PLAYERS}</b>\n"
+                    "Select how many NPCs to add to the council:",
+                    parse_mode="HTML",
+                    reply_markup=cfg_kb
+                )
+            except Exception:
+                pass
+            return
+
+    if action == "mafia_npc_add":
+        # parts: mafia_npc_add:<game_id>:<count>
+        from admin import is_target_admin
+        is_admin_user = await is_target_admin(game.chat_id, user.id, context)
+        if user.id != game.host_id and not is_admin_user:
+            await query.answer("Only the game host or group admin can configure NPCs! 🌸", show_alert=True)
+            return
+
+        try:
+            count_to_add = int(parts[2])
+        except (ValueError, IndexError):
+            count_to_add = 0
+
+        added = game.add_npcs(count_to_add)
+        game.npc_configured = True
+        total = len(game.players)
+        await query.answer(f"Added {added} NPC(s)! Total: {total}/{MAX_PLAYERS}")
+        try:
+            await query.message.reply_html(
+                f"🤖 <b>Added {added} NPC citizen(s) to the council!</b>\n"
+                f"Total Citizens: <b>{total}/{MAX_PLAYERS}</b>\n\n"
+                f"Press <b>▶️ Start Game</b> when ready!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("▶️ Start Game Now", callback_data=f"mafia_npc_start_now:{game.game_id}")]
+                ])
+            )
+        except Exception:
+            pass
+        return
+
+    if action == "mafia_npc_custom_input":
+        from admin import is_target_admin
+        is_admin_user = await is_target_admin(game.chat_id, user.id, context)
+        if user.id != game.host_id and not is_admin_user:
+            await query.answer("Only the game host or group admin can configure NPCs! 🌸", show_alert=True)
+            return
+
+        cur_cnt = len(game.players)
+        max_can_add = MAX_PLAYERS - cur_cnt
+        await query.answer()
+        count_btns = []
+        row = []
+        for n in range(1, min(max_can_add + 1, 12)):
+            row.append(InlineKeyboardButton(f"+{n}", callback_data=f"mafia_npc_add:{game.game_id}:{n}"))
+            if len(row) == 4:
+                count_btns.append(row)
+                row = []
+        if row:
+            count_btns.append(row)
+
+        try:
+            await query.message.reply_html(
+                f"🔢 <b>Select Custom NPC Count:</b>\n"
+                f"Current: {cur_cnt} players. You can add up to {max_can_add} NPCs.",
+                reply_markup=InlineKeyboardMarkup(count_btns)
+            )
+        except Exception:
+            pass
+        return
+
+    if action == "mafia_npc_start_now":
+        from admin import is_target_admin
+        is_admin_user = await is_target_admin(game.chat_id, user.id, context)
+        if user.id != game.host_id and not is_admin_user:
+            await query.answer("Only the game host or group admin can start the game! 🌸", show_alert=True)
+            return
+
+        if len(game.players) < MIN_PLAYERS:
+            await query.answer(f"Need at least {MIN_PLAYERS} players! Currently: {len(game.players)}", show_alert=True)
+            return
+
+        game.npc_configured = True
+        await query.answer("Starting Mafia game with NPCs! 🌙")
+        await start_mafia_game(game, context)
+        return
+
     # 5. Day Vote
     if action == "mafia_vote":
         if game.status != "voting":
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected vote callback from user {user.id}: "
+                f"game phase is '{game.status}', expected 'voting'"
+            )
             await query.answer("Voting is not open right now!", show_alert=True)
             return
 
-        if user.id not in game.players or not game.players[user.id].is_alive:
+        if user.id not in game.players:
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected vote callback from user {user.id}: "
+                f"user not found in game"
+            )
+            await query.answer("Unauthorized action.", show_alert=True)
+            return
+
+        if not game.players[user.id].is_alive:
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected vote callback from user {user.id}: "
+                f"player is dead"
+            )
             await query.answer("Only living players can vote!", show_alert=True)
             return
 
         target_str = parts[2] if len(parts) > 2 else ""
         if target_str == "skip":
             game.day_votes[user.id] = -1
+            logger.info(f"[Mafia {game.game_id}] Player {user.id} ({game.players[user.id].name}) voted to SKIP")
             await query.answer("You voted to skip lynch!")
-            # Check suspicion / vote tally
             total_voted = len(game.day_votes)
             alive_cnt = game.get_alive_count()
             if total_voted >= alive_cnt:
@@ -1391,15 +1875,26 @@ async def mafia_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         try:
             target_id = int(target_str)
         except ValueError:
-            await query.answer("Invalid vote target.")
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected vote callback from user {user.id}: "
+                f"invalid target value '{target_str}'"
+            )
+            await query.answer("Invalid vote target.", show_alert=True)
             return
 
         if target_id not in game.players or not game.players[target_id].is_alive:
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected vote callback from user {user.id}: "
+                f"target {target_id} not found or not alive"
+            )
             await query.answer("Target player is no longer alive!", show_alert=True)
             return
 
         game.day_votes[user.id] = target_id
         target_player = game.players[target_id]
+        logger.info(
+            f"[Mafia {game.game_id}] Player {user.id} ({game.players[user.id].name}) voted for {target_id} ({target_player.name})"
+        )
         await query.answer(f"Voted for {target_player.name}!")
 
         # Count votes for target
@@ -1419,27 +1914,58 @@ async def mafia_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     # 6. Night Action: Mafia Kill
     if action == "mafia_night_mkill":
         if game.status != "night":
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected mkill callback from user {user.id}: "
+                f"game phase is '{game.status}', expected 'night'"
+            )
             await query.answer("Night phase has ended!", show_alert=True)
             return
 
         player = game.players.get(user.id)
-        if not player or player.role != "mafia" or not player.is_alive:
+        if not player:
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected mkill callback from user {user.id}: "
+                f"user not in game"
+            )
+            await query.answer("Unauthorized action.", show_alert=True)
+            return
+        if player.role != "mafia":
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected mkill callback from user {user.id}: "
+                f"role is '{player.role}', expected 'mafia'"
+            )
+            await query.answer("Unauthorized action.", show_alert=True)
+            return
+        if not player.is_alive:
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected mkill callback from user {user.id}: "
+                f"mafia player is dead"
+            )
             await query.answer("Unauthorized action.", show_alert=True)
             return
 
         try:
             target_id = int(parts[2])
         except (ValueError, IndexError):
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected mkill from user {user.id}: invalid payload {parts}"
+            )
             await query.answer("Invalid target.", show_alert=True)
             return
 
         target_player = game.players.get(target_id)
         if not target_player or not target_player.is_alive:
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected mkill from user {user.id}: target {target_id} not alive"
+            )
             await query.answer("Target player is no longer alive!", show_alert=True)
             return
 
         game.night_mafia_targets[user.id] = target_id
         target_name = target_player.name
+        logger.info(
+            f"[Mafia {game.game_id}] Mafia player {user.id} selected target {target_id} ({target_name})"
+        )
         await query.answer(f"Target selected: {target_name} 🎯")
         try:
             await query.edit_message_text(f"🔴 Target confirmed: <b>{html.escape(target_name)}</b>. Awaiting dawn...", parse_mode="HTML")
@@ -1453,30 +1979,64 @@ async def mafia_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     # 7. Night Action: Detective Check
     if action == "mafia_night_dcheck":
         if game.status != "night":
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected dcheck callback from user {user.id}: "
+                f"game phase is '{game.status}', expected 'night'"
+            )
             await query.answer("Night phase has ended!", show_alert=True)
             return
 
         player = game.players.get(user.id)
-        if not player or player.role != "detective" or not player.is_alive:
+        if not player:
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected dcheck callback from user {user.id}: "
+                f"user not in game"
+            )
+            await query.answer("Unauthorized action.", show_alert=True)
+            return
+        if player.role != "detective":
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected dcheck callback from user {user.id}: "
+                f"role is '{player.role}', expected 'detective'"
+            )
+            await query.answer("Unauthorized action.", show_alert=True)
+            return
+        if not player.is_alive:
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected dcheck callback from user {user.id}: "
+                f"detective is dead"
+            )
             await query.answer("Unauthorized action.", show_alert=True)
             return
 
         try:
             target_id = int(parts[2])
         except (ValueError, IndexError):
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected dcheck from user {user.id}: invalid payload {parts}"
+            )
             await query.answer("Invalid target.", show_alert=True)
             return
 
         target_player = game.players.get(target_id)
         if not target_player or not target_player.is_alive:
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected dcheck from user {user.id}: target {target_id} not alive"
+            )
             await query.answer("Target player is no longer alive!", show_alert=True)
             return
 
         if target_id == user.id:
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected dcheck from user {user.id}: self-investigation attempted"
+            )
             await query.answer("You cannot investigate yourself!", show_alert=True)
             return
 
         game.night_detective_target = target_id
+        logger.info(
+            f"[Mafia {game.game_id}] Detective {user.id} checked target {target_id} ({target_player.name})"
+        )
 
         is_threat = (target_player.role == "mafia")
         res_text = (
@@ -1497,31 +2057,65 @@ async def mafia_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     # 8. Night Action: Doctor Heal
     if action == "mafia_night_dheal":
         if game.status != "night":
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected dheal callback from user {user.id}: "
+                f"game phase is '{game.status}', expected 'night'"
+            )
             await query.answer("Night phase has ended!", show_alert=True)
             return
 
         player = game.players.get(user.id)
-        if not player or player.role != "doctor" or not player.is_alive:
+        if not player:
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected dheal callback from user {user.id}: "
+                f"user not in game"
+            )
+            await query.answer("Unauthorized action.", show_alert=True)
+            return
+        if player.role != "doctor":
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected dheal callback from user {user.id}: "
+                f"role is '{player.role}', expected 'doctor'"
+            )
+            await query.answer("Unauthorized action.", show_alert=True)
+            return
+        if not player.is_alive:
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected dheal callback from user {user.id}: "
+                f"doctor is dead"
+            )
             await query.answer("Unauthorized action.", show_alert=True)
             return
 
         try:
             target_id = int(parts[2])
         except (ValueError, IndexError):
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected dheal from user {user.id}: invalid payload {parts}"
+            )
             await query.answer("Invalid target.", show_alert=True)
             return
 
         target_player = game.players.get(target_id)
         if not target_player or not target_player.is_alive:
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected dheal from user {user.id}: target {target_id} not alive"
+            )
             await query.answer("Target player is no longer alive!", show_alert=True)
             return
 
         if not DOCTOR_SELF_HEAL and target_id == user.id:
+            logger.warning(
+                f"[Mafia {game.game_id}] Rejected dheal from user {user.id}: self-heal not allowed"
+            )
             await query.answer("You cannot protect yourself!", show_alert=True)
             return
 
         game.night_doctor_target = target_id
         target_name = target_player.name
+        logger.info(
+            f"[Mafia {game.game_id}] Doctor {user.id} protected target {target_id} ({target_name})"
+        )
 
         await query.answer(f"Protection granted to {target_name}!")
         try:

@@ -31,7 +31,7 @@ MAX_LENGTHS = {
     'setting_value': 4000,
 }
 
-VALID_FILTER_TYPES = {'text', 'sticker', 'voice', 'link', 'document', 'pdf'}
+VALID_FILTER_TYPES = {'text', 'sticker', 'voice', 'link', 'document', 'pdf', 'photo', 'video'}
 
 _mongo_client = None
 _mongo_db = None
